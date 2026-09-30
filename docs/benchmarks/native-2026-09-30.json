@@ -1,0 +1,565 @@
+{
+  "date": "2026-09-30",
+  "platform": "Windows 10 Home 19045 x64",
+  "processor": "AMD Ryzen 7 9800X3D",
+  "logicalProcessors": 16,
+  "compiler": "MSVC 19.44, C++20, /O2 /GL /LTCG /MT",
+  "binaryBytes": 642560,
+  "binarySha256": "530DD9F8700E47C8B4D0C34D888C51BE1C7AE065CAE9C89B42B62EB81A900626",
+  "selfTest": {
+    "native": true,
+    "passed": true,
+    "checks": [
+      {
+        "name": "letter_next",
+        "passed": true
+      },
+      {
+        "name": "letter_wrap",
+        "passed": true
+      },
+      {
+        "name": "letter_case",
+        "passed": true
+      },
+      {
+        "name": "prefix",
+        "passed": true
+      },
+      {
+        "name": "missing_prefix",
+        "passed": true
+      },
+      {
+        "name": "empty_list",
+        "passed": true
+      },
+      {
+        "name": "letter_negative_start",
+        "passed": true
+      },
+      {
+        "name": "letter_large_start",
+        "passed": true
+      },
+      {
+        "name": "letter_blank_prefix",
+        "passed": true
+      },
+      {
+        "name": "letter_repeat_cycle",
+        "passed": true
+      },
+      {
+        "name": "filter_name",
+        "passed": true
+      },
+      {
+        "name": "filter_pid",
+        "passed": true
+      },
+      {
+        "name": "filter_publisher",
+        "passed": true
+      },
+      {
+        "name": "filter_description",
+        "passed": true
+      },
+      {
+        "name": "filter_missing",
+        "passed": true
+      },
+      {
+        "name": "filter_empty",
+        "passed": true
+      },
+      {
+        "name": "graph_left_boundary",
+        "passed": true
+      },
+      {
+        "name": "graph_interpolation",
+        "passed": true
+      },
+      {
+        "name": "graph_right_boundary",
+        "passed": true
+      },
+      {
+        "name": "graph_extends_current",
+        "passed": true
+      },
+      {
+        "name": "graph_rejects_bad_points",
+        "passed": true
+      },
+      {
+        "name": "graph_replaces_same_time",
+        "passed": true
+      },
+      {
+        "name": "graph_no_fabricated_history",
+        "passed": true
+      },
+      {
+        "name": "graph_invalid_duration",
+        "passed": true
+      },
+      {
+        "name": "graph_bounded_storage",
+        "passed": true
+      },
+      {
+        "name": "graph_monotonic_property",
+        "passed": true
+      },
+      {
+        "name": "graph_boundary_property",
+        "passed": true
+      },
+      {
+        "name": "native_process_snapshot",
+        "passed": true
+      },
+      {
+        "name": "native_memory",
+        "passed": true
+      },
+      {
+        "name": "native_cpu_bounds",
+        "passed": true
+      },
+      {
+        "name": "native_resources",
+        "passed": true
+      },
+      {
+        "name": "own_process_present",
+        "passed": true
+      },
+      {
+        "name": "owned_child_spawn",
+        "passed": true
+      },
+      {
+        "name": "owned_child_priority_idle",
+        "passed": true
+      },
+      {
+        "name": "owned_child_priority_restore",
+        "passed": true
+      },
+      {
+        "name": "owned_child_affinity",
+        "passed": true
+      },
+      {
+        "name": "owned_child_wait_chain",
+        "passed": true
+      },
+      {
+        "name": "stale_identity_refused",
+        "passed": true
+      },
+      {
+        "name": "owned_child_end",
+        "passed": true
+      }
+    ]
+  },
+  "components": {
+    "native": true,
+    "passed": true,
+    "filter1000": {
+      "count": 30,
+      "meanMilliseconds": 0.147503,
+      "p95Milliseconds": 0.2075
+    },
+    "navigation1000": {
+      "count": 30,
+      "meanMilliseconds": 0.0832733,
+      "p95Milliseconds": 0.132
+    },
+    "sort1000": {
+      "count": 30,
+      "meanMilliseconds": 0.08041,
+      "p95Milliseconds": 0.1183
+    },
+    "filter5000": {
+      "count": 30,
+      "meanMilliseconds": 0.73339,
+      "p95Milliseconds": 0.904
+    },
+    "navigation5000": {
+      "count": 30,
+      "meanMilliseconds": 0.435657,
+      "p95Milliseconds": 0.6917
+    },
+    "sort5000": {
+      "count": 30,
+      "meanMilliseconds": 0.56917,
+      "p95Milliseconds": 0.8153
+    },
+    "filter20000": {
+      "count": 30,
+      "meanMilliseconds": 3.28618,
+      "p95Milliseconds": 4.0719
+    },
+    "navigation20000": {
+      "count": 30,
+      "meanMilliseconds": 1.82712,
+      "p95Milliseconds": 2.8499
+    },
+    "sort20000": {
+      "count": 30,
+      "meanMilliseconds": 2.67083,
+      "p95Milliseconds": 3.4133
+    },
+    "graphPaint1000x600": {
+      "count": 100,
+      "meanMilliseconds": 3.90391,
+      "p95Milliseconds": 4.7475
+    },
+    "graphWindow": {
+      "count": 100,
+      "meanMilliseconds": 0.003122,
+      "p95Milliseconds": 0.0042
+    }
+  },
+  "sampler": {
+    "native": true,
+    "passed": true,
+    "sampler": {
+      "count": 30,
+      "meanMilliseconds": 15.8001,
+      "p95Milliseconds": 25.4393
+    }
+  },
+  "uiCases": [
+    {
+      "case": "all-tabs",
+      "passed": true,
+      "elapsedSeconds": 5.10819,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 4.58822,
+      "privateBytes": 16236544,
+      "firstSampleMilliseconds": 447.826,
+      "uiP95Milliseconds": 2.2458,
+      "queueP95Milliseconds": 0.2466,
+      "letterP95Milliseconds": 0.0515,
+      "iconsP95Milliseconds": 96.1917,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "interaction",
+      "passed": true,
+      "elapsedSeconds": 5.05133,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 4.02122,
+      "privateBytes": 16588800,
+      "firstSampleMilliseconds": 244.906,
+      "uiP95Milliseconds": 2.3573,
+      "queueP95Milliseconds": 0.2375,
+      "letterP95Milliseconds": 0.3333,
+      "iconsP95Milliseconds": 73.1735,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "idle",
+      "passed": true,
+      "elapsedSeconds": 5.04924,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 1.85672,
+      "privateBytes": 16412672,
+      "firstSampleMilliseconds": 233.994,
+      "uiP95Milliseconds": 1.3687,
+      "queueP95Milliseconds": 0.2461,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 76.415,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "high-speed",
+      "passed": true,
+      "elapsedSeconds": 5.05036,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 5.25953,
+      "privateBytes": 16859136,
+      "firstSampleMilliseconds": 304.303,
+      "uiP95Milliseconds": 2.0223,
+      "queueP95Milliseconds": 0.2322,
+      "letterP95Milliseconds": 0.0525,
+      "iconsP95Milliseconds": 90.3287,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "low-speed",
+      "passed": true,
+      "elapsedSeconds": 5.04734,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 1.85741,
+      "privateBytes": 15269888,
+      "firstSampleMilliseconds": 251.109,
+      "uiP95Milliseconds": 2.1198,
+      "queueP95Milliseconds": 0.2086,
+      "letterP95Milliseconds": 0.0548,
+      "iconsP95Milliseconds": 76.6699,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "paused",
+      "passed": true,
+      "elapsedSeconds": 5.0358,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 0.310278,
+      "privateBytes": 14962688,
+      "firstSampleMilliseconds": 230.067,
+      "uiP95Milliseconds": 0,
+      "queueP95Milliseconds": 0.2308,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 74.9311,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "minimized",
+      "passed": true,
+      "elapsedSeconds": 5.04844,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 0.619004,
+      "privateBytes": 15331328,
+      "firstSampleMilliseconds": 247.317,
+      "uiP95Milliseconds": 2.0568,
+      "queueP95Milliseconds": 0.2163,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 74.7969,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "tab-0",
+      "passed": true,
+      "elapsedSeconds": 5.04207,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 7.12752,
+      "privateBytes": 16695296,
+      "firstSampleMilliseconds": 261.757,
+      "uiP95Milliseconds": 2.4838,
+      "queueP95Milliseconds": 0.1951,
+      "letterP95Milliseconds": 0.0868,
+      "iconsP95Milliseconds": 72.1163,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "tab-1",
+      "passed": true,
+      "elapsedSeconds": 5.0562,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 5.25345,
+      "privateBytes": 16465920,
+      "firstSampleMilliseconds": 237.613,
+      "uiP95Milliseconds": 0.6561,
+      "queueP95Milliseconds": 0.4033,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 82.2562,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "tab-2",
+      "passed": true,
+      "elapsedSeconds": 5.05896,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 3.7063,
+      "privateBytes": 15187968,
+      "firstSampleMilliseconds": 227.914,
+      "uiP95Milliseconds": 1.8435,
+      "queueP95Milliseconds": 0.2517,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 73.6562,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "tab-3",
+      "passed": true,
+      "elapsedSeconds": 5.03287,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 2.48367,
+      "privateBytes": 15101952,
+      "firstSampleMilliseconds": 227.675,
+      "uiP95Milliseconds": 3.1215,
+      "queueP95Milliseconds": 0.3514,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 74.5904,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "tab-4",
+      "passed": true,
+      "elapsedSeconds": 5.02954,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 2.17465,
+      "privateBytes": 16146432,
+      "firstSampleMilliseconds": 252.394,
+      "uiP95Milliseconds": 1.2044,
+      "queueP95Milliseconds": 0.2577,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 76.7582,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "tab-5",
+      "passed": true,
+      "elapsedSeconds": 5.04129,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 4.33916,
+      "privateBytes": 16617472,
+      "firstSampleMilliseconds": 230.212,
+      "uiP95Milliseconds": 2.3576,
+      "queueP95Milliseconds": 0.2549,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 74.9596,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    },
+    {
+      "case": "tab-6",
+      "passed": true,
+      "elapsedSeconds": 5.06108,
+      "warmupSeconds": 2,
+      "cpuPercentOneCore": 3.08728,
+      "privateBytes": 16478208,
+      "firstSampleMilliseconds": 226.48,
+      "uiP95Milliseconds": 1.8074,
+      "queueP95Milliseconds": 2.5776,
+      "letterP95Milliseconds": 0,
+      "iconsP95Milliseconds": 75.7065,
+      "handleDelta": 1,
+      "gdiDelta": 0,
+      "userDelta": 0
+    }
+  ],
+  "soak": {
+    "native": true,
+    "passed": true,
+    "elapsedSeconds": 120.096,
+    "firstSampleMilliseconds": 346.656,
+    "processCpuPercentOneCore": 3.61689,
+    "privateBytes": 16715776,
+    "handles": 284,
+    "updates": 137,
+    "exercises": 1278,
+    "keyboardPassed": true,
+    "warmupSeconds": 20,
+    "handleDelta": 2,
+    "gdiDelta": 0,
+    "userDelta": 0,
+    "sampler": {
+      "count": 117,
+      "meanMilliseconds": 12.3773,
+      "p95Milliseconds": 16.7684,
+      "maxMilliseconds": 32.7626
+    },
+    "messageQueue": {
+      "count": 2080,
+      "meanMilliseconds": 0.189483,
+      "p95Milliseconds": 0.2527,
+      "maxMilliseconds": 14.9588
+    },
+    "uiUpdate": {
+      "count": 1491,
+      "meanMilliseconds": 1.09049,
+      "p95Milliseconds": 2.4382,
+      "maxMilliseconds": 13.7075
+    },
+    "graphPaint": {
+      "count": 158,
+      "meanMilliseconds": 2.70583,
+      "p95Milliseconds": 3.4979,
+      "maxMilliseconds": 3.9544
+    },
+    "search": {
+      "count": 314,
+      "meanMilliseconds": 0.958031,
+      "p95Milliseconds": 1.5971,
+      "maxMilliseconds": 3.7327
+    },
+    "letterNavigation": {
+      "count": 314,
+      "meanMilliseconds": 0.0487436,
+      "p95Milliseconds": 0.0905,
+      "maxMilliseconds": 0.7843
+    },
+    "iconRequestToExtraction": {
+      "count": 267,
+      "meanMilliseconds": 33.1086,
+      "p95Milliseconds": 78.9539,
+      "maxMilliseconds": 90.0937
+    },
+    "iconRequestToDisplay": {
+      "count": 413,
+      "meanMilliseconds": 33.9883,
+      "p95Milliseconds": 85.9012,
+      "maxMilliseconds": 90.101
+    },
+    "processInventory": {
+      "count": 117,
+      "meanMilliseconds": 6.44402,
+      "p95Milliseconds": 7.8433,
+      "maxMilliseconds": 8.7653
+    },
+    "cpuAndMemory": {
+      "count": 117,
+      "meanMilliseconds": 3.46836,
+      "p95Milliseconds": 6.8609,
+      "maxMilliseconds": 18.7794
+    },
+    "pdhAndDisk": {
+      "count": 117,
+      "meanMilliseconds": 0.63924,
+      "p95Milliseconds": 0.8772,
+      "maxMilliseconds": 1.2213
+    },
+    "network": {
+      "count": 117,
+      "meanMilliseconds": 0.468443,
+      "p95Milliseconds": 0.6068,
+      "maxMilliseconds": 1.0337
+    },
+    "gpuAggregation": {
+      "count": 117,
+      "meanMilliseconds": 0.771079,
+      "p95Milliseconds": 1.2075,
+      "maxMilliseconds": 1.4731
+    },
+    "servicesSessionsStartup": {
+      "count": 117,
+      "meanMilliseconds": 0.5216,
+      "p95Milliseconds": 2.2912,
+      "maxMilliseconds": 3.1227
+    }
+  }
+}

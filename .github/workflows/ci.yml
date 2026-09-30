@@ -11,9 +11,6 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
-        with:
-          dotnet-version: 8.0.425
       - name: Build and verify published application
         shell: pwsh
         run: ./build.ps1
@@ -22,6 +19,15 @@ jobs:
         run: |
           $test = Start-Process artifacts/app/TaskManager.exe -ArgumentList '--component-benchmark --output artifacts/ci-components.json' -WindowStyle Hidden -Wait -PassThru
           if ($test.ExitCode -ne 0) { throw 'Component benchmark failed.' }
+      - name: Exercise native UI headlessly
+        shell: pwsh
+        run: ./benchmark.ps1 -Seconds 5
+      - name: Upload standalone native executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-task-manager
+          path: artifacts/app/TaskManager.exe
+          if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -29,3 +35,4 @@ jobs:
           path: |
             artifacts/release-self-test.json
             artifacts/ci-components.json
+            artifacts/benchmark-suite/
