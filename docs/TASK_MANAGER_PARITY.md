@@ -1,4 +1,6 @@
-# Task Manager usability coverage
+# Archived Managed Task Manager Coverage
+
+This matrix applies to the managed source retained as a reference. It is not the feature matrix for the default native C++ executable. See `NATIVE_PARITY.md` for current native coverage and migration gaps.
 
 Reviewed September 30, 2026. The visual target is Windows 10 Task Manager; selected modern conveniences are included without claiming full Windows 11 parity. Microsoft's November 10, 2022 announcement documents executable/PID/publisher filtering, cross-page filtering, Alt+F, themes, and Efficiency mode confirmation preferences. Implementation and tests determine status below.
 

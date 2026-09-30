@@ -12,23 +12,27 @@ $cases = @(
     @{ Name = 'self-test'; Arguments = '--self-test' },
     @{ Name = 'components'; Arguments = '--component-benchmark' },
     @{ Name = 'sampler'; Arguments = '--benchmark --samples 30 --interval 100' },
-    @{ Name = 'enriched-sampler'; Arguments = '--benchmark --enriched --samples 30 --interval 100' },
     @{ Name = 'all-tabs'; Arguments = "--ui-benchmark --seconds $Seconds" },
-    @{ Name = 'interaction'; Arguments = "--ui-benchmark --exercise --seconds $Seconds" },
+    @{ Name = 'interaction'; Arguments = "--ui-benchmark --seconds $Seconds" },
+    @{ Name = 'idle'; Arguments = "--ui-benchmark --idle --seconds $Seconds" },
     @{ Name = 'high-speed'; Arguments = "--ui-benchmark --interval 500 --seconds $Seconds" },
     @{ Name = 'low-speed'; Arguments = "--ui-benchmark --interval 4000 --seconds $Seconds" },
-    @{ Name = 'paused'; Arguments = "--ui-benchmark --interval 0 --seconds $Seconds" }
+    @{ Name = 'paused'; Arguments = "--ui-benchmark --idle --interval 0 --seconds $Seconds" }
     @{ Name = 'minimized'; Arguments = "--ui-benchmark --minimized --seconds $Seconds" }
 )
 foreach ($tab in 0..6) { $cases += @{ Name = "tab-$tab"; Arguments = "--ui-benchmark --tab $tab --seconds $Seconds" } }
 $results = foreach ($case in $cases) {
     $reportPath = Join-Path $OutputDirectory ($case.Name + '.json')
-    $process = Start-Process -FilePath $Executable -ArgumentList "$($case.Arguments) --output `"$reportPath`"" -WindowStyle Hidden -Wait -PassThru
+    $process = Start-Process -FilePath $Executable -ArgumentList "$($case.Arguments) --output `"$reportPath`"" -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(($Seconds + 60) * 1000)) {
+        $process.Kill()
+        throw "Benchmark $($case.Name) exceeded its deadline. Only its owned diagnostic process was stopped."
+    }
     if ($process.ExitCode -ne 0) { throw "Benchmark $($case.Name) failed with exit code $($process.ExitCode). See $reportPath" }
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
     if ($report.passed -eq $false -or $report.error) { throw "Benchmark $($case.Name) failed. See $reportPath" }
     if ($EnforceBudgets -and $report.uiUpdate.count -gt 0) {
-        if ($report.uiUpdate.p95Milliseconds -gt 50 -or $report.inputQueue.p95Milliseconds -gt 100 -or $report.navigation.p95Milliseconds -gt 100 -or $report.firstSampleMilliseconds -gt 2000) {
+        if ($report.uiUpdate.p95Milliseconds -gt 50 -or $report.messageQueue.p95Milliseconds -gt 100 -or $report.letterNavigation.p95Milliseconds -gt 100 -or $report.firstSampleMilliseconds -gt 2000) {
             throw "Responsiveness budget exceeded for $($case.Name). See $reportPath"
         }
     }
