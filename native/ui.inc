@@ -128,7 +128,7 @@ void Application::consume() {
 void Application::paint(HDC dc, RECT bounds) {
   const auto started = Clock::now(); FillRect(dc, &bounds, GetSysColorBrush(COLOR_WINDOW));
   if (!current || current->resources.empty()) return;
-  const auto& resource = current->resources[size_t(selectedResource)]; SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(30, 30, 30)); SelectObject(dc, titleFont);
+  const auto& resource = current->resources[size_t(std::clamp(selectedResource, 0, int(current->resources.size()) - 1))]; SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(30, 30, 30)); SelectObject(dc, titleFont);
   RECT title{scale(20), scale(20), bounds.right - scale(20), scale(70)}; DrawTextW(dc, resource.name.c_str(), -1, &title, DT_LEFT | DT_SINGLELINE);
   SelectObject(dc, font); RECT detail{scale(20), scale(73), bounds.right - scale(20), scale(108)}; DrawTextW(dc, resource.detail.c_str(), -1, &detail, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   const double now = graphTime; RECT area{scale(20), scale(122), bounds.right - scale(20), std::max(LONG(scale(180)), bounds.bottom - scale(150))};

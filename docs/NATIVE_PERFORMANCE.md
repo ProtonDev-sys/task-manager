@@ -6,7 +6,7 @@ Measured September 30, 2026. This documents the C++ executable, not the archived
 
 - Windows 10 Home, build 19045, x64; Ryzen 7 9800X3D, 8 cores / 16 logical processors.
 - MSVC 19.44; C++20 Release `/O2 /GL /LTCG`, static CRT `/MT`, warnings-as-errors.
-- Standalone executable: 642,560 bytes. SHA-256: `530DD9F8700E47C8B4D0C34D888C51BE1C7AE065CAE9C89B42B62EB81A900626`.
+- Standalone executable: 642,560 bytes. SHA-256: `5DAA8FDBDB32ACA139C0CA51F94363C84B2C9764C36770726C894AA6ACE4F113`.
 - `dumpbin /headers` confirms AMD64 and a zero COM descriptor; `/dependents` lists only Windows system DLLs. No CLR or external VC runtime DLL is imported.
 - Normal developer desktop workload, not a dedicated isolated benchmarking machine. Runs were serial. Results are host-specific observations, not guarantees or a controlled managed/native speedup comparison.
 
@@ -22,20 +22,20 @@ Each UI case has a two-second warmup followed by five measured seconds. CPU is p
 
 | Case | CPU % one core | Private MiB | UI update p95 ms | Queue p95 ms | Icon display p95 ms |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| all-tabs | 4.588 | 15.484 | 2.246 | 0.247 | 96.192 |
-| interaction | 4.021 | 15.820 | 2.357 | 0.238 | 73.174 |
-| idle | 1.857 | 15.652 | 1.369 | 0.246 | 76.415 |
-| high-speed | 5.260 | 16.078 | 2.022 | 0.232 | 90.329 |
-| low-speed | 1.857 | 14.563 | 2.120 | 0.209 | 76.670 |
-| paused | 0.310 | 14.270 | 0.000 | 0.231 | 74.931 |
-| minimized | 0.619 | 14.621 | 2.057 | 0.216 | 74.797 |
-| tab-0 | 7.128 | 15.922 | 2.484 | 0.195 | 72.116 |
-| tab-1 | 5.253 | 15.703 | 0.656 | 0.403 | 82.256 |
-| tab-2 | 3.706 | 14.484 | 1.844 | 0.252 | 73.656 |
-| tab-3 | 2.484 | 14.402 | 3.122 | 0.351 | 74.590 |
-| tab-4 | 2.175 | 15.398 | 1.204 | 0.258 | 76.758 |
-| tab-5 | 4.339 | 15.848 | 2.358 | 0.255 | 74.960 |
-| tab-6 | 3.087 | 15.715 | 1.807 | 2.578 | 75.707 |
+| all-tabs | 3.415 | 14.711 | 2.175 | 0.212 | 77.364 |
+| interaction | 4.957 | 15.691 | 4.126 | 0.383 | 76.874 |
+| idle | 1.858 | 14.555 | 1.610 | 0.224 | 74.333 |
+| high-speed | 4.032 | 15.535 | 2.024 | 0.203 | 79.691 |
+| low-speed | 1.865 | 14.293 | 2.576 | 0.260 | 81.113 |
+| paused | 0.310 | 14.090 | 0.000 | 0.235 | 91.720 |
+| minimized | 0.311 | 15.348 | 1.471 | 0.207 | 74.790 |
+| tab-0 | 5.892 | 14.625 | 2.739 | 0.319 | 81.436 |
+| tab-1 | 4.624 | 15.527 | 0.530 | 0.246 | 70.768 |
+| tab-2 | 3.714 | 14.523 | 2.665 | 0.284 | 75.477 |
+| tab-3 | 2.770 | 15.547 | 1.603 | 0.208 | 206.914 |
+| tab-4 | 2.782 | 14.551 | 0.767 | 0.250 | 76.415 |
+| tab-5 | 3.417 | 15.660 | 2.319 | 0.189 | 73.227 |
+| tab-6 | 2.791 | 15.797 | 1.730 | 0.208 | 79.455 |
 
 All measured table updates satisfy the local 50 ms p95 budget; queue and letter handlers satisfy 100 ms p95, and first-sample time satisfies 2 seconds. A zero metric with zero observations means no work occurred, not instantaneous work. Paused mode retains the initial snapshot and performs no measured sampling. Minimized mode tests its throttled sampler; it does not claim to measure a visible minimized window's compositor.
 
@@ -43,13 +43,13 @@ All measured table updates satisfy the local 50 ms p95 budget; queue and letter 
 
 A separate run uses `--ui-benchmark --seconds 120 --warmup 20`. It exercises view changes, search, letter cycling, native sampling and offscreen graph painting. The final performance PNG was visually inspected after the 60-second rolling boundary: the line/fill meet the left edge without the previous cutoff.
 
-- First native sample: 346.656 ms.
-- UI updates: p95 2.438 ms; max 13.708 ms.
-- Message dispatch: p95 0.253 ms; max 14.959 ms.
-- Letter navigation: p95 0.091 ms, 314 observations.
-- Icon request-to-display: p95 85.901 ms; max 90.101 ms.
-- Graph painting: p95 3.498 ms.
-- Process CPU: 3.617% of one core; private memory: 15.941 MiB.
+- First native sample: 225.309 ms.
+- UI updates: p95 2.514 ms; max 14.407 ms.
+- Message dispatch: p95 0.253 ms; max 15.807 ms.
+- Letter navigation: p95 0.193 ms, 314 observations.
+- Icon request-to-display: p95 75.116 ms; max 78.790 ms.
+- Graph painting: p95 3.655 ms.
+- Process CPU: 3.801% of one core; private memory: 15.930 MiB.
 
 The process handle count increases by two during the measured soak. GDI and USER object counts show zero growth. This bounded observation is **not proof that every handle/resource leak is impossible**, and longer lifecycle tests remain valuable.
 
@@ -59,16 +59,16 @@ These measurements are from the sustained run. PDH collection also collects GPU 
 
 | Stage | Mean ms | p95 ms |
 | --- | ---: | ---: |
-| processInventory | 6.444 | 7.843 |
-| cpuAndMemory | 3.468 | 6.861 |
-| pdhAndDisk | 0.639 | 0.877 |
-| network | 0.468 | 0.607 |
-| gpuAggregation | 0.771 | 1.208 |
-| servicesSessionsStartup | 0.522 | 2.291 |
+| processInventory | 6.673 | 8.030 |
+| cpuAndMemory | 5.696 | 7.906 |
+| pdhAndDisk | 0.640 | 0.823 |
+| network | 0.472 | 0.596 |
+| gpuAggregation | 0.722 | 1.103 |
+| servicesSessionsStartup | 0.520 | 2.421 |
 
 ## Component Workloads
 
-20,000-row p95: filtering 4.072 ms, prefix navigation 2.850 ms, name sorting 3.413 ms. 1000 x 600 graph painting p95: 4.748 ms. History-window interpolation p95: 0.004 ms.
+20,000-row p95: filtering 3.725 ms, prefix navigation 2.319 ms, name sorting 2.900 ms. 1000 x 600 graph painting p95: 4.991 ms. History-window interpolation p95: 0.004 ms.
 
 Component loops use 5 warmup iterations and 30 measured iterations for 1k/5k/20k synthetic process names, filtering, prefix navigation and name sorting. Graph work uses 5 warmups and 100 measured iterations. Synthetic sorting measures name sorting; live UI cases also exercise resource sorting. These figures do not include physical keyboard devices or OS scheduling before a message is posted.
 
