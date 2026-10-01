@@ -1,7 +1,4 @@
-**/bin/
-**/obj/
+artifacts/
 .vs/
 .idea/
-artifacts/
 *.user
-*.suo

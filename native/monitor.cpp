@@ -1,24 +1,43 @@
 #include "core.hpp"
 #include <ws2ipdef.h>
+#include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
-#include <dxgi.h>
 #include <shlobj.h>
-#include <iomanip>
+#include <sddl.h>
 
 namespace taskmgr {
-std::wstring number(double value, int precision) { std::wostringstream stream; stream << std::fixed << std::setprecision(precision) << value; return stream.str(); }
+std::wstring hexadecimal(uint64_t value) { wchar_t text[17]{}; swprintf_s(text, L"%llx", static_cast<unsigned long long>(value)); return text; }
+std::vector<std::wstring_view> splitFields(std::wstring_view text, wchar_t delimiter) {
+  std::vector<std::wstring_view> fields;
+  while (!text.empty()) { const size_t end = text.find(delimiter); fields.push_back(text.substr(0, end)); if (end == text.npos) break; text.remove_prefix(end + 1); }
+  return fields;
+}
+std::wstring number(double value, int precision) { wchar_t text[384]{}; swprintf_s(text, L"%.*f", std::clamp(precision, 0, 9), value); return text; }
+std::wstring grouped(double value, int precision) {
+  auto text = number(value, precision); const auto point = text.find(L'.'); auto end = point == text.npos ? text.size() : point; const size_t start = text[0] == L'-' ? 1 : 0;
+  while (end > start + 3) { end -= 3; text.insert(end, 1, L','); }
+  return text;
+}
 std::wstring bytes(double value) {
   static const wchar_t* units[] = {L"B", L"KB", L"MB", L"GB", L"TB"};
   unsigned unit = 0;
   while (value >= 1024 && unit < 4) { value /= 1024; ++unit; }
   return number(value, unit == 0 ? 0 : 1) + L" " + units[unit];
 }
+std::wstring bits(double value) {
+  value *= 8; if (value < 1000) return number(value, 0) + L" bps";
+  static const wchar_t* units[] = {L"Kbps", L"Mbps", L"Gbps"}; unsigned unit = 0; value /= 1000;
+  while (value >= 1000 && unit < 2) { value /= 1000; ++unit; }
+  return number(value, 1) + L" " + units[unit];
+}
+std::wstring duration(uint64_t seconds) { wchar_t text[64]{}; swprintf_s(text, L"%llu:%02llu:%02llu:%02llu", seconds / 86400, seconds / 3600 % 24, seconds / 60 % 60, seconds % 60); return text; }
 std::wstring winerror(DWORD code) {
   wchar_t* text = nullptr;
   FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, code, 0, reinterpret_cast<wchar_t*>(&text), 0, nullptr);
   std::wstring result = text ? text : L"Windows error " + std::to_wstring(code);
   if (text) LocalFree(text);
+  while (!result.empty() && iswspace(result.back())) result.pop_back();
   return result;
 }
 std::string utf8(const std::wstring& value) {
@@ -28,18 +47,15 @@ std::string utf8(const std::wstring& value) {
   return result;
 }
 std::wstring executable() { std::wstring path(32768, L'\0'); path.resize(GetModuleFileNameW(nullptr, path.data(), DWORD(path.size()))); return path; }
-bool matches(const Process& process, const Metadata& metadata, const std::wstring& query) {
-  return contains(process.name, query) || contains(metadata.description, query) || contains(metadata.publisher, query) || contains(std::to_wstring(process.id), query);
-}
-int findNext(std::span<const std::wstring> names, std::wstring prefix, int start) {
-  if (names.empty() || prefix.empty()) return -1;
-  prefix = lower(std::move(prefix));
-  const int count = int(names.size());
-  for (int offset = 0; offset < count; ++offset) {
-    const int index = ((start % count + count) % count + offset) % count;
-    if (lower(names[size_t(index)]).starts_with(prefix)) return index;
-  }
-  return -1;
+std::wstring windowsDirectory() { wchar_t path[MAX_PATH]{}; GetWindowsDirectoryW(path, MAX_PATH); return path; }
+// The program a command line starts: quoted or up to the first space, with environment variables expanded.
+std::wstring commandExecutable(const std::wstring& command) {
+  std::wstring expanded(32768, L'\0'); expanded.resize(std::max<DWORD>(1, ExpandEnvironmentStringsW(command.c_str(), expanded.data(), DWORD(expanded.size()))) - 1);
+  while (!expanded.empty() && iswspace(expanded.front())) expanded.erase(expanded.begin());
+  if (expanded.empty()) return L"";
+  if (expanded.front() == L'"') { const auto close = expanded.find(L'"', 1); return expanded.substr(1, close == expanded.npos ? expanded.npos : close - 1); }
+  for (size_t space = expanded.find(L' '); space != expanded.npos; space = expanded.find(L' ', space + 1)) { auto candidate = expanded.substr(0, space); if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) return candidate; if (GetFileAttributesW((candidate + L".exe").c_str()) != INVALID_FILE_ATTRIBUTES) return candidate + L".exe"; }
+  return expanded.substr(0, expanded.find(L' '));
 }
 Counter::Counter() { PdhOpenQueryW(nullptr, 0, &query); }
 Counter::~Counter() { if (query) PdhCloseQuery(query); }
@@ -75,37 +91,50 @@ struct NativeProcess {
   int64_t reads, writes, others, readBytes, writeBytes, otherBytes;
 };
 static_assert(sizeof(NativeProcess) == 256);
+struct NativeThread { int64_t kernel, user, created; ULONG wait; void* start; HANDLE process, thread; LONG priority, basePriority; ULONG switches, state, reason; };
+static_assert(sizeof(NativeThread) == 80);
+struct NativeProcessor { int64_t idle, kernel, user, dpc, interrupt; ULONG interrupts; };
+static_assert(sizeof(NativeProcessor) == 48);
 using QuerySystem = LONG (WINAPI*)(ULONG, void*, ULONG, ULONG*);
-Sampler::Sampler() : buffer(1024 * 1024) {
-  SYSTEM_INFO system{}; GetNativeSystemInfo(&system); logical = std::max(1UL, system.dwNumberOfProcessors);
-  wchar_t name[512]{}; DWORD size = sizeof(name);
-  if (RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", L"ProcessorNameString", RRF_RT_REG_SZ, nullptr, name, &size) == ERROR_SUCCESS) cpuName = name;
-  counters.add(L"disk", L"\\PhysicalDisk(*)\\% Disk Time");
+static QuerySystem querySystem() { static auto query = reinterpret_cast<QuerySystem>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation")); return query; }
+Sampler::Sampler(bool attribution) : buffer(1024 * 1024) {
+  cpuInfo = readCpu(); memoryHardware = readMemoryHardware(); gpuDescriptors = readGpus();
+  counters.add(L"idle", L"\\PhysicalDisk(*)\\% Idle Time");
   counters.add(L"diskRead", L"\\PhysicalDisk(*)\\Disk Read Bytes/sec");
   counters.add(L"diskWrite", L"\\PhysicalDisk(*)\\Disk Write Bytes/sec");
+  counters.add(L"diskResponse", L"\\PhysicalDisk(*)\\Avg. Disk sec/Transfer");
+  counters.add(L"performance", L"\\Processor Information(_Total)\\% Processor Performance");
   counters.add(L"gpu", L"\\GPU Engine(*)\\Utilization Percentage");
-  counters.add(L"gpuMemory", L"\\GPU Adapter Memory(*)\\Dedicated Usage");
-  IDXGIFactory1* factory = nullptr;
-  if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
-    for (UINT index = 0; index < 32; ++index) {
-      IDXGIAdapter1* adapter = nullptr; if (factory->EnumAdapters1(index, &adapter) != S_OK) break;
-      DXGI_ADAPTER_DESC1 description{};
-      if (SUCCEEDED(adapter->GetDesc1(&description)) && !(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
-        wchar_t key[64]{}; swprintf_s(key, L"luid_0x%08x_0x%08x", unsigned(description.AdapterLuid.HighPart), description.AdapterLuid.LowPart);
-        gpuDescriptors.push_back({key, L"GPU " + std::to_wstring(gpuDescriptors.size()), description.Description, L"%", 0, 100, double(description.DedicatedVideoMemory), RGB(0, 120, 215)});
-      }
-      adapter->Release();
-    }
-    factory->Release();
-  }
+  counters.add(L"gpuDedicated", L"\\GPU Adapter Memory(*)\\Dedicated Usage");
+  counters.add(L"gpuShared", L"\\GPU Adapter Memory(*)\\Shared Usage");
   counters.collect();
+  if (attribution) trace = std::make_unique<NetworkTrace>();
 }
-Sample Sampler::sample() {
+Sampler::~Sampler() = default;
+// Account names for every process, including ones this user cannot open.
+void Sampler::readUsers() {
+  auto users = std::make_shared<std::unordered_map<DWORD, std::wstring>>();
+  DWORD level = 1, count = 0; WTS_PROCESS_INFO_EXW* information = nullptr;
+  if (WTSEnumerateProcessesExW(WTS_CURRENT_SERVER_HANDLE, &level, WTS_ANY_SESSION, reinterpret_cast<LPWSTR*>(&information), &count)) {
+    for (DWORD index = 0; index < count; ++index) {
+      const auto sid = information[index].pUserSid; if (!sid) continue;
+      wchar_t* text = nullptr; if (!ConvertSidToStringSidW(sid, &text)) continue; std::wstring key = text; LocalFree(text);
+      auto found = accounts.find(key);
+      if (found == accounts.end()) { wchar_t name[256]{}, domain[256]{}; DWORD nameSize = 256, domainSize = 256; SID_NAME_USE use{}; found = accounts.emplace(key, LookupAccountSidW(nullptr, sid, name, &nameSize, domain, &domainSize, &use) ? std::wstring(name) : key).first; }
+      users->emplace(information[index].ProcessId, found->second);
+    }
+    WTSFreeMemoryExW(WTSTypeProcessInfoLevel1, information, count);
+  }
+  cachedUsers = std::move(users);
+}
+Sample Sampler::sample(bool startupVisible) {
   const auto started = Clock::now();
+#ifdef TASKMGR_DIAGNOSTICS
   auto phase = started;
-  Sample result; result.timestamp = started; result.logical = logical; result.cpuName = cpuName;
+#endif
+  Sample result; result.cpuInfo = cpuInfo;
   result.elapsed = last == Time{} ? 0 : std::chrono::duration<double>(started - last).count();
-  static auto query = reinterpret_cast<QuerySystem>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation"));
+  const auto query = querySystem();
   if (!query) throw std::runtime_error("Native process query unavailable");
   ULONG required = 0; LONG status = 0;
   for (;;) {
@@ -115,83 +144,207 @@ Sample Sampler::sample() {
     buffer.resize(std::min<size_t>(64 * 1024 * 1024, std::max<size_t>(required + 65536, buffer.size() * 2)));
   }
   if (status < 0) throw std::runtime_error("Native process query failed");
-  std::unordered_map<DWORD, Process> next; next.reserve(previous.size() + 64);
+  ++generation; result.processes.reserve(previous.size() + 64);
+  const unsigned logical = std::max(1u, cpuInfo.logical);
   size_t offset = 0;
   for (;;) {
     if (offset + sizeof(NativeProcess) > buffer.size()) throw std::runtime_error("Invalid process inventory extent");
     const auto& native = *reinterpret_cast<const NativeProcess*>(buffer.data() + offset);
     Process process; process.id = DWORD(reinterpret_cast<ULONG_PTR>(native.pid)); process.parent = DWORD(reinterpret_cast<ULONG_PTR>(native.parent));
-    process.session = native.session; process.created = native.created; process.cpuTicks = native.user + native.kernel;
-    process.threads = native.threads; process.handles = native.handles; process.working = native.working; process.privateBytes = native.privateBytes;
-    process.ioBytes = uint64_t(std::max<int64_t>(0, native.readBytes)) + uint64_t(std::max<int64_t>(0, native.writeBytes));
+    process.session = native.session; process.created = native.created; process.cpuTicks = native.user + native.kernel; process.priority = native.priority;
+    process.threads = native.threads; process.handles = native.handles; process.working = native.working; process.privateBytes = native.privateBytes; process.peakWorking = native.peakWorking; process.pageFaults = native.faults;
+    process.privateWorking = uint64_t(std::max<int64_t>(0, native.privateWorking));
+    process.readBytes = uint64_t(std::max<int64_t>(0, native.readBytes)); process.writeBytes = uint64_t(std::max<int64_t>(0, native.writeBytes));
     process.name = native.name.buffer && native.name.length ? std::wstring(native.name.buffer, native.name.length / sizeof(wchar_t)) : process.id == 0 ? L"System Idle Process" : L"System";
-    auto found = previous.find(process.id);
-    if (found != previous.end() && found->second.created == process.created && result.elapsed > 0) {
+    // A process whose every thread waits in the Suspended state is shown as suspended, as UWP apps in the background are.
+    if (native.threads && offset + sizeof(NativeProcess) + size_t(native.threads) * sizeof(NativeThread) <= buffer.size()) {
+      const auto threads = reinterpret_cast<const NativeThread*>(buffer.data() + offset + sizeof(NativeProcess)); bool suspended = process.id > 4;
+      for (ULONG index = 0; index < native.threads && suspended; ++index) suspended = threads[index].state == 5 && threads[index].reason == 5;
+      process.suspended = suspended;
+    }
+    result.threads += native.threads; result.handles += native.handles;
+    auto [found, inserted] = previous.try_emplace(process.id);
+    if (!inserted && found->second.created == process.created && result.elapsed > 0) {
       const auto& old = found->second;
       process.cpu = process.cpuTicks >= old.cpuTicks ? std::clamp(double(process.cpuTicks - old.cpuTicks) / (result.elapsed * 100000 * logical), 0.0, 100.0) : 0;
-      process.ioRate = process.ioBytes >= old.ioBytes ? double(process.ioBytes - old.ioBytes) / result.elapsed : 0;
+      const double readRate = process.readBytes >= old.readBytes ? double(process.readBytes - old.readBytes) / result.elapsed : 0;
+      const double writeRate = process.writeBytes >= old.writeBytes ? double(process.writeBytes - old.writeBytes) / result.elapsed : 0;
+      process.ioRate = readRate + writeRate;
     }
-    next.emplace(process.id, process); result.processes.push_back(std::move(process));
+    if (process.name == L"Memory Compression") result.memory.compressed = process.working;
+    found->second = {process.created, process.cpuTicks, process.readBytes, process.writeBytes, generation}; result.processes.push_back(std::move(process));
     if (!native.next) break;
     if (native.next < sizeof(NativeProcess) || native.next > buffer.size() - offset) throw std::runtime_error("Invalid process inventory link");
     offset += native.next;
   }
-  std::unordered_set<DWORD> applications;
-  EnumWindows([](HWND window, LPARAM context) -> BOOL { if (IsWindowVisible(window) && GetWindow(window, GW_OWNER) == nullptr && GetWindowTextLengthW(window) > 0) { DWORD pid = 0; GetWindowThreadProcessId(window, &pid); reinterpret_cast<std::unordered_set<DWORD>*>(context)->insert(pid); } return TRUE; }, reinterpret_cast<LPARAM>(&applications));
-  for (auto& process : result.processes) process.app = applications.contains(process.id);
+  struct Windows { std::unordered_set<DWORD> apps, hung; std::vector<AppWindow> list; } visible;
+  EnumWindows([](HWND window, LPARAM context) -> BOOL {
+    if (IsWindowVisible(window) && GetWindow(window, GW_OWNER) == nullptr && GetWindowTextLengthW(window) > 0 && !(GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) {
+      BOOL cloaked = FALSE; using Attribute = HRESULT (WINAPI*)(HWND, DWORD, void*, DWORD); static auto attribute = reinterpret_cast<Attribute>(GetProcAddress(LoadLibraryW(L"dwmapi.dll"), "DwmGetWindowAttribute"));
+      if (attribute && SUCCEEDED(attribute(window, 14, &cloaked, sizeof(cloaked))) && cloaked) return TRUE;
+      DWORD pid = 0; GetWindowThreadProcessId(window, &pid); auto& state = *reinterpret_cast<Windows*>(context); state.apps.insert(pid); if (IsHungAppWindow(window)) state.hung.insert(pid);
+      wchar_t title[512]{}; InternalGetWindowText(window, title, 512); if (state.list.size() < 4096) state.list.push_back({window, pid, title});
+    }
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&visible));
+  for (auto& process : result.processes) { process.app = visible.apps.contains(process.id); process.hung = visible.hung.contains(process.id); }
+  result.windows = std::move(visible.list);
+#ifdef TASKMGR_DIAGNOSTICS
   result.stages[0] = milliseconds(phase); phase = Clock::now();
+#endif
   FILETIME currentIdle{}, kernel{}, user{};
   if (GetSystemTimes(&currentIdle, &kernel, &user)) {
     const uint64_t currentTotal = ticks(kernel) + ticks(user), idleTicks = ticks(currentIdle);
     if (total && currentTotal > total && idleTicks >= idle) result.cpu = std::clamp(100.0 * (1.0 - double(idleTicks - idle) / double(currentTotal - total)), 0.0, 100.0);
     total = currentTotal; idle = idleTicks;
   }
+  std::vector<NativeProcessor> processors(logical); ULONG returned = 0;
+  if (query(8, processors.data(), ULONG(processors.size() * sizeof(NativeProcessor)), &returned) >= 0) {
+    processors.resize(returned / sizeof(NativeProcessor)); corePrevious.resize(processors.size()); result.cores.resize(processors.size());
+    double interruptTicks = 0, totalTicks = 0;
+    for (size_t index = 0; index < processors.size(); ++index) {
+      const auto& core = processors[index]; auto& old = corePrevious[index];
+      const uint64_t busy = uint64_t(core.kernel + core.user), idleTime = uint64_t(core.idle), extra = uint64_t(core.dpc + core.interrupt);
+      if (old[0] && busy > old[0] && idleTime >= old[1]) { result.cores[index] = std::clamp(100.0 * (1.0 - double(idleTime - old[1]) / double(busy - old[0])), 0.0, 100.0); interruptTicks += double(extra - std::min(extra, old[2])); totalTicks += double(busy - old[0]); }
+      old = {busy, idleTime, extra};
+    }
+    if (totalTicks > 0) result.interrupts = std::clamp(100.0 * interruptTicks / totalTicks, 0.0, 100.0);
+  }
   MEMORYSTATUSEX memory{sizeof(memory)};
-  if (GlobalMemoryStatusEx(&memory)) { result.memoryTotal = memory.ullTotalPhys; result.memoryUsed = memory.ullTotalPhys - memory.ullAvailPhys; }
-  result.memory.cb = sizeof(result.memory); GetPerformanceInfo(&result.memory, sizeof(result.memory));
-  result.resources.push_back({L"cpu", L"CPU", cpuName, L"%", result.cpu, 100, 0, RGB(0, 120, 215)});
-  result.resources.push_back({L"memory", L"Memory", bytes(double(result.memoryUsed)) + L" / " + bytes(double(result.memoryTotal)), L"%", result.memoryTotal ? 100.0 * double(result.memoryUsed) / double(result.memoryTotal) : 0, 100, 0, RGB(139, 18, 174)});
+  PERFORMANCE_INFORMATION performance{sizeof(performance)};
+  const auto compressed = result.memory.compressed; result.memory = memoryHardware; result.memory.compressed = compressed;
+  if (GlobalMemoryStatusEx(&memory)) { result.memory.total = memory.ullTotalPhys; result.memory.available = memory.ullAvailPhys; }
+  if (GetPerformanceInfo(&performance, sizeof(performance))) {
+    const double page = double(performance.PageSize); result.memory.committed = uint64_t(double(performance.CommitTotal) * page); result.memory.commitLimit = uint64_t(double(performance.CommitLimit) * page);
+    result.memory.cached = uint64_t(double(performance.SystemCache) * page); result.memory.paged = uint64_t(double(performance.KernelPaged) * page); result.memory.nonpaged = uint64_t(double(performance.KernelNonpaged) * page);
+  }
+  result.uptime = GetTickCount64() / 1000;
+#ifdef TASKMGR_DIAGNOSTICS
   result.stages[1] = milliseconds(phase); phase = Clock::now();
+#endif
   counters.collect();
-  std::unordered_map<std::wstring, double> diskRead, diskWrite;
+  for (const auto& [name, value] : counters.values(L"performance")) { (void)name; result.cpuSpeed = cpuInfo.baseMhz * value / 100 / 1000; }
+  if (result.cpuSpeed <= 0) result.cpuSpeed = cpuInfo.baseMhz / 1000;
+  std::unordered_map<std::wstring, double> diskRead, diskWrite, diskResponse;
   for (const auto& [name, value] : counters.values(L"diskRead")) diskRead[name] = value;
   for (const auto& [name, value] : counters.values(L"diskWrite")) diskWrite[name] = value;
-  for (const auto& [name, value] : counters.values(L"disk")) if (name != L"_Total") result.resources.push_back({L"disk/" + name, L"Disk " + name, L"Read " + bytes(diskRead[name]) + L"/s   Write " + bytes(diskWrite[name]) + L"/s", L"%", std::min(100.0, value), 100, 0, RGB(74, 158, 12)});
+  for (const auto& [name, value] : counters.values(L"diskResponse")) diskResponse[name] = value * 1000;
+  wchar_t systemDrive[4] = L"C:"; { const auto windows = windowsDirectory(); if (windows.size() >= 2) systemDrive[0] = windows[0]; }
+  for (const auto& [name, value] : counters.values(L"idle")) {
+    if (name == L"_Total") continue;
+    DiskInfo disk; disk.key = name; disk.index = _wtoi(name.c_str());
+    auto hardware = diskHardware.find(disk.index); if (hardware == diskHardware.end()) hardware = diskHardware.emplace(disk.index, readDiskHardware(disk.index)).first;
+    disk.model = hardware->second.model; disk.type = hardware->second.type; disk.capacity = hardware->second.capacity;
+    const auto space = name.find(L' '); disk.letters = space == name.npos ? L"" : name.substr(space + 1);
+    disk.title = L"Disk " + std::to_wstring(disk.index) + (disk.letters.empty() ? L"" : L" (" + disk.letters + L")");
+    for (size_t position = 0; position + 1 < disk.letters.size(); ++position) if (disk.letters[position + 1] == L':') {
+      const std::wstring root{disk.letters[position], L':', L'\\'}; ULARGE_INTEGER totalBytes{};
+      if (GetDiskFreeSpaceExW(root.c_str(), nullptr, &totalBytes, nullptr)) disk.formatted += totalBytes.QuadPart;
+      if (towupper(disk.letters[position]) == towupper(systemDrive[0])) disk.system = true;
+      if (GetFileAttributesW((root + L"pagefile.sys").c_str()) != INVALID_FILE_ATTRIBUTES) disk.pagefile = true;
+    }
+    disk.active = std::clamp(100 - value, 0.0, 100.0); disk.read = diskRead[name]; disk.write = diskWrite[name]; disk.response = diskResponse[name];
+    result.disks.push_back(std::move(disk));
+  }
+  std::sort(result.disks.begin(), result.disks.end(), [](const DiskInfo& left, const DiskInfo& right) { return left.index < right.index; });
+#ifdef TASKMGR_DIAGNOSTICS
   result.stages[2] = milliseconds(phase); phase = Clock::now();
+#endif
+  const bool refreshInventory = inventoryAt == Time{} || milliseconds(inventoryAt) >= 5000;
+  if (refreshInventory) {
+    adapterAddresses.clear(); ULONG size = 32768; std::vector<std::byte> addresses;
+    for (int attempt = 0; attempt < 3; ++attempt) { addresses.resize(size); const auto code = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, reinterpret_cast<IP_ADAPTER_ADDRESSES*>(addresses.data()), &size); if (code == ERROR_BUFFER_OVERFLOW && size < 4 * 1024 * 1024) continue; if (code != NO_ERROR) addresses.clear(); break; }
+    for (auto adapter = addresses.empty() ? nullptr : reinterpret_cast<IP_ADAPTER_ADDRESSES*>(addresses.data()); adapter; adapter = adapter->Next) {
+      std::array<std::wstring, 3> entry{adapter->Description ? adapter->Description : L"", L"", L""};
+      for (auto unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
+        wchar_t text[64]{}; DWORD length = 64; const auto family = unicast->Address.lpSockaddr->sa_family;
+        if (WSAAddressToStringW(unicast->Address.lpSockaddr, unicast->Address.iSockaddrLength, nullptr, text, &length) != 0) continue;
+        std::wstring value = text; if (const auto percent = value.find(L'%'); percent != value.npos) value.resize(percent);
+        if (family == AF_INET && entry[1].empty()) entry[1] = value; else if (family == AF_INET6 && entry[2].empty()) entry[2] = value;
+      }
+      adapterAddresses[adapter->Luid.Value] = std::move(entry);
+    }
+  }
   PMIB_IF_TABLE2 interfaces = nullptr;
   if (GetIfTable2(&interfaces) == NO_ERROR) {
     for (ULONG index = 0; index < interfaces->NumEntries; ++index) {
       const auto& adapter = interfaces->Table[index];
       if (adapter.OperStatus != IfOperStatusUp || adapter.Type == IF_TYPE_SOFTWARE_LOOPBACK || !adapter.InterfaceAndOperStatusFlags.HardwareInterface) continue;
-      const auto key = adapter.InterfaceLuid.Value;
-      double receive = 0, send = 0;
-      auto found = networkPrevious.find(key);
-      if (found != networkPrevious.end() && result.elapsed > 0) { receive = adapter.InOctets >= found->second.first ? double(adapter.InOctets - found->second.first) / result.elapsed : 0; send = adapter.OutOctets >= found->second.second ? double(adapter.OutOctets - found->second.second) / result.elapsed : 0; }
-      networkPrevious[key] = {adapter.InOctets, adapter.OutOctets};
-      result.resources.push_back({L"net/" + std::to_wstring(key), adapter.Alias, L"Send " + bytes(send) + L"/s   Receive " + bytes(receive) + L"/s", L"bytes/s", receive + send, std::max(1024.0, (receive + send) * 1.2), 0, RGB(184, 86, 0)});
+      NetworkInfo network; network.luid = adapter.InterfaceLuid.Value; network.alias = adapter.Alias; network.description = adapter.Description; network.speed = std::max(adapter.ReceiveLinkSpeed, adapter.TransmitLinkSpeed);
+      network.type = adapter.Type == IF_TYPE_IEEE80211 ? L"Wi-Fi" : adapter.Type == IF_TYPE_ETHERNET_CSMACD ? L"Ethernet" : adapter.Type == IF_TYPE_WWANPP || adapter.Type == IF_TYPE_WWANPP2 ? L"Cellular" : L"Network";
+      if (const auto found = adapterAddresses.find(network.luid); found != adapterAddresses.end()) { if (!found->second[0].empty()) network.description = found->second[0]; network.ipv4 = found->second[1]; network.ipv6 = found->second[2]; }
+      auto found = networkPrevious.find(network.luid);
+      if (found != networkPrevious.end() && result.elapsed > 0) { network.receive = adapter.InOctets >= found->second.first ? double(adapter.InOctets - found->second.first) / result.elapsed : 0; network.send = adapter.OutOctets >= found->second.second ? double(adapter.OutOctets - found->second.second) / result.elapsed : 0; }
+      networkPrevious[network.luid] = {adapter.InOctets, adapter.OutOctets};
+      result.networks.push_back(std::move(network));
     }
     FreeMibTable(interfaces);
+    std::erase_if(networkPrevious, [&](const auto& item) { return std::none_of(result.networks.begin(), result.networks.end(), [&](const auto& network) { return network.luid == item.first; }); });
   }
+  if (trace && trace->active()) { result.networkAttribution = true; const auto rates = trace->rates(result.elapsed); for (auto& process : result.processes) { const auto found = rates.find(process.id); process.network = found == rates.end() ? 0 : found->second; } }
+#ifdef TASKMGR_DIAGNOSTICS
   result.stages[3] = milliseconds(phase); phase = Clock::now();
-  std::unordered_map<DWORD, double> processGpu;
-  auto engines = counters.values(L"gpu");
-  auto gpuMemory = counters.values(L"gpuMemory");
-  for (auto resource : gpuDescriptors) {
-    std::unordered_map<std::wstring, double> totals;
-    for (const auto& [name, value] : engines) if (name.find(resource.key) != std::wstring::npos) {
-      auto engine = name.find(L"_eng_"); if (engine != std::wstring::npos) totals[name.substr(engine)] += value;
-      DWORD pid = 0; if (swscanf_s(name.c_str(), L"pid_%lu_", &pid) == 1) processGpu[pid] = std::max(processGpu[pid], std::min(100.0, value));
+#endif
+  const auto engines = counters.values(L"gpu"), dedicated = counters.values(L"gpuDedicated"), shared = counters.values(L"gpuShared");
+  struct ProcessGpu { double value = 0; std::wstring engine; };
+  std::unordered_map<DWORD, ProcessGpu> processGpu;
+  for (auto gpu : gpuDescriptors) {
+    std::map<std::wstring, double> engineTotals; std::unordered_map<DWORD, std::map<std::wstring, double>> perProcess;
+    for (const auto& [name, value] : engines) {
+      if (name.find(gpu.key) == std::wstring::npos) continue;
+      const auto engine = name.find(L"_engtype_"); if (engine == std::wstring::npos) continue;
+      const auto engineNumber = name.find(L"_eng_"); const auto type = name.substr(engine + 9); const auto instance = (engineNumber == std::wstring::npos ? L"" : name.substr(engineNumber + 5, engine - engineNumber - 5)) + L"|" + type;
+      engineTotals[instance] += value;
+      DWORD pid = 0; if (swscanf_s(name.c_str(), L"pid_%lu_", &pid) == 1) perProcess[pid][type] += value;
     }
-    for (const auto& [name, value] : totals) { (void)name; resource.value = std::max(resource.value, std::min(100.0, value)); }
-    double dedicated = 0; for (const auto& [name, value] : gpuMemory) if (name.find(resource.key) != std::wstring::npos) dedicated += value;
-    resource.detail += L"   " + bytes(dedicated) + L" / " + bytes(resource.secondary); result.resources.push_back(std::move(resource));
+    std::map<std::wstring, double> byType;
+    for (const auto& [instance, value] : engineTotals) { const auto type = instance.substr(instance.find(L'|') + 1); auto& slot = byType[type]; slot = std::max(slot, std::min(100.0, value)); gpu.usage = std::max(gpu.usage, std::min(100.0, value)); }
+    for (const auto& [type, value] : byType) gpu.engines.emplace_back(type, value);
+    for (const auto& [pid, types] : perProcess) for (const auto& [type, value] : types) { auto& slot = processGpu[pid]; if (value > slot.value) { slot.value = std::min(100.0, value); slot.engine = L"GPU " + std::to_wstring(gpu.index) + L" - " + type; } }
+    for (const auto& [name, value] : dedicated) if (name.find(gpu.key) != std::wstring::npos) gpu.dedicated += uint64_t(value);
+    for (const auto& [name, value] : shared) if (name.find(gpu.key) != std::wstring::npos) gpu.shared += uint64_t(value);
+    gpu.temperature = gpuTemperature(gpu.key);
+    result.gpus.push_back(std::move(gpu));
   }
-  for (auto& process : result.processes) if (auto found = processGpu.find(process.id); found != processGpu.end()) process.gpu = found->second;
+  for (auto& process : result.processes) if (auto found = processGpu.find(process.id); found != processGpu.end()) { process.gpu = found->second.value; process.gpuEngine = found->second.engine; }
+#ifdef TASKMGR_DIAGNOSTICS
   result.stages[4] = milliseconds(phase); phase = Clock::now();
-  if (inventoryAt == Time{} || milliseconds(inventoryAt) >= 5000) { cachedServices = readServices(); cachedSessions = readSessions(); cachedStartup = readStartup(); inventoryAt = Clock::now(); }
-  result.services = cachedServices; result.sessions = cachedSessions; result.startup = cachedStartup;
+#endif
+  if (refreshInventory) { cachedServices = readServices(); cachedSessions = readSessions(); readUsers(); inventoryAt = Clock::now(); }
+  if (startupJob.valid() && startupJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    try { cachedStartup = std::make_shared<StartupInventory>(startupJob.get()); }
+    catch (...) { auto failed = std::make_shared<StartupInventory>(); failed->warnings.push_back(L"Startup inventory failed; refresh to retry."); Entry entry; entry.key = L"coverage:failed"; entry.cells = {failed->warnings.front(), L"", L"Unavailable", L"—", L"Coverage", L"", L"", L"", failed->warnings.front()}; failed->entries.push_back(std::move(entry)); cachedStartup = std::move(failed); }
+    startupAt = Clock::now();
+  }
+  if (startupVisible && !startupJob.valid() && (startupInvalidated || startupAt == Time{} || milliseconds(startupAt) >= 60000)) {
+    startupInvalidated = false;
+    startupJob = std::async(std::launch::async, [] { const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED); StartupInventory result; try { result = readStartup(); } catch (...) { if (SUCCEEDED(initialized)) CoUninitialize(); throw; } if (SUCCEEDED(initialized)) CoUninitialize(); return result; });
+  }
+  result.services = cachedServices; result.sessions = cachedSessions; result.startup = cachedStartup; result.users = cachedUsers;
+#ifdef TASKMGR_DIAGNOSTICS
   result.stages[5] = milliseconds(phase);
-  previous = std::move(next); last = started; result.duration = milliseconds(started); return result;
+  result.duration = milliseconds(started);
+#endif
+  std::erase_if(previous, [&](const auto& item) { return item.second.seen != generation; }); last = started; return result;
+}
+std::wstring serviceGroupCaption(const std::wstring& group) {
+  static const std::unordered_map<std::wstring, std::wstring> captions{{L"netsvcs", L"Local System"}, {L"localsystemnetworkrestricted", L"Local System (Network Restricted)"}, {L"localservice", L"Local Service"},
+    {L"localservicenetworkrestricted", L"Local Service (Network Restricted)"}, {L"localservicenonetwork", L"Local Service (No Network)"}, {L"localservicenonetworkfirewall", L"Local Service (No Network Firewall)"},
+    {L"localserviceandnoimpersonation", L"Local Service (No Impersonation)"}, {L"networkservice", L"Network Service"}, {L"networkservicenetworkrestricted", L"Network Service (Network Restricted)"},
+    {L"networkserviceandnoimpersonation", L"Network Service (No Impersonation)"}, {L"rpcss", L"Remote Procedure Call"}, {L"dcomlaunch", L"DCOM Server Process Launcher"}, {L"unistacksvcgroup", L"Unistack Service Group"},
+    {L"wbiosvcgroup", L"Windows Biometric"}, {L"wersvcgroup", L"Windows Error Reporting"}, {L"print", L"Print Workflow"}, {L"appmodel", L"appmodel"}, {L"utcsvc", L"Connected User Experiences and Telemetry"}};
+  const auto found = captions.find(lower(group)); return found == captions.end() ? group : found->second;
+}
+// The svchost group ("-k netsvcs") from a service's image path; blank for services in their own process.
+static std::wstring serviceGroup(const std::wstring& service) {
+  static std::unordered_map<std::wstring, std::wstring> cache; static std::mutex gate; std::lock_guard lock(gate);
+  if (const auto found = cache.find(service); found != cache.end()) return found->second;
+  wchar_t image[4096]{}; DWORD size = sizeof(image); std::wstring group;
+  if (RegGetValueW(HKEY_LOCAL_MACHINE, (L"SYSTEM\\CurrentControlSet\\Services\\" + service).c_str(), L"ImagePath", RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, nullptr, image, &size) == ERROR_SUCCESS) {
+    const auto text = lower(image); const auto marker = text.find(L" -k "); if (marker != text.npos) { group = std::wstring(image).substr(marker + 4); group = group.substr(0, group.find(L' ')); }
+  }
+  if (cache.size() < 4096) cache.emplace(service, group);
+  return group;
 }
 std::vector<Entry> readServices() {
   std::vector<Entry> result;
@@ -203,13 +356,18 @@ std::vector<Entry> readServices() {
     std::vector<BYTE> data(needed); resume = 0;
     if (EnumServicesStatusExW(manager, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_STATE_ALL, data.data(), DWORD(data.size()), &needed, &count, &resume, nullptr)) {
       auto records = reinterpret_cast<ENUM_SERVICE_STATUS_PROCESSW*>(data.data()); result.reserve(count);
+      static const wchar_t* states[] = {L"Unknown", L"Stopped", L"Starting", L"Stopping", L"Running", L"Continuing", L"Pausing", L"Paused"};
       for (DWORD index = 0; index < count; ++index) {
-        const auto& service = records[index]; const DWORD state = service.ServiceStatusProcess.dwCurrentState;
-        result.push_back({service.lpServiceName, {service.lpServiceName, service.ServiceStatusProcess.dwProcessId ? std::to_wstring(service.ServiceStatusProcess.dwProcessId) : L"", service.lpDisplayName, state == SERVICE_RUNNING ? L"Running" : state == SERVICE_STOPPED ? L"Stopped" : L"Pending"}, service.ServiceStatusProcess.dwProcessId});
+        const auto& service = records[index]; const DWORD state = service.ServiceStatusProcess.dwCurrentState; const DWORD pid = state == SERVICE_STOPPED ? 0 : service.ServiceStatusProcess.dwProcessId;
+        Entry entry{service.lpServiceName, {service.lpServiceName, pid ? std::to_wstring(pid) : L"", service.lpDisplayName, states[state <= 7 ? state : 0], L""}, pid};
+        entry.group = serviceGroup(service.lpServiceName); entry.cells[4] = entry.group; entry.description = service.lpDisplayName;
+        result.push_back(std::move(entry));
       }
     }
   }
-  CloseServiceHandle(manager); return result;
+  CloseServiceHandle(manager);
+  std::sort(result.begin(), result.end(), [](const Entry& left, const Entry& right) { return CompareStringOrdinal(left.key.c_str(), -1, right.key.c_str(), -1, TRUE) == CSTR_LESS_THAN; });
+  return result;
 }
 std::vector<Entry> readSessions() {
   std::vector<Entry> result; PWTS_SESSION_INFOW sessions = nullptr; DWORD count = 0;
@@ -217,43 +375,10 @@ std::vector<Entry> readSessions() {
   for (DWORD index = 0; index < count; ++index) {
     wchar_t* user = nullptr; DWORD size = 0;
     if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sessions[index].SessionId, WTSUserName, &user, &size)) {
-      if (user && *user) { Entry entry; entry.key = std::to_wstring(sessions[index].SessionId); entry.session = sessions[index].SessionId; entry.cells = {user, entry.key, sessions[index].State == WTSActive ? L"Active" : L"Disconnected", L"", L""}; result.push_back(std::move(entry)); }
+      if (user && *user) { Entry entry; entry.key = L"session:" + std::to_wstring(sessions[index].SessionId); entry.session = sessions[index].SessionId; entry.cells = {user, sessions[index].State == WTSActive ? L"" : L"Disconnected", std::to_wstring(sessions[index].SessionId), sessions[index].pWinStationName ? sessions[index].pWinStationName : L""}; result.push_back(std::move(entry)); }
       WTSFreeMemory(user);
     }
   }
   WTSFreeMemory(sessions); return result;
-}
-std::vector<Entry> readStartup() {
-  std::vector<Entry> result;
-  for (bool machine : {false, true}) {
-    HKEY key = nullptr; const auto root = machine ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
-    const wchar_t* run = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
-    if (RegOpenKeyExW(root, run, 0, KEY_READ, &key) != ERROR_SUCCESS) continue;
-    for (DWORD index = 0;; ++index) {
-      wchar_t name[512]{}, command[32768]{}; DWORD nameSize = DWORD(std::size(name)), size = sizeof(command), type = 0;
-      auto status = RegEnumValueW(key, index, name, &nameSize, nullptr, &type, reinterpret_cast<BYTE*>(command), &size);
-      if (status == ERROR_NO_MORE_ITEMS) break;
-      if (status != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) continue;
-      BYTE approval[12]{}; DWORD approvalSize = sizeof(approval);
-      RegGetValueW(root, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run", name, RRF_RT_REG_BINARY, nullptr, approval, &approvalSize);
-      Entry entry; entry.key = (machine ? L"HKLM/" : L"HKCU/") + std::wstring(name); entry.enabled = approval[0] != 3 && approval[0] != 7;
-      entry.cells = {name, L"—", entry.enabled ? L"Enabled" : L"Disabled", L"Not measured"}; entry.path = command; entry.location = machine ? L"HKLM" : L"HKCU"; result.push_back(std::move(entry));
-    }
-    RegCloseKey(key);
-  }
-  for (bool common : {false, true}) {
-    wchar_t directory[MAX_PATH]{};
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, common ? 0x18 : 0x07, nullptr, 0, directory))) {
-      std::error_code error;
-      for (const auto& file : std::filesystem::directory_iterator(directory, error)) {
-        if (!file.is_regular_file(error) || lower(file.path().filename().wstring()) == L"desktop.ini") continue;
-        Entry entry; entry.key = file.path().wstring(); entry.path = entry.key; entry.location = common ? L"CommonStartup" : L"StartupFolder";
-        BYTE approval[12]{}; DWORD size = sizeof(approval);
-        RegGetValueW(common ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\StartupFolder", file.path().filename().c_str(), RRF_RT_REG_BINARY, nullptr, approval, &size);
-        entry.enabled = approval[0] != 3 && approval[0] != 7; entry.cells = {file.path().filename().wstring(), L"—", entry.enabled ? L"Enabled" : L"Disabled", L"Not measured"}; result.push_back(std::move(entry));
-      }
-    }
-  }
-  return result;
 }
 }

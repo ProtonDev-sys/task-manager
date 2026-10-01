@@ -13,11 +13,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Build and verify published application
         shell: pwsh
-        run: ./build.ps1
+        run: ./build.ps1 -TestConfiguration Release
       - name: Benchmark headless native components
         shell: pwsh
         run: |
-          $test = Start-Process artifacts/app/TaskManager.exe -ArgumentList '--component-benchmark --output artifacts/ci-components.json' -WindowStyle Hidden -Wait -PassThru
+          $test = Start-Process artifacts/native-tests/Release/TaskManager.exe -ArgumentList '--component-benchmark --output artifacts/ci-components.json' -WindowStyle Hidden -Wait -PassThru
           if ($test.ExitCode -ne 0) { throw 'Component benchmark failed.' }
       - name: Exercise native UI headlessly
         shell: pwsh
@@ -33,6 +33,6 @@ jobs:
         with:
           name: verification-reports
           path: |
-            artifacts/release-self-test.json
+            artifacts/native-tests/*.json
             artifacts/ci-components.json
             artifacts/benchmark-suite/
