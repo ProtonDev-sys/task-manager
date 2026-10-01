@@ -138,7 +138,7 @@ bool Application::verifySorting() {
       SendMessageW(header, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(divider.left + requested - 1, dividerY));
       columnTimes.push_back(milliseconds(resizeStarted));
       const int actualWidth = ListView_GetColumnWidth(list, display);
-      check(actualWidth == std::max(minimum, requested), "column-native-drag-minimum-and-live-width");
+      check(actualWidth == std::max(minimum, requested), "column-native-drag-minimum-and-live-width: requested=" + std::to_string(requested) + ", minimum=" + std::to_string(minimum) + ", actual=" + std::to_string(actualWidth));
       check(headerPaints > previousHeaderPaints, "column-native-drag-paints-despite-pending-sort");
       check(!geometryQueued && !columnGeometryDirty && !columnMutationDepth && !GetUpdateRect(list, nullptr, FALSE) && !GetUpdateRect(header, nullptr, FALSE), "column-native-drag-complete-frame");
       bool aligned = false; for (int position = 0; position < displayCount; ++position) if (displayOrder[size_t(position)] == display) aligned = displayWidths[size_t(position)] == actualWidth;
