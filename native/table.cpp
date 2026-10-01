@@ -536,7 +536,13 @@ LRESULT CALLBACK Application::headerProcedure(HWND target, UINT message, WPARAM 
   const bool batch = geometryChange && !app->columnMutationDepth && !app->rebuilding && (GetWindowLongPtrW(app->list, GWL_STYLE) & WS_VISIBLE);
   ++app->columnMutationDepth;
   if (batch) SendMessageW(app->list, WM_SETREDRAW, FALSE, 0);
+  if (message == WM_MOUSEMOVE && app->columnTracking) { app->trackingColumn = -1; app->trackingWidth = -1; }
   const auto result = DefSubclassProc(target, message, word, data);
+  if (message == WM_MOUSEMOVE && app->columnTracking && app->trackingColumn >= 0 && app->trackingWidth >= 0) {
+    const int column = app->trackingColumn, width = app->trackingWidth;
+    app->trackingColumn = -1; app->trackingWidth = -1;
+    if (ListView_GetColumnWidth(app->list, column) != width) ListView_SetColumnWidth(app->list, column, width);
+  }
   if (batch) SendMessageW(app->list, WM_SETREDRAW, TRUE, 0);
   --app->columnMutationDepth;
   if (geometryChange && !app->rebuilding) app->columnGeometryDirty = true;
@@ -562,6 +568,7 @@ LRESULT CALLBACK Application::listProcedure(HWND target, UINT message, WPARAM wo
     const auto notice = reinterpret_cast<NMHEADERW*>(data);
     if (notice && notice->hdr.hwndFrom == app->header && (notice->hdr.code == HDN_ITEMCHANGINGW || notice->hdr.code == HDN_TRACKW) && notice->pitem && (notice->pitem->mask & HDI_WIDTH) && !app->compact) {
       notice->pitem->cxy = std::max(notice->pitem->cxy, app->scale(app->minimumColumnWidth(app->columnsTab, app->columnAt(notice->iItem))));
+      if (notice->hdr.code == HDN_TRACKW && app->columnTracking) { app->trackingColumn = notice->iItem; app->trackingWidth = notice->pitem->cxy; }
     }
     break;
   }

@@ -78,6 +78,7 @@ private:
   bool tabQueued = false, startupRequested = false;
   bool orderedAscending = false, columnGeometryDirty = true, geometryQueued = false, columnTracking = false;
   unsigned columnMutationDepth = 0;
+  int trackingColumn = -1, trackingWidth = -1;
   std::array<int, 32> displayOrder{}, displayWidths{};
   double graphTime = 0, lastTrend = 0;
   bool topmost = false, minimizeOnUse = false, hideMinimized = false, groupByType = true, compact = false, closing = false, rebuilding = false, memoryPercent = false, networkPercent = false, logical = false, hideGraphs = false, fullName = false, allHistory = true, trayAdded = false;
