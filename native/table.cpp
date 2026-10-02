@@ -167,8 +167,6 @@ const std::unordered_map<DWORD, std::vector<const Entry*>>& Application::service
   return indexedServices;
 }
 static std::wstring identityKey(const Process& process) { return std::to_wstring(process.id) + L":" + std::to_wstring(process.created); }
-// Windows 10 grouping: an app (a process with a visible top-level window, or a package) absorbs its descendant tree, service hosts list their
-// services, and with "Group by type" rows are split into Apps, Background processes and Windows processes.
 void Application::buildProcesses(std::vector<Row>& next) {
   const auto& processes = current->processes; const auto& services = servicesByProcess();
   std::unordered_map<DWORD, int> byId; byId.reserve(processes.size());
@@ -178,7 +176,7 @@ void Application::buildProcesses(std::vector<Row>& next) {
     if (known[size_t(index)]) return owners[size_t(index)];
     const auto& process = processes[size_t(index)]; const auto& metadata = icons->get(process);
     std::pair<std::wstring, bool> result{L"pid:" + std::to_wstring(process.id), process.app};
-    if (!metadata.package.empty()) result = {L"package:" + metadata.package, true};
+    if (!metadata.package.empty()) result = {L"package:" + metadata.package, process.app};
     else if (const auto parent = byId.find(process.parent); depth < 64 && process.id > 4 && parent != byId.end() && process.parent != process.id && process.parent > 4 && processes[size_t(parent->second)].created <= process.created) {
       const auto& parentOwner = owner(parent->second, depth + 1); const auto& parentProcess = processes[size_t(parent->second)];
       const bool sameImage = lower(parentProcess.name) == lower(process.name), shell = lower(parentProcess.name) == L"explorer.exe" && !sameImage;
@@ -196,7 +194,7 @@ void Application::buildProcesses(std::vector<Row>& next) {
     else root = *std::min_element(members.begin(), members.end(), [&](int left, int right) { const auto& a = processes[size_t(left)]; const auto& b = processes[size_t(right)]; return a.app != b.app ? a.app : a.created < b.created; });
     const auto& rootProcess = processes[size_t(root)]; const auto& metadata = icons->get(rootProcess);
     Top top; auto& row = top.row; row.process = root; row.members = members; row.icon = lower(rootProcess.name) == L"svchost.exe" ? Icons::ServiceHostIcon : metadata.icon;
-    const bool app = std::any_of(members.begin(), members.end(), [&](int index) { return processes[size_t(index)].app; }) || key.starts_with(L"package:");
+    const bool app = std::any_of(members.begin(), members.end(), [&](int index) { return processes[size_t(index)].app; });
     // Windows processes are the operating system's own infrastructure, not everything installed under the Windows directory.
     static const std::unordered_set<std::wstring> system{L"registry", L"secure system", L"smss.exe", L"csrss.exe", L"wininit.exe", L"winlogon.exe", L"services.exe", L"lsass.exe", L"lsaiso.exe", L"svchost.exe", L"dwm.exe", L"fontdrvhost.exe", L"explorer.exe"};
     row.category = app ? 0 : rootProcess.id <= 4 || system.contains(lower(rootProcess.name)) ? 2 : 1;
@@ -230,7 +228,7 @@ void Application::buildProcesses(std::vector<Row>& next) {
   std::vector<Row> roots; roots.reserve(tops.size()); for (auto& top : tops) roots.push_back(std::move(top.row));
   sortRows(roots);
   if (compact) { for (auto& row : roots) if (row.category == 0) { row.depth = 0; row.expandable = false; next.push_back(std::move(row)); } return; }
-  const bool byType = groupByType;
+  const bool byType = groupByType && sortColumn[ProcessesTab] == 0;
   std::array<int, 3> counts{}; for (const auto& row : roots) ++counts[size_t(row.category)];
   static const wchar_t* headings[] = {L"Apps", L"Background processes", L"Windows processes"};
   for (int category = byType ? 0 : -1; category < (byType ? 3 : 0); ++category) {
@@ -299,7 +297,7 @@ void Application::buildEntries(std::vector<Row>& next) {
     for (size_t index = 0; index < entries.size(); ++index) {
       const auto& entry = entries[index]; Row row; row.kind = RowKind::Entry; row.entry = int(index); row.key = entry.key;
       if (selectedTab == ServicesTab) { row.icon = Icons::ServiceIcon; for (const auto& text : entry.cells) row.cells.push_back({text}); row.cells[1].value = entry.pid; }
-      else { const auto& file = icons->file(entry.path); row.icon = file.icon >= 0 ? file.icon : Icons::DefaultIcon; for (size_t cell = 0; cell < 8; ++cell) { const auto source = cell < 6 ? cell : cell + 1; row.cells.push_back({source < entry.cells.size() ? entry.cells[source] : L""}); } }
+      else { const auto& file = icons->file(entry.path, true); row.icon = file.icon >= 0 ? file.icon : Icons::DefaultIcon; for (size_t cell = 0; cell < 8; ++cell) { const auto source = cell < 6 ? cell : cell + 1; row.cells.push_back({source < entry.cells.size() ? entry.cells[source] : L""}); } if (row.cells[1].text.empty()) row.cells[1].text = file.publisher; }
       next.push_back(std::move(row));
     }
   }
@@ -309,6 +307,7 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
   if (!current || !list || (selectedTab == PerformanceTab && !compact)) return;
   KillTimer(window, 3);
   const bool manualSort = sortOnly || sortQueued;
+  if (sortOnly && !compact && selectedTab == ProcessesTab && groupByType && ((orderedColumn == 0) != (sortColumn[ProcessesTab] == 0))) sortOnly = false;
   sortQueued = false;
   if (sortOnly && orderedTab == selectedTab && orderedColumn == sortColumn[size_t(selectedTab)] && orderedAscending == ascending[size_t(selectedTab)]) return;
 #ifdef TASKMGR_DIAGNOSTICS
@@ -317,6 +316,7 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
 #endif
   const auto selected = rowKey(selectedIndex()); const int top = ListView_GetTopIndex(list); const auto topKey = rowKey(top);
   rebuilding = true; std::vector<Row> next;
+  bool partialUpdate = false;
   if (filterOnly) {
     if (searchText.empty()) { rows = std::move(searchRows); searchRows = std::vector<Row>{}; }
     else { if (searchRows.empty()) searchRows = std::move(rows); rows = filteredRows(searchRows); }
@@ -329,16 +329,31 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
   else if (selectedTab == DetailsTab) buildDetails(next);
   else if (selectedTab != PerformanceTab) buildEntries(next);
   if (!sortOnly && !filterOnly) {
-    if (searchText.empty() || compact || selectedTab == PerformanceTab) { rows.swap(next); searchRows = std::vector<Row>{}; }
+    if (searchText.empty() || compact || selectedTab == PerformanceTab) {
+      partialUpdate = !manualSort && orderedTab == selectedTab && rows.size() == next.size() && std::equal(rows.begin(), rows.end(), next.begin(), [](const Row& previous, const Row& incoming) { return previous.key == incoming.key; });
+      rows.swap(next); searchRows = std::vector<Row>{};
+    }
     else { searchRows = std::move(next); rows = filteredRows(searchRows); }
   }
   orderedTab = selectedTab; orderedColumn = sortColumn[size_t(selectedTab)]; orderedAscending = ascending[size_t(selectedTab)];
-  SendMessageW(list, WM_SETREDRAW, FALSE, 0); if (!sortOnly) ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+  if (!partialUpdate) { SendMessageW(list, WM_SETREDRAW, FALSE, 0); if (!sortOnly) ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL); }
   int found = -1; if (!selected.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == selected) { found = int(index); break; }
   if (found >= 0) { if (selectedIndex() != found) select(found); } else if (selectedIndex() >= 0) ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
   if (manualSort) { const int offset = ListView_GetTopIndex(list); if (offset) ListView_Scroll(list, 0, -offset * rowHeight()); }
-  else if (!topKey.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == topKey) { const int delta = int(index) - ListView_GetTopIndex(list); if (delta) ListView_Scroll(list, 0, delta * rowHeight()); break; }
-  SendMessageW(list, WM_SETREDRAW, TRUE, 0); InvalidateRect(list, nullptr, FALSE); rebuilding = false;
+  else if (!partialUpdate && sortColumn[size_t(selectedTab)] == 0 && !topKey.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == topKey) { const int delta = int(index) - ListView_GetTopIndex(list); if (delta) ListView_Scroll(list, 0, delta * rowHeight()); break; }
+  if (partialUpdate) {
+    const int first = std::max(0, ListView_GetTopIndex(list)), last = std::min(int(rows.size()), first + ListView_GetCountPerPage(list) + 1);
+    for (int index = first; index < last; ++index) if (!sameRowPaint(next[size_t(index)], rows[size_t(index)])) {
+      RECT bounds{}; if (ListView_GetItemRect(list, index, &bounds, LVIR_BOUNDS)) InvalidateRect(list, &bounds, FALSE);
+#ifdef TASKMGR_DIAGNOSTICS
+      if (hidden() && measured) ++invalidatedRows;
+#endif
+    }
+#ifdef TASKMGR_DIAGNOSTICS
+    if (hidden() && measured) ++partialTableUpdates;
+#endif
+  } else { SendMessageW(list, WM_SETREDRAW, TRUE, 0); InvalidateRect(list, nullptr, FALSE); }
+  rebuilding = false;
   if (!sortOnly && !filterOnly) {
     const int visible = std::max(0, ListView_GetTopIndex(list)), count = std::max(1, ListView_GetCountPerPage(list));
     for (int index = std::min(int(rows.size()), visible + count + 1) - 1; index >= visible; --index) for (const int member : rows[size_t(index)].members) icons->request(current->processes[size_t(member)], true);
@@ -437,7 +452,7 @@ void Application::drawRow(HDC dc, int index, RECT bounds) {
         if (row.expandable) chevron(dc, float(box.left + scale(11) + indent), float(box.top + (box.bottom - box.top) / 2), float(scale(100)) / 100, row.expanded);
         iconLeft = box.left + scale(28) + indent;
       } else if (compact) iconLeft = box.left + scale(8);
-      ImageList_Draw(icons->images, row.icon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT);
+      if (!ImageList_Draw(icons->images, row.icon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT)) ImageList_Draw(icons->images, Icons::DefaultIcon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT);
       text.left = iconLeft + iconSize + scale(6);
     }
     SetTextColor(dc, highContrast && (selected || hot) ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0)));

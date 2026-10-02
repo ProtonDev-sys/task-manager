@@ -43,6 +43,14 @@ If you need to restore Windows Task Manager outside the UI, run this from an adm
 
 Right-click a column heading to choose visible columns. **Ctrl+F** opens search; **Esc** clears it. **F5** refreshes. **Ctrl+Tab** cycles tabs, and **Alt+1** through **Alt+7** selects one directly. Double-click a Performance graph or its sidebar to enter a summary view.
 
+**View → Update speed → Adaptive (low overhead)** targets process updates between 250 ms and 4 seconds, backing off when measured sampling and table-update work becomes expensive. It aims for roughly 2% sampling/display wall-time duty, not a guaranteed CPU cap; asynchronous metadata, painting and tracing also use resources. Adaptive uses a 1-second target on other full-size tabs. It is the default for new settings; existing saved update speeds are preserved. Fixed High targets 500 ms, Normal 1 second, and Low 4 seconds.
+
+Process CPU, memory, I/O, window classification and traced network activity are sampled on each process update. More expensive detailed memory, per-core, disk, network-interface and GPU counters are collected at most once a second during automatic polling, then reused between process updates. Their rate calculations use their own sampling interval, and cached process GPU data is matched by PID and creation time. F5 also invalidates the resource cache.
+
+Sampling time is included in the cadence rather than added to it; slow samples cannot trigger a catch-up polling loop. Minimized monitoring slows to at least 4 seconds, and restoring the window consumes the latest snapshot and requests a fresh one unless paused. Holding Ctrl temporarily freezes table updates; releasing it consumes the latest available snapshot. These are sampled measurements, not instantaneous guarantees: CPU and I/O rates describe the interval between snapshots, and short-lived processes can exist entirely between samples. Adaptive backoff is tested with simulated costs, but performance on physical 20-year-old hardware has not been verified; the Windows 10/11 x64 requirement still applies.
+
+Stable tables repaint only visible rows whose text, heat colours, icons or tree appearance changed. Numeric sorting keeps the viewport position instead of scrolling after a process whose rank changes. Light and dark modes share this refresh path; changing appearance does not request another system sample.
+
 ## Differences from Windows Task Manager
 
 This is an independent implementation, not a complete copy of Microsoft's Task Manager.
@@ -54,7 +62,7 @@ This is an independent implementation, not a complete copy of Microsoft's Task M
 | App history | CPU time recorded while this app runs. No Windows SRUM network or tile-update history. |
 | Startup | Broader inventory than the ordinary Startup apps list, but not exhaustive Autoruns coverage. Startup impact is **Not measured**. Some sources are read-only. |
 | Memory and GPU details | Memory composition uses in-use/cached/free categories. Some stock GPU fields, including DirectX feature level and hardware-reserved memory, are absent. |
-| Packaged apps | Grouped by package family; names use available file descriptions rather than resolved manifest display names and logos. |
+| Packaged apps | Grouped by package family, but classified as apps only when the group has a visible app window. Names and icons use available executable metadata, with a generic icon fallback rather than resolved manifest display names and logos. |
 | Process controls | No UAC virtualization toggle or kernel dumps. Affinity covers one processor group, up to 64 logical processors. Protected processes may refuse actions even with elevation. |
 | Efficiency mode | Available only when Windows supports querying the process's policy. Requests EcoQoS and lowers priority; it is not a CPU cap. Disabled on the tested Windows 10 build 19045. Live Windows 11 verification is still outstanding. |
 | Search and themes | Added to the classic tab layout. Search is substring-based, not a Boolean query language, and does not filter Performance resources. Popup menus and system dialogs remain OS-dependent. |

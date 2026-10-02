@@ -36,30 +36,11 @@ struct ServiceHandle {
 struct Scan {
   StartupInventory inventory;
   std::unordered_set<std::wstring> identities;
-  std::unordered_map<std::wstring, std::wstring> publishers;
   void warning(const std::wstring& source, DWORD error) {
     if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) inventory.warnings.push_back(source + L": " + winerror(error));
   }
   void add(Entry entry) {
     if (!identities.insert(lower(entry.key)).second) return;
-    if (!entry.path.empty() && entry.cells[1].empty()) {
-      const auto key = lower(entry.path); auto found = publishers.find(key);
-      if (found == publishers.end()) {
-        std::wstring publisher;
-        DWORD unused = 0; const DWORD size = GetFileVersionInfoSizeW(entry.path.c_str(), &unused);
-        if (size && size <= 4 * 1024 * 1024) {
-          std::vector<std::byte> version(size);
-          struct Translation { WORD language, codepage; }; Translation* translations = nullptr; UINT length = 0;
-          if (GetFileVersionInfoW(entry.path.c_str(), 0, size, version.data()) && VerQueryValueW(version.data(), L"\\VarFileInfo\\Translation", reinterpret_cast<void**>(&translations), &length) && length >= sizeof(Translation)) {
-            wchar_t query[128]{}; swprintf_s(query, L"\\StringFileInfo\\%04x%04x\\CompanyName", translations[0].language, translations[0].codepage);
-            wchar_t* text = nullptr; UINT textLength = 0;
-            if (VerQueryValueW(version.data(), query, reinterpret_cast<void**>(&text), &textLength) && text && textLength) publisher = text;
-          }
-        }
-        found = publishers.emplace(key, std::move(publisher)).first;
-      }
-      entry.cells[1] = found->second;
-    }
     inventory.entries.push_back(std::move(entry));
   }
 };
@@ -370,11 +351,13 @@ void scanPackages(Scan& scan) {
   } catch (const winrt::hresult_error& error) { scan.inventory.warnings.push_back(L"Packaged startup apps unavailable: " + std::wstring(error.message())); }
 }
 }
-StartupInventory readStartup() {
+StartupInventory readStartup(const std::function<void(const StartupInventory&)>& progress) {
   Scan scan;
+  scan.inventory.complete = false;
   for (const auto& source : {std::pair{L"Machine startup", &scanMachine}, std::pair{L"User profiles", &scanProfiles}, std::pair{L"Task Scheduler", &scanTasks}, std::pair{L"Services and drivers", &scanServices}, std::pair{L"Packaged apps", &scanPackages}}) {
     try { source.second(scan); }
     catch (const std::exception&) { scan.inventory.warnings.push_back(std::wstring(source.first) + L": source scan failed; other sources retained."); }
+    if (progress) progress(scan.inventory);
   }
   scan.inventory.warnings.push_back(L"Scope: boot/logon tasks, automatic services/drivers, packaged startup tasks, Run/RunOnce/policy keys and startup folders. Shell extensions, WMI subscriptions, Winlogon scripts and other injection/provider mechanisms are not enumerated. See docs/STARTUP.md.");
   std::sort(scan.inventory.warnings.begin(), scan.inventory.warnings.end());
@@ -383,6 +366,8 @@ StartupInventory readStartup() {
     Entry entry; entry.key = L"coverage:" + std::to_wstring(index);
     entry.cells = {L"Coverage: " + scan.inventory.warnings[index], L"", L"Partial", L"—", L"Coverage", L"", L"", L"", scan.inventory.warnings[index]}; scan.inventory.entries.push_back(std::move(entry));
   }
+  scan.inventory.complete = true;
+  if (progress) progress(scan.inventory);
   return std::move(scan.inventory);
 }
 #ifdef TASKMGR_DIAGNOSTICS

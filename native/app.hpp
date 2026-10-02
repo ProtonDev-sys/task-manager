@@ -14,6 +14,11 @@ struct Row {
   std::vector<int> members;
   HWND window = nullptr;
 };
+inline bool sameRowPaint(const Row& previous, const Row& next) {
+  if (previous.key != next.key || previous.kind != next.kind || previous.icon != next.icon || previous.depth != next.depth || previous.expandable != next.expandable || previous.expanded != next.expanded || previous.cells.size() != next.cells.size()) return false;
+  for (size_t index = 0; index < next.cells.size(); ++index) if (previous.cells[index].text != next.cells[index].text || previous.cells[index].heat != next.cells[index].heat) return false;
+  return true;
+}
 struct ColumnDef { const wchar_t* title; int width; bool right, visible, heat; };
 struct PerfItem { std::wstring key, title, subtitle, value, description; COLORREF color; };
 struct ActionResult { std::wstring error, report; };
@@ -21,6 +26,7 @@ constexpr int FewerId = 15, EndId = 14, LinkId = 18, HistoryLinkId = 19, ListId 
 constexpr int StartupManageId = 241;
 constexpr int RunId = 100, ExitId = 101, RefreshId = 102, TopmostId = 103, MinimizeOnUseId = 104, HideId = 105, GroupId = 106, ExpandAllId = 107, CollapseAllId = 108;
 constexpr int SpeedHigh = 110, SpeedNormal = 111, SpeedLow = 112, SpeedPause = 113, DefaultTabId = 120, FullNameId = 130, AllHistoryId = 131, ColumnId = 300;
+constexpr int SpeedAdaptive = 114;
 constexpr int ReplaceDefaultId = 132;
 constexpr int ThemeLightId = 133, ThemeDarkId = 134, ThemeSystemId = 135, SearchId = 136;
 constexpr int EfficiencyId = 137;
@@ -47,6 +53,7 @@ private:
   HIMAGELIST rowSpacer = nullptr;
   HICON windowIcon = nullptr, smallIcon = nullptr, trayIcon = nullptr;
   std::unique_ptr<Icons> icons;
+  bool iconRefreshQueued = false;
   std::shared_ptr<Sample> current;
   std::shared_ptr<const ServiceInventory> indexedInventory;
   std::unordered_map<DWORD, std::vector<const Entry*>> indexedServices;
@@ -85,7 +92,9 @@ private:
   double graphTime = 0, lastTrend = 0;
   bool topmost = false, minimizeOnUse = false, hideMinimized = false, groupByType = true, compact = false, closing = false, rebuilding = false, memoryPercent = false, networkPercent = false, logical = false, hideGraphs = false, fullName = false, allHistory = true, trayAdded = false;
   RECT normalRect{}, compactRect{};
-  std::atomic<int> interval{1000};
+  std::atomic<int> interval{250};
+  std::atomic<double> displayCost{0};
+  std::atomic<bool> fastVisible{true};
   std::atomic<bool> minimized{false}, stopping{false}, notification{false}, startupVisible{false};
   std::mutex workerMutex;
   std::condition_variable wake;
@@ -106,6 +115,10 @@ private:
   LONGLONG measurementCounter = 0;
   DWORD baselineHandles = 0, baselineGdi = 0, baselineUser = 0;
   std::vector<double> deliveryTimes, updateTimes, paintTimes, samplerTimes, inputTimes, sortTimes;
+  std::vector<double> sampleCadenceTimes;
+  unsigned resourceUpdates = 0;
+  Time lastResourcesSampledAt{};
+  unsigned partialTableUpdates = 0, invalidatedRows = 0;
   std::vector<double> hoverTimes, tabTimes, columnTimes;
   std::string sortingFailure;
   std::array<std::vector<double>, 6> stageTimes;

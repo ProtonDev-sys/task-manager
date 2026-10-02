@@ -24,9 +24,10 @@ static void jsonString(Report& stream, const std::wstring& value) {
   stream << '"';
 }
 static int startupReport(const std::wstring& output) {
-  const auto began = Clock::now(); const auto inventory = readStartup();
+  const auto began = Clock::now(); double firstEntries = -1; size_t snapshots = 0, previousCount = 0; bool progressive = true, completed = false;
+  const auto inventory = readStartup([&](const StartupInventory& snapshot) { ++snapshots; progressive = progressive && snapshot.entries.size() >= previousCount && !completed; previousCount = snapshot.entries.size(); completed = snapshot.complete; if (firstEntries < 0 && !snapshot.entries.empty()) firstEntries = milliseconds(began); });
   Report stream{output};
-  stream << "{\"native\":true,\"scanMilliseconds\":" << milliseconds(began) << ",\"warnings\":[";
+  stream << "{\"native\":true,\"passed\":" << (progressive && completed && snapshots == 6 ? "true" : "false") << ",\"firstEntriesMilliseconds\":" << firstEntries << ",\"progressSnapshots\":" << snapshots << ",\"scanMilliseconds\":" << milliseconds(began) << ",\"warnings\":[";
   for (size_t index = 0; index < inventory.warnings.size(); ++index) { if (index) stream << ','; jsonString(stream, inventory.warnings[index]); }
   stream << "],\"entries\":[";
   for (size_t index = 0; index < inventory.entries.size(); ++index) {
@@ -34,7 +35,7 @@ static int startupReport(const std::wstring& output) {
     stream << "{\"key\":"; jsonString(stream, entry.key); stream << ",\"editable\":" << (entry.startupEditable ? "true" : "false") << ",\"cells\":[";
     for (size_t cell = 0; cell < entry.cells.size(); ++cell) { if (cell) stream << ','; jsonString(stream, entry.cells[cell]); } stream << "]}";
   }
-  stream << "]}"; return stream ? 0 : 1;
+  stream << "]}"; return stream && progressive && completed && snapshots == 6 ? 0 : 1;
 }
 static void metric(Report& stream, const std::string& name, std::vector<double> times) { std::sort(times.begin(), times.end()); stream << '"' << name << "\":{\"count\":" << times.size() << ",\"meanMilliseconds\":" << (times.empty() ? 0 : std::accumulate(times.begin(), times.end(), 0.0) / double(times.size())) << ",\"p95Milliseconds\":" << (times.empty() ? 0 : times[size_t(std::ceil(double(times.size()) * .95)) - 1]) << '}'; }
 static int selfTest(const std::wstring& output) {
@@ -108,10 +109,18 @@ static int selfTest(const std::wstring& output) {
   check("duration_format", duration(90061) == L"1:01:01:01"); check("command_executable", commandExecutable(L"\"C:\\Program Files\\App\\app.exe\" --flag") == L"C:\\Program Files\\App\\app.exe");
   check("service_group_caption", serviceGroupCaption(L"LocalSystemNetworkRestricted") == L"Local System (Network Restricted)" && serviceGroupCaption(L"custom") == L"custom");
   Sampler sampler; const auto sample = sampler.sample(); check("native_process_snapshot", !sample.processes.empty()); check("native_memory", sample.memory.total > 0 && sample.memory.available <= sample.memory.total); check("native_cpu_bounds", sample.cpu >= 0 && sample.cpu <= 100); check("native_resources", sample.memory.total > 0 && !sample.cores.empty()); check("own_process_present", std::any_of(sample.processes.begin(), sample.processes.end(), [](const Process& value) { return value.id == GetCurrentProcessId(); }));
+  check("adaptive_refresh_fast_floor", adaptiveRefreshInterval(0, 0) == 250 && adaptiveRefreshInterval(3, 2) == 250);
+  check("adaptive_refresh_includes_display_cost", adaptiveRefreshInterval(8, 2) == 500 && adaptiveRefreshInterval(20, 4) == 1200);
+  check("adaptive_refresh_slow_ceiling", adaptiveRefreshInterval(100, 10) == 4000);
+  check("adaptive_refresh_invalid_costs", adaptiveRefreshInterval(NAN, 0) == 4000 && adaptiveRefreshInterval(INFINITY, 0) == 4000 && adaptiveRefreshInterval(-1, 0) == 4000);
   {
     const auto retained = sample; const auto next = sampler.sample();
+    check("resource_counters_reused_between_fast_samples", next.resourcesSampledAt == sample.resourcesSampledAt && next.cores == sample.cores && next.disks.size() == sample.disks.size());
+    Sleep(1050); const auto later = sampler.sample();
+    check("resource_counters_refresh_after_one_second", later.resourcesSampledAt > next.resourcesSampledAt);
     check("inventory_shared_between_samples", sample.inventory && next.inventory == sample.inventory && next.services.data() == sample.services.data() && next.sessions.data() == sample.sessions.data());
     sampler.invalidateInventory(); const auto refreshed = sampler.sample();
+    check("manual_refresh_invalidates_resource_cache", refreshed.resourcesSampledAt > later.resourcesSampledAt);
     check("inventory_refresh_replaces_snapshot", refreshed.inventory && refreshed.inventory != sample.inventory && refreshed.services.data() == refreshed.inventory->services.data());
     check("inventory_retained_sample_lifetime", retained.inventory == sample.inventory && retained.services.data() == retained.inventory->services.data() && retained.sessions.data() == retained.inventory->sessions.data());
     Sample detached;
@@ -122,6 +131,8 @@ static int selfTest(const std::wstring& output) {
   const bool spawned = CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &start, &child) != FALSE; check("owned_child_spawn", spawned);
   if (spawned) {
     Handle childHandle(child.hProcess), thread(child.hThread); FILETIME created{}, exited{}, kernel{}, user{}; GetProcessTimes(childHandle.value, &created, &exited, &kernel, &user); Process owned; owned.id = child.dwProcessId; owned.created = ticks(created); owned.name = L"Owned test child";
+    const auto withChild = sampler.sample();
+    check("fast_process_snapshot_detects_new_child", std::any_of(withChild.processes.begin(), withChild.processes.end(), [&](const Process& process) { return process.id == owned.id && process.created == owned.created; }));
     PROCESS_POWER_THROTTLING_STATE available{}; available.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
     const bool supportsEfficiency = GetProcessInformation(childHandle.value, ProcessPowerThrottling, &available, sizeof(available)) != FALSE;
     const DWORD efficiencyError = supportsEfficiency ? ERROR_SUCCESS : GetLastError();
@@ -139,6 +150,8 @@ static int selfTest(const std::wstring& output) {
     } catch (...) { check("owned_child_efficiency", false); }
     try { processAction(owned, Action::Idle); check("owned_child_priority_idle", GetPriorityClass(childHandle.value) == IDLE_PRIORITY_CLASS); processAction(owned, Action::BelowNormal); check("owned_child_priority_below", GetPriorityClass(childHandle.value) == BELOW_NORMAL_PRIORITY_CLASS); processAction(owned, Action::Normal); check("owned_child_priority_restore", GetPriorityClass(childHandle.value) == NORMAL_PRIORITY_CLASS); DWORD_PTR affinity = 0, system = 0; GetProcessAffinityMask(childHandle.value, &affinity, &system); processAction(owned, Action::Affinity, hexadecimal(affinity & (~affinity + 1))); DWORD_PTR selected = 0; GetProcessAffinityMask(childHandle.value, &selected, &system); check("owned_child_affinity", selected == (affinity & (~affinity + 1))); processAction(owned, Action::Affinity, hexadecimal(affinity)); check("owned_child_wait_chain", !waitChain(owned).empty()); { std::vector<Process> family(3); family[0] = owned; family[1].id = 900001; family[1].parent = owned.id; family[1].created = owned.created + 1; family[2].id = 900002; family[2].parent = owned.id; family[2].created = owned.created - 1; const auto tree = processTree(family, owned); check("process_tree_descendants", tree.size() == 2 && tree.back().pid == owned.id && tree.front().pid == 900001); } auto stale = owned; ++stale.created; bool refused = false; try { processAction(stale, Action::Idle); } catch (...) { refused = true; } check("stale_identity_refused", refused); processAction(owned, Action::End); check("owned_child_end", WaitForSingleObject(childHandle.value, 5000) == WAIT_OBJECT_0); }
     catch (...) { check("owned_child_actions", false); }
+    const auto withoutChild = sampler.sample();
+    check("fast_process_snapshot_removes_exited_child", std::none_of(withoutChild.processes.begin(), withoutChild.processes.end(), [&](const Process& process) { return process.id == owned.id && process.created == owned.created; }));
     if (WaitForSingleObject(childHandle.value, 0) == WAIT_TIMEOUT) TerminateProcess(childHandle.value, 1);
   }
   const bool passed = std::all_of(checks.begin(), checks.end(), [](const auto& entry) { return entry.second; });

@@ -72,12 +72,14 @@ int Application::run() {
   minimized = options.minimized;
   FILETIME created{}, exited{}; GetProcessTimes(GetCurrentProcess(), &created, &exited, &cpuStartKernel, &cpuStartUser);
 #endif
+  fastVisible = compact || selectedTab == ProcessesTab || selectedTab == DetailsTab || selectedTab == UsersTab;
   sampler = std::thread([this] { worker(); }); SetTimer(window, 1, hidden() ? 100 : screenshots ? 250 : 1000, nullptr);
   if (persistent()) PostMessageW(window, WM_APP + 11, 0, 0);
 #ifdef TASKMGR_DIAGNOSTICS
   if (hidden()) inputProbe = std::thread([this] { while (!stopping) { LARGE_INTEGER counter{}; QueryPerformanceCounter(&counter); PostMessageW(window, ProbeMessage, WPARAM(counter.QuadPart), 0); Sleep(50); } });
 #endif
   MSG message{}; while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+    if (message.message == WM_KEYUP && (message.wParam == VK_CONTROL || message.wParam == VK_LCONTROL || message.wParam == VK_RCONTROL) && notification) consume();
     if (sortQueued && Clock::now() >= sortDue) { rebuild(true); InvalidateRect(header, nullptr, FALSE); }
     const bool control = GetKeyState(VK_CONTROL) & 0x8000, shift = GetKeyState(VK_SHIFT) & 0x8000, alt = GetKeyState(VK_MENU) & 0x8000;
     if (message.message == WM_KEYDOWN && message.wParam == VK_F5) { refresh(); continue; }
@@ -135,7 +137,7 @@ void Application::create() {
   AppendMenuW(options_, MF_POPUP, reinterpret_cast<UINT_PTR>(themes), L"&Theme");
   for (int index = 0; index < TabCount; ++index) AppendMenuW(defaults, MF_STRING, UINT_PTR(DefaultTabId + index), tabNames[index]);
   AppendMenuW(options_, MF_POPUP, reinterpret_cast<UINT_PTR>(defaults), L"Set &default tab"); AppendMenuW(options_, MF_SEPARATOR, 0, nullptr); AppendMenuW(options_, MF_STRING, FullNameId, L"Show &full account name"); AppendMenuW(options_, MF_STRING, AllHistoryId, L"Show history for all &processes");
-  AppendMenuW(speed, MF_STRING, SpeedHigh, L"&High"); AppendMenuW(speed, MF_STRING, SpeedNormal, L"&Normal"); AppendMenuW(speed, MF_STRING, SpeedLow, L"&Low"); AppendMenuW(speed, MF_STRING, SpeedPause, L"&Paused");
+  AppendMenuW(speed, MF_STRING, SpeedAdaptive, L"&Adaptive (low overhead)"); AppendMenuW(speed, MF_STRING, SpeedHigh, L"&High"); AppendMenuW(speed, MF_STRING, SpeedNormal, L"&Normal"); AppendMenuW(speed, MF_STRING, SpeedLow, L"&Low"); AppendMenuW(speed, MF_STRING, SpeedPause, L"&Paused");
   AppendMenuW(view, MF_STRING, RefreshId, L"&Refresh now\tF5"); AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(speed), L"&Update speed"); AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(view, MF_STRING, SearchId, L"&Search\tCtrl+F");
   AppendMenuW(view, MF_STRING, GroupId, L"&Group by type"); AppendMenuW(view, MF_STRING, ExpandAllId, L"&Expand all"); AppendMenuW(view, MF_STRING, CollapseAllId, L"&Collapse all");
@@ -217,7 +219,7 @@ void Application::paintWindow(HDC dc) {
     RECT statusBand{0, tabBottom + scale(2), area.right, tabBottom + scale(34)};
     FillRect(dc, &statusBand, backgroundBrush);
     RECT coverage{scale(12), tabBottom + scale(8), std::max<LONG>(scale(12), area.right - scale(245)), tabBottom + scale(28)};
-    const auto message = !current || (current->startup->entries.empty() && current->startup->warnings.empty()) ? L"Scanning startup sources..." : current->startup->warnings.empty() ? L"Extended startup inventory" : L"Partial coverage - see coverage rows";
+    const auto message = !current || !current->startup->complete || (current->startup->entries.empty() && current->startup->warnings.empty()) ? L"Scanning startup sources..." : current->startup->warnings.empty() ? L"Extended startup inventory" : L"Partial coverage - see coverage rows";
     SetTextColor(dc, themeColor(RGB(109, 109, 109))); DrawTextW(dc, message, -1, &coverage, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     const double bios = lastBiosSeconds();
     if (bios > 0) {
@@ -238,6 +240,7 @@ void Application::selectTab(int tab) {
   captureColumns();
   KillTimer(window, 3); sortQueued = false;
   selectedTab = tab; startupVisible = tab == StartupTab && !compact; if (TabCtrl_GetCurSel(tabs) != tab) TabCtrl_SetCurSel(tabs, tab); hotRow = -1;
+  fastVisible = compact || tab == ProcessesTab || tab == DetailsTab || tab == UsersTab;
   if (tab != PerformanceTab) { if (columnsTab != tab) columns(); rebuild(); }
   layout();
   if (tab == StartupTab && !startupRequested) { startupRequested = true; if (!current || current->startup->entries.empty()) refresh(false); }
@@ -261,6 +264,7 @@ void Application::setCompact(bool value) {
   if (tabQueued) SendMessageW(tabs, WM_SETREDRAW, TRUE, 0);
   if (compact == value && hidden()) return;
   captureColumns(); compact = value; startupVisible = selectedTab == StartupTab && !compact;
+  fastVisible = compact || selectedTab == ProcessesTab || selectedTab == DetailsTab || selectedTab == UsersTab;
   RECT rect{}; GetWindowRect(window, &rect);
   if (compact) { normalRect = rect; SetMenu(window, nullptr); } else { compactRect = rect; SetMenu(window, menuBar); }
   const RECT target = compact ? compactRect : normalRect;
@@ -286,8 +290,8 @@ void Application::updateMenu(HMENU popup) {
   CheckMenuRadioItem(popup, ThemeLightId, ThemeSystemId, UINT(ThemeLightId + theme), MF_BYCOMMAND);
   check(SearchId, searchVisible); EnableMenuItem(popup, SearchId, MF_BYCOMMAND | ((compact || summary || selectedTab == PerformanceTab) ? MF_GRAYED : MF_ENABLED));
   EnableMenuItem(popup, ReplaceDefaultId, MF_BYCOMMAND | (actionBusy ? MF_GRAYED : MF_ENABLED));
-  const int speed = interval == 500 ? SpeedHigh : interval == 4000 ? SpeedLow : interval == 0 ? SpeedPause : SpeedNormal;
-  CheckMenuRadioItem(popup, SpeedHigh, SpeedPause, UINT(speed), MF_BYCOMMAND);
+  const int speed = interval == 250 ? SpeedAdaptive : interval == 500 ? SpeedHigh : interval == 4000 ? SpeedLow : interval == 0 ? SpeedPause : SpeedNormal;
+  CheckMenuRadioItem(popup, SpeedHigh, SpeedAdaptive, UINT(speed), MF_BYCOMMAND);
   CheckMenuRadioItem(popup, DefaultTabId, DefaultTabId + TabCount - 1, UINT(DefaultTabId + defaultTab), MF_BYCOMMAND);
   const bool tree = selectedTab == ProcessesTab || selectedTab == UsersTab;
   EnableMenuItem(popup, GroupId, MF_BYCOMMAND | (selectedTab == ProcessesTab ? MF_ENABLED : MF_GRAYED));
@@ -320,7 +324,7 @@ void Application::loadSettings() {
   auto read = [&](const wchar_t* section, const wchar_t* key, int fallback) { return persistent() ? int(GetPrivateProfileIntW(section, key, fallback, preferences.c_str())) : fallback; };
   defaultTab = std::clamp(read(L"Window", L"DefaultTab", 0), 0, TabCount - 1);
   theme = std::clamp(read(L"Window", L"Theme", 0), 0, 2);
-  interval = read(L"Window", L"Interval", 1000); if (interval != 0 && interval != 500 && interval != 1000 && interval != 4000) interval = 1000;
+  interval = read(L"Window", L"Interval", 250); if (interval != 0 && interval != 250 && interval != 500 && interval != 1000 && interval != 4000) interval = 250;
   topmost = read(L"Window", L"Topmost", 0); minimizeOnUse = read(L"Window", L"MinimizeOnUse", 1); hideMinimized = read(L"Window", L"Hide", 0); groupByType = read(L"Window", L"GroupByType", 1); compact = read(L"Window", L"Compact", 0);
   memoryPercent = read(L"Window", L"MemoryPercent", 0); networkPercent = read(L"Window", L"NetworkPercent", 0); logical = read(L"Window", L"Logical", 0); hideGraphs = read(L"Window", L"HideGraphs", 0); fullName = read(L"Window", L"FullName", 0); allHistory = read(L"Window", L"AllHistory", 1);
   normalRect = {read(L"Window", L"Left", 0), read(L"Window", L"Top", 0), read(L"Window", L"Right", 0), read(L"Window", L"Bottom", 0)};
@@ -385,9 +389,12 @@ void Application::loadHistory() {
 void Application::worker() {
   try {
     const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    Sampler source(!hidden());
+    Sampler source(!hidden(), [this] { wake.notify_all(); });
+    double samplingCost = 0;
     while (!stopping) {
+      const auto sampleStarted = Clock::now();
       auto sample = std::make_shared<Sample>(source.sample(startupVisible.load()));
+      const double cost = milliseconds(sampleStarted); samplingCost = samplingCost == 0 ? cost : samplingCost * .8 + cost * .2;
       { std::lock_guard lock(workerMutex); pending = std::move(sample);
 #ifdef TASKMGR_DIAGNOSTICS
         published = Clock::now();
@@ -399,7 +406,12 @@ void Application::worker() {
         while (source.startupPending() && !source.startupReady() && !stopping && !force && interval.load() == 0) wake.wait_for(lock, std::chrono::milliseconds(100));
         if (!source.startupReady()) wake.wait(lock, [&] { return stopping || force || interval.load() != 0; });
       }
-      else wake.wait_for(lock, std::chrono::milliseconds(minimized ? std::max(delay, 4000) : delay), [&] { return stopping || force; });
+      else {
+        const int requested = delay == 250 ? (fastVisible ? adaptiveRefreshInterval(samplingCost, displayCost.load()) : 1000) : delay;
+        const auto cadence = std::chrono::milliseconds(minimized ? std::max(requested, 4000) : requested);
+        const auto deadline = std::max(sampleStarted + cadence, Clock::now() + std::chrono::milliseconds(25));
+        wake.wait_until(lock, deadline, [&] { return stopping || force || source.startupReady() || interval.load() != delay; });
+      }
       if (forceInventory) source.invalidateInventory(); force = forceInventory = false;
     }
     if (SUCCEEDED(initialized)) CoUninitialize();
@@ -418,7 +430,11 @@ void Application::consume() {
 #endif
   }
   if (!sample) return;
+  const auto displayStarted = Clock::now();
 #ifdef TASKMGR_DIAGNOSTICS
+  if (hidden() && measured && sample->elapsed > 0) sampleCadenceTimes.push_back(sample->elapsed * 1000);
+  if (hidden() && measured && sample->resourcesSampledAt != lastResourcesSampledAt) ++resourceUpdates;
+  lastResourcesSampledAt = sample->resourcesSampledAt;
   if (hidden()) { if (measured && publish >= measurementStarted) deliveryTimes.push_back(milliseconds(publish)); samplerTimes.push_back(sample->duration); for (size_t index = 0; index < stageTimes.size(); ++index) stageTimes[index].push_back(sample->stages[index]); }
 #endif
   const bool startupChanged = !current || current->startup != sample->startup;
@@ -453,6 +469,7 @@ void Application::consume() {
   if (selectedTab == StartupTab && startupChanged) InvalidateRect(window, nullptr, FALSE);
   if (twoLineHeader()) InvalidateRect(header, nullptr, FALSE);
   updateTray();
+  const double cost = milliseconds(displayStarted); displayCost = displayCost.load() * .8 + cost * .2;
 }
 LRESULT CALLBACK Application::linkProcedure(HWND target, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR) {
   if (message == WM_SETCURSOR) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
@@ -478,11 +495,11 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
       if (accepted) app->asynchronous([target] { requestReplacement(target, true); return std::wstring{}; });
     }
     return 0;
-  case WM_SIZE: app->minimized = word == SIZE_MINIMIZED; if (app->minimized && app->hideMinimized && app->trayAdded) ShowWindow(target, SW_HIDE); if (!app->minimized) app->layout(); return 0;
+  case WM_SIZE: { const bool wasMinimized = app->minimized; app->minimized = word == SIZE_MINIMIZED; if (app->minimized && app->hideMinimized && app->trayAdded) ShowWindow(target, SW_HIDE); if (!app->minimized) { app->layout(); if (wasMinimized) { app->consume(); if (app->interval != 0) app->refresh(false); } } return 0; }
   case WM_GETMINMAXINFO: reinterpret_cast<MINMAXINFO*>(data)->ptMinTrackSize = app->summary ? POINT{app->scale(200), app->scale(150)} : app->compact ? POINT{app->scale(250), app->scale(200)} : POINT{app->scale(420), app->scale(300)}; return 0;
   case WM_DPICHANGED: { app->dpi = HIWORD(word); const auto rect = reinterpret_cast<RECT*>(data); SetWindowPos(target, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE); app->createFonts(); app->columns(); app->rebuild(); app->layout(); return 0; }
   case SampleMessage: app->consume(); return 0;
-  case IconMessage: app->icons->consume(); SetTimer(target, 2, app->hidden() ? 10 : 120, nullptr); return 0;
+  case IconMessage: app->icons->consume(); if (!app->iconRefreshQueued) app->iconRefreshQueued = SetTimer(target, 2, app->hidden() ? 10 : 120, nullptr) != 0; return 0;
   case ActionMessage: { std::deque<ActionResult> results; { std::lock_guard lock(app->actionMutex); results.swap(app->actionResults); } for (const auto& result : results) { if (!app->hidden() && !result.error.empty()) MessageBoxW(target, result.error.c_str(), L"Task Manager", MB_OK | MB_ICONERROR); if (!app->hidden() && !result.report.empty()) DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(103), target, [](HWND dialog, UINT code, WPARAM parameter, LPARAM value) -> INT_PTR { if (code == WM_INITDIALOG) { SetDlgItemTextW(dialog, 1001, reinterpret_cast<const wchar_t*>(value)); return TRUE; } if (code == WM_COMMAND && (LOWORD(parameter) == IDOK || LOWORD(parameter) == IDCANCEL)) { EndDialog(dialog, IDOK); return TRUE; } return FALSE; }, LPARAM(result.report.c_str())); } app->refresh(); return 0; }
   case TrayMessage:
     if (data == WM_LBUTTONUP || data == WM_LBUTTONDBLCLK) app->command(TrayRestore);
@@ -495,7 +512,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     if (word == 5) { app->applySearch(); return 0; }
     if (word == 4) { KillTimer(target, 4); app->writeSettings(); return 0; }
     if (word == 3) { if (app->sortQueued) { app->rebuild(true); InvalidateRect(app->header, nullptr, FALSE); } return 0; }
-    if (word == 2) { if (app->verifyingSorting || app->rebuilding) return 0; KillTimer(target, 2); if (!app->minimized && !(app->selectedTab == PerformanceTab && !app->compact)) app->rebuild(); return 0; }
+    if (word == 2) { if (app->verifyingSorting || app->rebuilding) return 0; KillTimer(target, 2); app->iconRefreshQueued = false; if (!app->minimized && !(app->selectedTab == PerformanceTab && !app->compact)) app->rebuild(); return 0; }
 #ifdef TASKMGR_DIAGNOSTICS
     if (app->hidden()) app->benchmarkTick(); else if (!app->options.screenshots.empty()) app->screenshotTick(); else
 #endif

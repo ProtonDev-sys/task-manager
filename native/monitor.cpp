@@ -107,7 +107,8 @@ struct NativeProcessor { int64_t idle, kernel, user, dpc, interrupt; ULONG inter
 static_assert(sizeof(NativeProcessor) == 48);
 using QuerySystem = LONG (WINAPI*)(ULONG, void*, ULONG, ULONG*);
 static QuerySystem querySystem() { static auto query = reinterpret_cast<QuerySystem>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation")); return query; }
-Sampler::Sampler(bool attribution) : buffer(64 * 1024) {
+Sampler::Sampler(bool attribution, std::function<void()> startupNotification) : buffer(64 * 1024) {
+  startupNotify = std::move(startupNotification);
   cpuInfo = readCpu(); memoryHardware = readMemoryHardware(); gpuDescriptors = readGpus();
   counters.add(L"idle", L"\\PhysicalDisk(*)\\% Idle Time");
   counters.add(L"diskRead", L"\\PhysicalDisk(*)\\Disk Read Bytes/sec");
@@ -143,6 +144,14 @@ Sample Sampler::sample(bool startupVisible) {
   auto phase = started;
 #endif
   Sample result; result.cpuInfo = cpuInfo;
+  const bool refreshResources = resourcesAt == Time{} || started - resourcesAt >= std::chrono::seconds(1);
+  const double resourceElapsed = cachedResources.resourcesSampledAt == Time{} ? 0 : std::chrono::duration<double>(started - cachedResources.resourcesSampledAt).count();
+  if (!refreshResources) {
+    result.cpuSpeed = cachedResources.cpuSpeed; result.interrupts = cachedResources.interrupts;
+    result.memory = cachedResources.memory; result.cores = cachedResources.cores;
+    result.disks = cachedResources.disks; result.networks = cachedResources.networks; result.gpus = cachedResources.gpus;
+  }
+  result.memory.compressed = 0;
   result.elapsed = last == Time{} ? 0 : std::chrono::duration<double>(started - last).count();
   const auto query = querySystem();
   if (!query) throw std::runtime_error("Native process query unavailable");
@@ -208,6 +217,7 @@ Sample Sampler::sample(bool startupVisible) {
     if (total && currentTotal > total && idleTicks >= idle) result.cpu = std::clamp(100.0 * (1.0 - double(idleTicks - idle) / double(currentTotal - total)), 0.0, 100.0);
     total = currentTotal; idle = idleTicks;
   }
+  if (refreshResources) {
   std::vector<NativeProcessor> processors(logical); ULONG returned = 0;
   if (query(8, processors.data(), ULONG(processors.size() * sizeof(NativeProcessor)), &returned) >= 0) {
     processors.resize(returned / sizeof(NativeProcessor)); corePrevious.resize(processors.size()); result.cores.resize(processors.size());
@@ -220,18 +230,20 @@ Sample Sampler::sample(bool startupVisible) {
     }
     if (totalTicks > 0) result.interrupts = std::clamp(100.0 * interruptTicks / totalTicks, 0.0, 100.0);
   }
-  MEMORYSTATUSEX memory{sizeof(memory)};
   PERFORMANCE_INFORMATION performance{sizeof(performance)};
   const auto compressed = result.memory.compressed; result.memory = memoryHardware; result.memory.compressed = compressed;
-  if (GlobalMemoryStatusEx(&memory)) { result.memory.total = memory.ullTotalPhys; result.memory.available = memory.ullAvailPhys; }
   if (GetPerformanceInfo(&performance, sizeof(performance))) {
     const double page = double(performance.PageSize); result.memory.committed = uint64_t(double(performance.CommitTotal) * page); result.memory.commitLimit = uint64_t(double(performance.CommitLimit) * page);
     result.memory.cached = uint64_t(double(performance.SystemCache) * page); result.memory.paged = uint64_t(double(performance.KernelPaged) * page); result.memory.nonpaged = uint64_t(double(performance.KernelNonpaged) * page);
   }
+  }
+  MEMORYSTATUSEX memory{sizeof(memory)};
+  if (GlobalMemoryStatusEx(&memory)) { result.memory.total = memory.ullTotalPhys; result.memory.available = memory.ullAvailPhys; }
   result.uptime = GetTickCount64() / 1000;
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[1] = milliseconds(phase); phase = Clock::now();
 #endif
+  if (refreshResources) {
   counters.collect();
   for (const auto& [name, value] : counters.values(L"performance")) { (void)name; result.cpuSpeed = cpuInfo.baseMhz * value / 100 / 1000; }
   if (result.cpuSpeed <= 0) result.cpuSpeed = cpuInfo.baseMhz / 1000;
@@ -257,6 +269,7 @@ Sample Sampler::sample(bool startupVisible) {
     result.disks.push_back(std::move(disk));
   }
   std::sort(result.disks.begin(), result.disks.end(), [](const DiskInfo& left, const DiskInfo& right) { return left.index < right.index; });
+  }
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[2] = milliseconds(phase); phase = Clock::now();
 #endif
@@ -275,6 +288,7 @@ Sample Sampler::sample(bool startupVisible) {
       adapterAddresses[adapter->Luid.Value] = std::move(entry);
     }
   }
+  if (refreshResources) {
   PMIB_IF_TABLE2 interfaces = nullptr;
   if (GetIfTable2(&interfaces) == NO_ERROR) {
     for (ULONG index = 0; index < interfaces->NumEntries; ++index) {
@@ -284,17 +298,19 @@ Sample Sampler::sample(bool startupVisible) {
       network.type = adapter.Type == IF_TYPE_IEEE80211 ? L"Wi-Fi" : adapter.Type == IF_TYPE_ETHERNET_CSMACD ? L"Ethernet" : adapter.Type == IF_TYPE_WWANPP || adapter.Type == IF_TYPE_WWANPP2 ? L"Cellular" : L"Network";
       if (const auto found = adapterAddresses.find(network.luid); found != adapterAddresses.end()) { if (!found->second[0].empty()) network.description = found->second[0]; network.ipv4 = found->second[1]; network.ipv6 = found->second[2]; }
       auto found = networkPrevious.find(network.luid);
-      if (found != networkPrevious.end() && result.elapsed > 0) { network.receive = adapter.InOctets >= found->second.first ? double(adapter.InOctets - found->second.first) / result.elapsed : 0; network.send = adapter.OutOctets >= found->second.second ? double(adapter.OutOctets - found->second.second) / result.elapsed : 0; }
+      if (found != networkPrevious.end() && resourceElapsed > 0) { network.receive = adapter.InOctets >= found->second.first ? double(adapter.InOctets - found->second.first) / resourceElapsed : 0; network.send = adapter.OutOctets >= found->second.second ? double(adapter.OutOctets - found->second.second) / resourceElapsed : 0; }
       networkPrevious[network.luid] = {adapter.InOctets, adapter.OutOctets};
       result.networks.push_back(std::move(network));
     }
     FreeMibTable(interfaces);
     std::erase_if(networkPrevious, [&](const auto& item) { return std::none_of(result.networks.begin(), result.networks.end(), [&](const auto& network) { return network.luid == item.first; }); });
   }
+  }
   if (trace && trace->active()) { result.networkAttribution = true; const auto rates = trace->rates(result.elapsed); for (auto& process : result.processes) { const auto found = rates.find(process.id); process.network = found == rates.end() ? 0 : found->second; } }
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[3] = milliseconds(phase); phase = Clock::now();
 #endif
+  if (refreshResources) {
   const auto engines = counters.values(L"gpu"), dedicated = counters.values(L"gpuDedicated"), shared = counters.values(L"gpuShared");
   struct ProcessGpu { double value = 0; std::wstring engine; };
   std::unordered_map<DWORD, ProcessGpu> processGpu;
@@ -320,10 +336,21 @@ Sample Sampler::sample(bool startupVisible) {
     result.gpus.push_back(std::move(gpu));
   }
   for (auto& process : result.processes) if (auto found = processGpu.find(process.id); found != processGpu.end()) { process.gpu = found->second.value; process.gpuEngine = found->second.engine; }
+  cachedProcessGpu.clear();
+  for (const auto& process : result.processes) if (process.gpu > 0 || !process.gpuEngine.empty()) cachedProcessGpu.emplace(Identity{process.id, process.created}, std::pair{process.gpu, process.gpuEngine});
+  cachedResources.cpuSpeed = result.cpuSpeed; cachedResources.interrupts = result.interrupts; cachedResources.memory = result.memory;
+  cachedResources.cores = result.cores; cachedResources.disks = result.disks; cachedResources.networks = result.networks; cachedResources.gpus = result.gpus;
+  resourcesAt = started;
+  cachedResources.resourcesSampledAt = started;
+  } else {
+    for (auto& process : result.processes) if (auto found = cachedProcessGpu.find(Identity{process.id, process.created}); found != cachedProcessGpu.end()) { process.gpu = found->second.first; process.gpuEngine = found->second.second; }
+  }
+  result.resourcesSampledAt = resourcesAt;
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[4] = milliseconds(phase); phase = Clock::now();
 #endif
   if (refreshInventory) { cachedInventory = std::make_shared<const ServiceInventory>(ServiceInventory{readServices(), readSessions()}); readUsers(); inventoryAt = Clock::now(); }
+  if (startupProgressReady.load()) { std::lock_guard lock(startupMutex); if (startupProgressReady.exchange(false)) cachedStartup = std::move(startupProgress); }
   if (startupJob.valid() && startupJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
     try { cachedStartup = std::make_shared<StartupInventory>(startupJob.get()); }
     catch (...) { auto failed = std::make_shared<StartupInventory>(); failed->warnings.push_back(L"Startup inventory failed; refresh to retry."); Entry entry; entry.key = L"coverage:failed"; entry.cells = {failed->warnings.front(), L"", L"Unavailable", L"—", L"Coverage", L"", L"", L"", failed->warnings.front()}; failed->entries.push_back(std::move(entry)); cachedStartup = std::move(failed); }
@@ -331,7 +358,7 @@ Sample Sampler::sample(bool startupVisible) {
   }
   if (startupVisible && !startupJob.valid() && (startupInvalidated || startupAt == Time{} || milliseconds(startupAt) >= 60000)) {
     startupInvalidated = false;
-    startupJob = std::async(std::launch::async, [] { const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED); StartupInventory result; try { result = readStartup(); } catch (...) { if (SUCCEEDED(initialized)) CoUninitialize(); throw; } if (SUCCEEDED(initialized)) CoUninitialize(); return result; });
+    startupJob = std::async(std::launch::async, [this] { const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED); StartupInventory result; try { result = readStartup([this](const StartupInventory& inventory) { { std::lock_guard lock(startupMutex); startupProgress = std::make_shared<StartupInventory>(inventory); startupProgressReady = true; } if (startupNotify) startupNotify(); }); } catch (...) { if (SUCCEEDED(initialized)) CoUninitialize(); throw; } if (SUCCEEDED(initialized)) CoUninitialize(); return result; });
   }
   result.inventory = cachedInventory; result.services = result.inventory->services; result.sessions = result.inventory->sessions; result.startup = cachedStartup; result.users = cachedUsers;
 #ifdef TASKMGR_DIAGNOSTICS

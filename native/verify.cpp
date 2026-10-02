@@ -13,6 +13,16 @@ bool Application::verifySorting() {
   const bool priorMeasured = measured; const unsigned priorTests = tests;
   benchmarkTick(); check(measured == priorMeasured && tests == priorTests, "benchmark-nested-tick-skipped");
   {
+    Row previous; previous.key = L"identity"; previous.cells = {{L"1.0%", 1.01, 0}};
+    auto next = previous; next.cells[0].value = 1.04; next.process = 5;
+    check(sameRowPaint(previous, next), "row-paint-ignores-unrendered-values-and-snapshot-indices");
+    next.cells[0].text = L"1.1%"; check(!sameRowPaint(previous, next), "row-paint-detects-text");
+    next = previous; next.cells[0].heat = 1; check(!sameRowPaint(previous, next), "row-paint-detects-heat");
+    next = previous; ++next.icon; check(!sameRowPaint(previous, next), "row-paint-detects-icon");
+    next = previous; next.expanded = true; check(!sameRowPaint(previous, next), "row-paint-detects-expansion");
+    next = previous; next.key = L"replacement"; check(!sameRowPaint(previous, next), "row-paint-detects-identity");
+  }
+  {
     const auto savedSample = current;
     auto inventory = std::make_shared<ServiceInventory>(); inventory->services.resize(3);
     inventory->services[0].pid = 42; inventory->services[0].description = L"Zulu";
@@ -29,6 +39,10 @@ bool Application::verifySorting() {
     current = savedSample; indexedServices.clear(); indexedInventory.reset();
   }
   check(activity.size() == current->processes.size(), "activity-live-count");
+  check(ImageList_GetImageCount(icons->images) >= 4, "stock-icons-present");
+  HICON fallbackIcon = ImageList_GetIcon(icons->images, Icons::DefaultIcon, ILD_NORMAL);
+  check(fallbackIcon != nullptr, "generic-process-icon-available");
+  if (fallbackIcon) DestroyIcon(fallbackIcon);
   check(verifyPerformanceHover(), "performance-hover");
   check(verifyTabSwitching(), "tab-switching");
   for (const auto& process : current->processes) { const auto found = activity.find({process.id, process.created}); check(found != activity.end() && found->second.ticks == process.cpuTicks && found->second.seen == activityGeneration && std::isfinite(found->second.trend), "activity-live-identity"); }
@@ -87,6 +101,11 @@ bool Application::verifySorting() {
         for (size_t index = 0; index < rows.size(); ++index) if (rows[index].kind != RowKind::Heading) { select(int(index)); break; }
         const auto selected = rowKey(selectedIndex());
         sortColumn[size_t(tab)] = int(column); ascending[size_t(tab)] = direction; rebuild(true);
+        if (tab == ProcessesTab) {
+          const bool headings = std::any_of(rows.begin(), rows.end(), [](const Row& row) { return row.kind == RowKind::Heading; });
+          check(headings == (grouped && column == 0), "process-headings-only-name-sort");
+          for (const auto& row : rows) if (row.depth == 0 && row.category == 0) check(std::any_of(row.members.begin(), row.members.end(), [&](int member) { return current->processes[size_t(member)].app; }), "app-group-requires-visible-window");
+        }
         check(rowKey(selectedIndex()) == selected, "selection");
         std::vector<std::wstring> actual; actual.reserve(rows.size()); for (const auto& row : rows) actual.push_back(row.key);
         rebuild();
@@ -247,7 +266,10 @@ bool Application::verifySorting() {
     check(rows.empty() && searchRows.size() == unfiltered, "compact-search-resumes-filter-in-full-view");
     SetWindowTextW(searchBox, L""); applySearch();
   }
-  sortColumn = savedColumns; ascending = savedDirections; groupByType = savedGrouping; expanded = savedExpanded; selectTab(savedTab); rebuild();
+  sortColumn = savedColumns; ascending = savedDirections; groupByType = savedGrouping; expanded = savedExpanded; selectTab(ProcessesTab); rebuild();
+  ValidateRect(list, nullptr); rebuild();
+  check(!GetUpdateRect(list, nullptr, FALSE), "unchanged-process-snapshot-no-table-repaint");
+  selectTab(savedTab); rebuild();
   verifyingSorting = false;
   return passed;
 }
@@ -451,7 +473,7 @@ void Application::benchmarkTick() {
   struct TickGuard { bool& running; ~TickGuard() { running = false; } } guard{benchmarkRunning};
   if (!current) { if (Clock::now() - started > std::chrono::seconds(30)) { writeBenchmark(); SendMessageW(window, WM_CLOSE, 0, 0); } return; }
   if (!sortingChecked) {
-    if (options.tab == StartupTab && current->startup->entries.empty()) {
+    if (options.tab == StartupTab && (!current->startup->complete || current->startup->entries.empty())) {
       selectTab(StartupTab);
       if (Clock::now() - started > std::chrono::seconds(30)) { sortingFailure = "startup-inventory-timeout"; writeBenchmark(); SendMessageW(window, WM_CLOSE, 0, 0); }
       return;
@@ -459,10 +481,12 @@ void Application::benchmarkTick() {
     sortingChecked = true; sortingPassed = verifySorting();
   }
   if (keyboardPassed && options.tab >= 0 && !options.tabSpam) selectTab(options.tab);
-  if (!measured && keyboardPassed && std::chrono::duration<double>(Clock::now() - started).count() >= options.warmup) {
+  if (keyboardPassed && options.minimized && !IsIconic(window)) ShowWindow(window, SW_SHOWMINNOACTIVE);
+  if (!measured && keyboardPassed && (!options.minimized || interval == 0 || (minimized && current && current->elapsed >= 3.5)) && std::chrono::duration<double>(Clock::now() - started).count() >= options.warmup) {
     measured = true; measurementStarted = Clock::now(); LARGE_INTEGER counter{}; QueryPerformanceCounter(&counter); measurementCounter = counter.QuadPart; FILETIME created{}, exited{}; GetProcessTimes(GetCurrentProcess(), &created, &exited, &cpuStartKernel, &cpuStartUser); GetProcessHandleCount(GetCurrentProcess(), &baselineHandles);
     baselineGdi = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS); baselineUser = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
     deliveryTimes.clear(); updateTimes.clear(); paintTimes.clear(); samplerTimes.clear(); inputTimes.clear(); sortTimes.clear(); tests = sortRequests = fullRebuilds = sortPasses = 0; for (auto& times : stageTimes) times.clear();
+    sampleCadenceTimes.clear(); partialTableUpdates = invalidatedRows = resourceUpdates = 0;
   }
   if (options.sortSpam && keyboardPassed && measured) {
     selectTab(options.tab >= 0 && options.tab != PerformanceTab ? options.tab : ProcessesTab);
@@ -521,6 +545,7 @@ void Application::writeBenchmark() {
   writeMetric(stream, "columnResize", columnTimes); stream << ',';
   stream << "\"tabRequests\":" << tabRequests << ",\"tabCommits\":" << tabCommits << ",\"tabSpamPassed\":" << (tabSpamPassed ? "true" : "false") << ',';
   writeMetric(stream, "sampler", samplerTimes); stream << ','; writeMetric(stream, "messageQueue", deliveryTimes); stream << ','; writeMetric(stream, "uiUpdate", updateTimes); stream << ','; writeMetric(stream, "graphPaint", paintTimes); stream << ','; writeMetric(stream, "letterNavigation", inputTimes); stream << ','; writeMetric(stream, "iconRequestToExtraction", icons->latencies); stream << ','; writeMetric(stream, "iconRequestToDisplay", icons->displayLatencies);
+  stream << ','; writeMetric(stream, "sampleCadence", sampleCadenceTimes); stream << ",\"partialTableUpdates\":" << partialTableUpdates << ",\"invalidatedRows\":" << invalidatedRows << ",\"resourceUpdates\":" << resourceUpdates;
   static constexpr const char* stages[] = {"processInventory", "cpuAndMemory", "pdhAndDisk", "network", "gpuAggregation", "servicesSessionsStartup"}; for (size_t index = 0; index < stageTimes.size(); ++index) { stream << ','; writeMetric(stream, stages[index], stageTimes[index]); } stream << '}';
   if (!stream) exitCode = 1;
 }
@@ -545,7 +570,7 @@ void Application::screenshotTick() {
   };
   const size_t shot = screenshotStep / 2;
   if (shot >= shots.size()) { SendMessageW(window, WM_CLOSE, 0, 0); return; }
-  if (screenshotStep % 2 && selectedTab == StartupTab && (!current || current->startup->entries.empty()) && Clock::now() - started < std::chrono::seconds(30)) return;
+  if (screenshotStep % 2 && selectedTab == StartupTab && (!current || !current->startup->complete || current->startup->entries.empty()) && Clock::now() - started < std::chrono::seconds(30)) return;
   if (screenshotStep++ % 2 == 0) { shots[shot].apply(); RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME); return; }
   RECT frame{}, bounds{}; GetWindowRect(window, &frame); if (FAILED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds)))) bounds = frame;
   const int width = frame.right - frame.left, height = frame.bottom - frame.top;

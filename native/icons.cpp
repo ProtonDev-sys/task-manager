@@ -49,7 +49,7 @@ Icons::Icons(HWND window, int iconSize) : target(window), size(iconSize) {
   images = ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, 128, 64);
   // Stock rows borrow Windows' own Task Manager icons: generic window, service, service host and user.
   const auto taskmgr = windowsDirectory() + L"\\System32\\Taskmgr.exe";
-  for (const int index : {1, 2, 3, 5}) { HICON icon = nullptr; if (FAILED(SHDefExtractIconW(taskmgr.c_str(), index, 0, &icon, nullptr, MAKELONG(size, size))) || !icon) icon = CopyIcon(LoadIconW(nullptr, IDI_APPLICATION)); ImageList_AddIcon(images, icon); DestroyIcon(icon); }
+  for (const int index : {1, 2, 3, 5}) { HICON icon = nullptr; if (index == 1 || FAILED(SHDefExtractIconW(taskmgr.c_str(), index, 0, &icon, nullptr, MAKELONG(size, size))) || !icon) icon = CopyIcon(LoadIconW(nullptr, IDI_APPLICATION)); ImageList_AddIcon(images, icon); DestroyIcon(icon); }
   for (auto& worker : workers) worker = std::thread([this] { run(); });
   enricher = std::thread([this] { enrich(); });
 }
@@ -82,12 +82,13 @@ void Icons::request(const Process& process, bool urgent) {
   if (urgent) requests.push_front(std::move(request)); else requests.push_back(std::move(request));
   signal.notify_all();
 }
-const FileInfo& Icons::file(const std::wstring& path) {
+const FileInfo& Icons::file(const std::wstring& path, bool urgent) {
   static const FileInfo empty;
   const auto key = lower(path); if (key.empty()) return empty;
   if (auto found = files.find(key); found != files.end()) return found->second;
   std::lock_guard lock(mutex);
-  if (requestedFiles.size() < 4096 && requestedFiles.insert(key).second) { requests.push_back({0, 0, path}); signal.notify_all(); }
+  if (requestedFiles.size() < 4096 && requestedFiles.insert(key).second) { if (urgent) requests.push_front({0, 0, path}); else requests.push_back({0, 0, path}); signal.notify_all(); }
+  else if (urgent) { auto found = std::find_if(requests.begin(), requests.end(), [&](const Request& request) { return request.pid == 0 && lower(request.path) == key; }); if (found != requests.end()) { auto request = std::move(*found); requests.erase(found); requests.push_front(std::move(request)); } }
   return empty;
 }
 void Icons::run() {

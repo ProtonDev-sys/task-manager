@@ -126,7 +126,7 @@ void Application::command(int id) {
   case AllHistoryId: allHistory = !allHistory; rebuild(); saveSettings(); return;
   case ExpandAllId: { bool changed = false; for (const auto& item : rows) if (item.expandable) changed = expanded.insert(item.key).second || changed; if (changed) rebuild(); return; }
   case CollapseAllId: if (!expanded.empty()) { expanded.clear(); rebuild(); } return;
-  case SpeedHigh: case SpeedNormal: case SpeedLow: case SpeedPause: { const int requested = id == SpeedHigh ? 500 : id == SpeedNormal ? 1000 : id == SpeedLow ? 4000 : 0; if (interval == requested) return; interval = requested; refresh(false); saveSettings(); return; }
+  case SpeedAdaptive: case SpeedHigh: case SpeedNormal: case SpeedLow: case SpeedPause: { const int requested = id == SpeedAdaptive ? 250 : id == SpeedHigh ? 500 : id == SpeedNormal ? 1000 : id == SpeedLow ? 4000 : 0; if (interval == requested) return; interval = requested; refresh(false); wake.notify_one(); saveSettings(); return; }
   case MemoryValues: case MemoryPercents: if (memoryPercent == (id == MemoryPercents)) return; memoryPercent = id == MemoryPercents; rebuild(); saveSettings(); return;
   case NetworkValues: case NetworkPercents: if (networkPercent == (id == NetworkPercents)) return; networkPercent = id == NetworkPercents; rebuild(); saveSettings(); return;
   case SummaryView: setSummary(summary ? 0 : 1); return;

@@ -43,6 +43,10 @@ namespace taskmgr {
 using Clock = std::chrono::steady_clock;
 using Time = Clock::time_point;
 inline double milliseconds(Time start) { return std::chrono::duration<double, std::milli>(Clock::now() - start).count(); }
+inline int adaptiveRefreshInterval(double samplingCost, double displayCost) {
+  if (!std::isfinite(samplingCost) || !std::isfinite(displayCost) || samplingCost < 0 || displayCost < 0) return 4000;
+  return int(std::clamp(std::ceil((samplingCost + displayCost) * 50), 250.0, 4000.0));
+}
 inline uint64_t ticks(FILETIME value) { return (uint64_t(value.dwHighDateTime) << 32) | value.dwLowDateTime; }
 inline std::wstring lower(std::wstring value) { std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) { return wchar_t(towlower(ch)); }); return value; }
 inline bool startsWithInsensitive(std::wstring_view value, std::wstring_view prefix) { return value.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), value.begin(), [](wchar_t first, wchar_t second) { return towlower(first) == towlower(second); }); }
@@ -79,7 +83,7 @@ struct FileInfo { std::wstring description, publisher; int icon = -1; };
 struct Identity { DWORD pid; uint64_t created; bool operator==(const Identity&) const = default; };
 struct IdentityHash { size_t operator()(const Identity& key) const { return std::hash<uint64_t>{}(key.created) ^ (std::hash<DWORD>{}(key.pid) << 1); } };
 struct Entry { std::wstring key; std::vector<std::wstring> cells; DWORD pid = 0, session = 0; bool enabled = false, startupEditable = false; std::wstring path, location, group, description; };
-struct StartupInventory { std::vector<Entry> entries; std::vector<std::wstring> warnings; };
+struct StartupInventory { std::vector<Entry> entries; std::vector<std::wstring> warnings; bool complete = true; };
 struct ServiceInventory { std::vector<Entry> services, sessions; };
 struct CpuInfo { std::wstring name; double baseMhz = 0; unsigned sockets = 0, cores = 0, logical = 1; std::array<uint64_t, 3> caches{}; bool virtualization = false; };
 struct MemoryInfo { uint64_t total = 0, available = 0, committed = 0, commitLimit = 0, cached = 0, paged = 0, nonpaged = 0, compressed = 0, installed = 0; unsigned speed = 0, slots = 0, usedSlots = 0; std::wstring formFactor; };
@@ -94,6 +98,7 @@ struct Sample {
   std::shared_ptr<const StartupInventory> startup;
   std::shared_ptr<const std::unordered_map<DWORD, std::wstring>> users;
   double cpu = 0, cpuSpeed = 0, interrupts = 0, elapsed = 0;
+  Time resourcesSampledAt{};
   std::vector<double> cores;
 #ifdef TASKMGR_DIAGNOSTICS
   double duration = 0;
@@ -134,6 +139,9 @@ class Sampler {
   std::unordered_map<DWORD, Previous> previous;
   uint64_t generation = 0;
   Time last{};
+  Sample cachedResources;
+  std::unordered_map<Identity, std::pair<double, std::wstring>, IdentityHash> cachedProcessGpu;
+  Time resourcesAt{};
   uint64_t idle = 0, total = 0;
   std::vector<std::array<uint64_t, 3>> corePrevious;
   CpuInfo cpuInfo;
@@ -141,6 +149,10 @@ class Sampler {
   Counter counters;
   std::shared_ptr<const ServiceInventory> cachedInventory;
   std::shared_ptr<const StartupInventory> cachedStartup = std::make_shared<StartupInventory>();
+  std::mutex startupMutex;
+  std::shared_ptr<const StartupInventory> startupProgress;
+  std::atomic<bool> startupProgressReady = false;
+  std::function<void()> startupNotify;
   std::future<StartupInventory> startupJob;
   Time startupAt{};
   bool startupInvalidated = true;
@@ -154,12 +166,12 @@ class Sampler {
   std::unique_ptr<NetworkTrace> trace;
   void readUsers();
 public:
-  explicit Sampler(bool attribution = false);
+  explicit Sampler(bool attribution = false, std::function<void()> startupNotification = {});
   ~Sampler();
   Sample sample(bool startupVisible = false);
-  bool startupReady() const { return startupJob.valid() && startupJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready; }
+  bool startupReady() const { return startupProgressReady.load() || (startupJob.valid() && startupJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready); }
   bool startupPending() const { return startupJob.valid(); }
-  void invalidateInventory() { inventoryAt = {}; startupInvalidated = true; }
+  void invalidateInventory() { inventoryAt = {}; resourcesAt = {}; startupInvalidated = true; }
 };
 CpuInfo readCpu();
 MemoryInfo readMemoryHardware();
@@ -170,7 +182,7 @@ double lastBiosSeconds();
 std::wstring serviceGroupCaption(const std::wstring& group);
 std::vector<Entry> readServices();
 std::vector<Entry> readSessions();
-StartupInventory readStartup();
+StartupInventory readStartup(const std::function<void(const StartupInventory&)>& progress = {});
 #ifdef TASKMGR_DIAGNOSTICS
 std::vector<std::pair<std::string, bool>> startupTests();
 #endif
@@ -224,7 +236,7 @@ public:
 #endif
   ~Icons();
   void request(const Process& process, bool urgent = false);
-  const FileInfo& file(const std::wstring& path);
+  const FileInfo& file(const std::wstring& path, bool urgent = false);
   void consume();
   const Metadata& get(const Process& process) const;
   template<class Live> void prune(const Live& live) {
