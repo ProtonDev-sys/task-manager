@@ -121,9 +121,11 @@ double gpuTemperature(const std::wstring& key) {
   using OpenAdapter = LONG (APIENTRY*)(Open*); using QueryAdapter = LONG (APIENTRY*)(const Query*); using CloseAdapter = LONG (APIENTRY*)(const Close*);
   static const auto gdi = GetModuleHandleW(L"gdi32.dll");
   static const auto open = reinterpret_cast<OpenAdapter>(GetProcAddress(gdi, "D3DKMTOpenAdapterFromLuid")); static const auto query = reinterpret_cast<QueryAdapter>(GetProcAddress(gdi, "D3DKMTQueryAdapterInfo")); static const auto close = reinterpret_cast<CloseAdapter>(GetProcAddress(gdi, "D3DKMTCloseAdapter"));
-  unsigned high = 0, low = 0;
-  if (!open || !query || !close || swscanf_s(key.c_str(), L"luid_0x%x_0x%x", &high, &low) != 2) return -1;
-  Open adapter{{low, LONG(high)}, 0}; if (open(&adapter) < 0) return -1;
+  if (!open || !query || !close || !key.starts_with(L"luid_0x")) return -1;
+  const auto separator = key.find(L"_0x", 7); if (separator == key.npos) return -1;
+  const auto high = counterInteger(std::wstring_view(key).substr(7, separator - 7), 16), low = counterInteger(std::wstring_view(key).substr(separator + 3), 16);
+  if (!high || !low) return -1;
+  Open adapter{{*low, LONG(*high)}, 0}; if (open(&adapter) < 0) return -1;
   Performance performance{}; const Query request{adapter.adapter, 62, &performance, sizeof(performance)};
   const bool read = query(&request) >= 0; const Close closing{adapter.adapter}; close(&closing);
   return read && performance.temperature > 0 && performance.temperature < 2000 ? performance.temperature / 10.0 : -1;

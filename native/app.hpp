@@ -48,6 +48,8 @@ private:
   HICON windowIcon = nullptr, smallIcon = nullptr, trayIcon = nullptr;
   std::unique_ptr<Icons> icons;
   std::shared_ptr<Sample> current;
+  std::shared_ptr<const ServiceInventory> indexedInventory;
+  std::unordered_map<DWORD, std::vector<const Entry*>> indexedServices;
   mutable std::vector<PerfItem> performanceItems;
   mutable bool performanceItemsDirty = true;
   bool performanceTracking = false;
@@ -168,6 +170,7 @@ private:
   void rebuild(bool sortOnly = false, bool filterOnly = false);
   void sortVisibleRows();
   void buildProcesses(std::vector<Row>& next);
+  const std::unordered_map<DWORD, std::vector<const Entry*>>& servicesByProcess();
   void buildUsers(std::vector<Row>& next);
   void buildDetails(std::vector<Row>& next);
   void buildEntries(std::vector<Row>& next);

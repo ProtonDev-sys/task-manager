@@ -8,6 +8,16 @@
 
 namespace taskmgr {
 std::wstring hexadecimal(uint64_t value) { wchar_t text[17]{}; swprintf_s(text, L"%llx", static_cast<unsigned long long>(value)); return text; }
+std::optional<uint32_t> counterInteger(std::wstring_view text, unsigned base) {
+  if (text.empty() || (base != 10 && base != 16)) return std::nullopt;
+  uint32_t value = 0;
+  for (const wchar_t character : text) {
+    const unsigned digit = character >= L'0' && character <= L'9' ? unsigned(character - L'0') : character >= L'a' && character <= L'f' ? unsigned(character - L'a') + 10 : character >= L'A' && character <= L'F' ? unsigned(character - L'A') + 10 : base;
+    if (digit >= base || value > (UINT32_MAX - digit) / base) return std::nullopt;
+    value = value * base + digit;
+  }
+  return value;
+}
 std::vector<std::wstring_view> splitFields(std::wstring_view text, wchar_t delimiter) {
   std::vector<std::wstring_view> fields;
   while (!text.empty()) { const size_t end = text.find(delimiter); fields.push_back(text.substr(0, end)); if (end == text.npos) break; text.remove_prefix(end + 1); }
@@ -97,7 +107,7 @@ struct NativeProcessor { int64_t idle, kernel, user, dpc, interrupt; ULONG inter
 static_assert(sizeof(NativeProcessor) == 48);
 using QuerySystem = LONG (WINAPI*)(ULONG, void*, ULONG, ULONG*);
 static QuerySystem querySystem() { static auto query = reinterpret_cast<QuerySystem>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation")); return query; }
-Sampler::Sampler(bool attribution) : buffer(1024 * 1024) {
+Sampler::Sampler(bool attribution) : buffer(64 * 1024) {
   cpuInfo = readCpu(); memoryHardware = readMemoryHardware(); gpuDescriptors = readGpus();
   counters.add(L"idle", L"\\PhysicalDisk(*)\\% Idle Time");
   counters.add(L"diskRead", L"\\PhysicalDisk(*)\\Disk Read Bytes/sec");
@@ -295,7 +305,10 @@ Sample Sampler::sample(bool startupVisible) {
       const auto engine = name.find(L"_engtype_"); if (engine == std::wstring::npos) continue;
       const auto engineNumber = name.find(L"_eng_"); const auto type = name.substr(engine + 9); const auto instance = (engineNumber == std::wstring::npos ? L"" : name.substr(engineNumber + 5, engine - engineNumber - 5)) + L"|" + type;
       engineTotals[instance] += value;
-      DWORD pid = 0; if (swscanf_s(name.c_str(), L"pid_%lu_", &pid) == 1) perProcess[pid][type] += value;
+      if (name.starts_with(L"pid_")) {
+        const auto end = name.find(L'_', 4);
+        if (end != name.npos) if (const auto pid = counterInteger(std::wstring_view(name).substr(4, end - 4), 10)) perProcess[*pid][type] += value;
+      }
     }
     std::map<std::wstring, double> byType;
     for (const auto& [instance, value] : engineTotals) { const auto type = instance.substr(instance.find(L'|') + 1); auto& slot = byType[type]; slot = std::max(slot, std::min(100.0, value)); gpu.usage = std::max(gpu.usage, std::min(100.0, value)); }
@@ -310,7 +323,7 @@ Sample Sampler::sample(bool startupVisible) {
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[4] = milliseconds(phase); phase = Clock::now();
 #endif
-  if (refreshInventory) { cachedServices = readServices(); cachedSessions = readSessions(); readUsers(); inventoryAt = Clock::now(); }
+  if (refreshInventory) { cachedInventory = std::make_shared<const ServiceInventory>(ServiceInventory{readServices(), readSessions()}); readUsers(); inventoryAt = Clock::now(); }
   if (startupJob.valid() && startupJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
     try { cachedStartup = std::make_shared<StartupInventory>(startupJob.get()); }
     catch (...) { auto failed = std::make_shared<StartupInventory>(); failed->warnings.push_back(L"Startup inventory failed; refresh to retry."); Entry entry; entry.key = L"coverage:failed"; entry.cells = {failed->warnings.front(), L"", L"Unavailable", L"—", L"Coverage", L"", L"", L"", failed->warnings.front()}; failed->entries.push_back(std::move(entry)); cachedStartup = std::move(failed); }
@@ -320,7 +333,7 @@ Sample Sampler::sample(bool startupVisible) {
     startupInvalidated = false;
     startupJob = std::async(std::launch::async, [] { const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED); StartupInventory result; try { result = readStartup(); } catch (...) { if (SUCCEEDED(initialized)) CoUninitialize(); throw; } if (SUCCEEDED(initialized)) CoUninitialize(); return result; });
   }
-  result.services = cachedServices; result.sessions = cachedSessions; result.startup = cachedStartup; result.users = cachedUsers;
+  result.inventory = cachedInventory; result.services = result.inventory->services; result.sessions = result.inventory->sessions; result.startup = cachedStartup; result.users = cachedUsers;
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[5] = milliseconds(phase);
   result.duration = milliseconds(started);

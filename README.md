@@ -69,7 +69,7 @@ On Windows x64, install Visual Studio 2022 or its Build Tools with **Desktop dev
 ./build.ps1
 ```
 
-The script builds the production executable, runs eight self-test and UI/stress test cases in a separate developer build, checks the production manifest and diagnostic exclusion, and copies the verified binary to `artifacts/app/TaskManager.exe`.
+The script builds the production executable, runs nine self-test, sampler and UI/stress test cases in a separate developer build, checks the production manifest and diagnostic exclusion, and copies the verified binary to `artifacts/app/TaskManager.exe`.
 
 Production requires elevation and excludes test, benchmark and screenshot tooling. Developer builds run without an elevation requirement and must not be distributed as releases. When the build script runs unelevated, it verifies Windows' refusal to launch production without elevation; runtime command-rejection checks require an elevated test shell.
 

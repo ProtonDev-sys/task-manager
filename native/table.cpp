@@ -157,17 +157,20 @@ void Application::sortVisibleRows() {
   for (const auto& block : blocks) for (size_t index = block.start; index < block.end; ++index) sorted.push_back(std::move(rows[index]));
   rows.swap(sorted);
 }
-static std::unordered_map<DWORD, std::vector<const Entry*>> servicesByProcess(const Sample& sample) {
+const std::unordered_map<DWORD, std::vector<const Entry*>>& Application::servicesByProcess() {
+  if (current->inventory && indexedInventory == current->inventory) return indexedServices;
   std::unordered_map<DWORD, std::vector<const Entry*>> result;
-  for (const auto& service : sample.services) if (service.pid) result[service.pid].push_back(&service);
+  for (const auto& service : current->services) if (service.pid) result[service.pid].push_back(&service);
   for (auto& [pid, hosted] : result) std::sort(hosted.begin(), hosted.end(), [](const Entry* left, const Entry* right) { return CompareStringEx(LOCALE_NAME_USER_DEFAULT, LINGUISTIC_IGNORECASE, left->description.c_str(), -1, right->description.c_str(), -1, nullptr, nullptr, 0) == CSTR_LESS_THAN; });
-  return result;
+  indexedServices.swap(result);
+  indexedInventory = current->inventory;
+  return indexedServices;
 }
 static std::wstring identityKey(const Process& process) { return std::to_wstring(process.id) + L":" + std::to_wstring(process.created); }
 // Windows 10 grouping: an app (a process with a visible top-level window, or a package) absorbs its descendant tree, service hosts list their
 // services, and with "Group by type" rows are split into Apps, Background processes and Windows processes.
 void Application::buildProcesses(std::vector<Row>& next) {
-  const auto& processes = current->processes; const auto services = servicesByProcess(*current);
+  const auto& processes = current->processes; const auto& services = servicesByProcess();
   std::unordered_map<DWORD, int> byId; byId.reserve(processes.size());
   for (size_t index = 0; index < processes.size(); ++index) byId[processes[index].id] = int(index);
   std::vector<std::pair<std::wstring, bool>> owners(processes.size()); std::vector<char> known(processes.size());
@@ -245,7 +248,7 @@ void Application::buildProcesses(std::vector<Row>& next) {
   }
 }
 void Application::buildUsers(std::vector<Row>& next) {
-  const auto services = servicesByProcess(*current);
+  const auto& services = servicesByProcess();
   std::vector<Row> users;
   for (size_t entry = 0; entry < current->sessions.size(); ++entry) {
     const auto& session = current->sessions[entry]; Row row; row.kind = RowKind::User; row.entry = int(entry); row.key = session.key; row.icon = Icons::UserIcon; row.expandable = true;

@@ -10,7 +10,7 @@ Use Windows x64 with Visual Studio 2022 or Build Tools, the Desktop development 
 ./build.ps1
 ```
 
-This builds production and a separate Debug developer executable, runs all eight CTest cases, and verifies production packaging. The published binary is `artifacts/app/TaskManager.exe`. Build output stays in `artifacts/` and should not be committed.
+This builds production and a separate Debug developer executable, runs all nine CTest cases, and verifies production packaging. The published binary is `artifacts/app/TaskManager.exe`. Build output stays in `artifacts/` and should not be committed.
 
 For optimized developer tests and benchmarks:
 
@@ -20,6 +20,18 @@ For optimized developer tests and benchmarks:
 ```
 
 Benchmark reports are written to `artifacts/benchmark-suite/`. Compare before and after on the same machine with the same workload. Report the Windows build, hardware, update interval and configuration; do not describe Debug timings as production performance.
+
+For repeated, alternating baseline/candidate performance comparisons, retain an optimized developer executable before making changes, then run:
+
+```powershell
+./performance.ps1 -BaselineExecutable artifacts/baseline/TaskManager.exe
+```
+
+Both developer executables must include the instrumented headless sampler benchmark. The comparison runs five repetitions of saturated sampling, a fixed-tab idle UI and component workloads, alternates execution order, checks exit codes and validation results, and writes raw reports plus median/min/max measurements to `artifacts/performance-comparison/comparison.json`. Use `-BaselineProductionExecutable` to include the original production file size; developer executable sizes include diagnostic tooling and are not release sizes. Do not build or run another benchmark concurrently with a comparison.
+
+Headless sampler reports include warmup, initialization time, process-count range, stage timings, CPU milliseconds per sample, private committed bytes and resident working-set bytes. CPU percent uses **one logical core** as 100%; divide by the machine's logical processor count to compare with whole-machine CPU percentages. Private bytes and working set are different measurements. Repeated ranges matter: process population, drivers, background load and heap retention introduce noise. A lower minimum or a single fast run is not proof of an improvement.
+
+See [performance investigation](docs/PERFORMANCE.md) for the optimization rationale and measured limits.
 
 To rerun just the self-tests or UI verification after an incremental build:
 
@@ -32,6 +44,8 @@ ctest --test-dir artifacts/native-tests -C Debug -R "^native-ui-test$" --output-
 Use `-C Release` and `--config Release` instead if you built the optimized developer configuration.
 
 ## Areas to check
+
+Use `./performance.ps1 -BaselineExecutable <before.exe> -Executable <after.exe> -ThemeComparison` for paired light/dark process, performance and tab-burst measurements. `./compiler-study.ps1` builds size/speed, LTO/no-LTO and inlining alternatives and saves raw headless reports. Run these serially on a quiet machine; compare production sizes separately from instrumented binaries. See `docs/PERFORMANCE-ROUND2.md` for methodology and rejected experiments.
 
 - UI changes: light/dark themes, High Contrast, DPI scaling, keyboard navigation, selection and scroll position. Include screenshots when they help show the change.
 - Sampling and sorting: identity handling when PIDs are reused, missing counters, paused updates and grouped rows. Keep slow discovery work off the UI thread.

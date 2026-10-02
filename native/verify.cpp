@@ -12,6 +12,22 @@ bool Application::verifySorting() {
   auto check = [&](bool result, const std::string& name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   const bool priorMeasured = measured; const unsigned priorTests = tests;
   benchmarkTick(); check(measured == priorMeasured && tests == priorTests, "benchmark-nested-tick-skipped");
+  {
+    const auto savedSample = current;
+    auto inventory = std::make_shared<ServiceInventory>(); inventory->services.resize(3);
+    inventory->services[0].pid = 42; inventory->services[0].description = L"Zulu";
+    inventory->services[1].pid = 42; inventory->services[1].description = L"Alpha";
+    inventory->services[2].pid = 0;
+    current = std::make_shared<Sample>(); current->inventory = inventory; current->services = inventory->services;
+    const auto& firstIndex = servicesByProcess();
+    check(firstIndex.size() == 1 && firstIndex.at(42).size() == 2 && firstIndex.at(42).front()->description == L"Alpha", "service-index-order-and-zero-pid");
+    const auto* retained = firstIndex.at(42).data(); servicesByProcess();
+    check(indexedServices.at(42).data() == retained, "service-index-reuses-storage");
+    auto replacement = std::make_shared<ServiceInventory>(); replacement->services.resize(1); replacement->services[0].pid = 43;
+    current = std::make_shared<Sample>(); current->inventory = replacement; current->services = replacement->services;
+    servicesByProcess(); check(indexedServices.size() == 1 && indexedServices.contains(43) && indexedInventory == replacement, "service-index-refresh");
+    current = savedSample; indexedServices.clear(); indexedInventory.reset();
+  }
   check(activity.size() == current->processes.size(), "activity-live-count");
   check(verifyPerformanceHover(), "performance-hover");
   check(verifyTabSwitching(), "tab-switching");
@@ -496,6 +512,7 @@ void Application::writeBenchmark() {
   PROCESS_MEMORY_COUNTERS_EX memory{sizeof(memory)}; GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory)); DWORD handles = 0; GetProcessHandleCount(GetCurrentProcess(), &handles);
   const double elapsed = std::max(.001, std::chrono::duration<double>(Clock::now() - (measured ? measurementStarted : started)).count()); const double cpu = double(ticks(kernel) + ticks(user) - ticks(cpuStartKernel) - ticks(cpuStartUser)) / 10000000;
   stream << "{\"native\":true,\"passed\":" << (exitCode == 0 ? "true" : "false") << ",\"elapsedSeconds\":" << elapsed << ",\"firstSampleMilliseconds\":" << (firstSample == Time{} ? 0 : std::chrono::duration<double, std::milli>(firstSample - started).count()) << ",\"processCpuPercentOneCore\":" << cpu * 100 / elapsed << ",\"privateBytes\":" << memory.PrivateUsage << ",\"handles\":" << handles << ",\"updates\":" << updates << ",\"exercises\":" << tests << ",\"keyboardPassed\":" << (keyboardPassed ? "true" : "false") << ',';
+  stream << "\"workingSetBytes\":" << memory.WorkingSetSize << ",\"peakWorkingSetBytes\":" << memory.PeakWorkingSetSize << ',';
   stream << "\"warmupSeconds\":" << options.warmup << ",\"handleDelta\":" << int64_t(handles) - baselineHandles << ",\"gdiDelta\":" << int64_t(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS)) - baselineGdi << ",\"userDelta\":" << int64_t(GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS)) - baselineUser << ',';
   stream << "\"sortingFailure\":\"" << sortingFailure << "\",";
   stream << "\"sortingPassed\":" << (sortingPassed ? "true" : "false") << ",\"coalescingPassed\":" << (coalescingPassed ? "true" : "false") << ",\"sortRequests\":" << sortRequests << ",\"fullRebuilds\":" << fullRebuilds << ",\"sortPasses\":" << sortPasses << ','; writeMetric(stream, "cachedSort", sortTimes); stream << ',';

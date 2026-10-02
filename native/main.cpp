@@ -422,6 +422,7 @@ void Application::consume() {
   if (hidden()) { if (measured && publish >= measurementStarted) deliveryTimes.push_back(milliseconds(publish)); samplerTimes.push_back(sample->duration); for (size_t index = 0; index < stageTimes.size(); ++index) stageTimes[index].push_back(sample->stages[index]); }
 #endif
   const bool startupChanged = !current || current->startup != sample->startup;
+  if (indexedInventory != sample->inventory) { indexedServices.clear(); indexedInventory.reset(); }
   current = std::move(sample);
   performanceItemsDirty = true;
 #ifdef TASKMGR_DIAGNOSTICS
@@ -466,7 +467,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
   if (!app) return DefWindowProcW(target, message, word, data);
   switch (message) {
   case WM_CREATE: app->create(); return 0;
-  case WM_SETTINGCHANGE: case WM_THEMECHANGED: app->applyTheme(); return 0;
+  case WM_SETTINGCHANGE: case WM_THEMECHANGED: app->indexedServices.clear(); app->indexedInventory.reset(); app->applyTheme(); return 0;
   case WM_ERASEBKGND: { RECT bounds{}; GetClientRect(target, &bounds); FillRect(HDC(word), &bounds, app->backgroundBrush ? app->backgroundBrush : GetStockBrush(WHITE_BRUSH)); return 1; }
   case WM_CTLCOLOREDIT: { const HDC dc = HDC(word); SetTextColor(dc, app->themeColor(RGB(0, 0, 0))); SetBkColor(dc, app->themeColor(RGB(255, 255, 255))); return LRESULT(app->backgroundBrush); }
   case WM_APP + 11:

@@ -48,6 +48,7 @@ inline std::wstring lower(std::wstring value) { std::transform(value.begin(), va
 inline bool startsWithInsensitive(std::wstring_view value, std::wstring_view prefix) { return value.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), value.begin(), [](wchar_t first, wchar_t second) { return towlower(first) == towlower(second); }); }
 std::wstring number(double value, int precision = 1);
 std::wstring hexadecimal(uint64_t value);
+std::optional<uint32_t> counterInteger(std::wstring_view text, unsigned base);
 std::vector<std::wstring_view> splitFields(std::wstring_view text, wchar_t delimiter);
 std::wstring grouped(double value, int precision = 0);
 std::wstring bytes(double value);
@@ -79,6 +80,7 @@ struct Identity { DWORD pid; uint64_t created; bool operator==(const Identity&) 
 struct IdentityHash { size_t operator()(const Identity& key) const { return std::hash<uint64_t>{}(key.created) ^ (std::hash<DWORD>{}(key.pid) << 1); } };
 struct Entry { std::wstring key; std::vector<std::wstring> cells; DWORD pid = 0, session = 0; bool enabled = false, startupEditable = false; std::wstring path, location, group, description; };
 struct StartupInventory { std::vector<Entry> entries; std::vector<std::wstring> warnings; };
+struct ServiceInventory { std::vector<Entry> services, sessions; };
 struct CpuInfo { std::wstring name; double baseMhz = 0; unsigned sockets = 0, cores = 0, logical = 1; std::array<uint64_t, 3> caches{}; bool virtualization = false; };
 struct MemoryInfo { uint64_t total = 0, available = 0, committed = 0, commitLimit = 0, cached = 0, paged = 0, nonpaged = 0, compressed = 0, installed = 0; unsigned speed = 0, slots = 0, usedSlots = 0; std::wstring formFactor; };
 struct DiskInfo { std::wstring key, title, model, type, letters; int index = 0; double active = 0, read = 0, write = 0, response = 0; uint64_t capacity = 0, formatted = 0; bool system = false, pagefile = false; };
@@ -87,7 +89,8 @@ struct GpuInfo { std::wstring key, name, driverVersion, driverDate, location; in
 struct AppWindow { HWND window = nullptr; DWORD pid = 0; std::wstring title; };
 struct Sample {
   std::vector<Process> processes;
-  std::vector<Entry> services, sessions;
+  std::shared_ptr<const ServiceInventory> inventory;
+  std::span<const Entry> services, sessions;
   std::shared_ptr<const StartupInventory> startup;
   std::shared_ptr<const std::unordered_map<DWORD, std::wstring>> users;
   double cpu = 0, cpuSpeed = 0, interrupts = 0, elapsed = 0;
@@ -136,7 +139,7 @@ class Sampler {
   CpuInfo cpuInfo;
   MemoryInfo memoryHardware;
   Counter counters;
-  std::vector<Entry> cachedServices, cachedSessions;
+  std::shared_ptr<const ServiceInventory> cachedInventory;
   std::shared_ptr<const StartupInventory> cachedStartup = std::make_shared<StartupInventory>();
   std::future<StartupInventory> startupJob;
   Time startupAt{};

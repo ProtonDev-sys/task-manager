@@ -41,6 +41,11 @@ static int selfTest(const std::wstring& output) {
   std::vector<std::pair<std::string, bool>> checks; auto check = [&](std::string name, bool passed) { checks.emplace_back(std::move(name), passed); };
   for (auto& test : startupTests()) checks.push_back(std::move(test));
   check("hexadecimal_bounds", hexadecimal(0) == L"0" && hexadecimal(UINT64_MAX) == L"ffffffffffffffff");
+  check("counter_integer_decimal", counterInteger(L"0", 10) == 0u && counterInteger(L"0042", 10) == 42u && counterInteger(L"4294967295", 10) == UINT32_MAX);
+  check("counter_integer_hexadecimal", counterInteger(L"0000002a", 16) == 42u && counterInteger(L"FFFFFFFF", 16) == UINT32_MAX);
+  check("counter_integer_overflow", !counterInteger(L"4294967296", 10) && !counterInteger(L"100000000", 16));
+  check("counter_integer_invalid", !counterInteger(L"", 10) && !counterInteger(L"-1", 10) && !counterInteger(L" 1", 10) && !counterInteger(L"1_", 10) && !counterInteger(L"a", 10) && !counterInteger(L"0x42", 16) && !counterInteger(L"1", 2));
+  check("gpu_temperature_invalid_key", gpuTemperature(L"luid_0x100000000_0x0") == -1 && gpuTemperature(L"luid_0x0_0x1trailing") == -1 && gpuTemperature(L"invalid") == -1);
   check("split_empty", splitFields(L"", L',').empty());
   check("split_delimiters", splitFields(L",alpha,,beta,", L',') == std::vector<std::wstring_view>{L"", L"alpha", L"", L"beta"});
   check("split_unicode", splitFields(L"\u03c0\t42\tpath", L'\t') == std::vector<std::wstring_view>{L"\u03c0", L"42", L"path"});
@@ -103,6 +108,16 @@ static int selfTest(const std::wstring& output) {
   check("duration_format", duration(90061) == L"1:01:01:01"); check("command_executable", commandExecutable(L"\"C:\\Program Files\\App\\app.exe\" --flag") == L"C:\\Program Files\\App\\app.exe");
   check("service_group_caption", serviceGroupCaption(L"LocalSystemNetworkRestricted") == L"Local System (Network Restricted)" && serviceGroupCaption(L"custom") == L"custom");
   Sampler sampler; const auto sample = sampler.sample(); check("native_process_snapshot", !sample.processes.empty()); check("native_memory", sample.memory.total > 0 && sample.memory.available <= sample.memory.total); check("native_cpu_bounds", sample.cpu >= 0 && sample.cpu <= 100); check("native_resources", sample.memory.total > 0 && !sample.cores.empty()); check("own_process_present", std::any_of(sample.processes.begin(), sample.processes.end(), [](const Process& value) { return value.id == GetCurrentProcessId(); }));
+  {
+    const auto retained = sample; const auto next = sampler.sample();
+    check("inventory_shared_between_samples", sample.inventory && next.inventory == sample.inventory && next.services.data() == sample.services.data() && next.sessions.data() == sample.sessions.data());
+    sampler.invalidateInventory(); const auto refreshed = sampler.sample();
+    check("inventory_refresh_replaces_snapshot", refreshed.inventory && refreshed.inventory != sample.inventory && refreshed.services.data() == refreshed.inventory->services.data());
+    check("inventory_retained_sample_lifetime", retained.inventory == sample.inventory && retained.services.data() == retained.inventory->services.data() && retained.sessions.data() == retained.inventory->sessions.data());
+    Sample detached;
+    { Sampler temporary; detached = temporary.sample(); }
+    check("inventory_outlives_sampler", detached.inventory && detached.services.data() == detached.inventory->services.data() && detached.sessions.data() == detached.inventory->sessions.data());
+  }
   std::wstring command = L"\"" + executable() + L"\" --test-child"; STARTUPINFOW start{sizeof(start)}; PROCESS_INFORMATION child{};
   const bool spawned = CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &start, &child) != FALSE; check("owned_child_spawn", spawned);
   if (spawned) {
@@ -143,6 +158,41 @@ static int components(const std::wstring& output) {
   for (int run = 0; run < 105; ++run) { auto start = Clock::now(); auto points = history.window(119.5); if (points.empty()) return 1; if (run >= 5) historyTimes.push_back(milliseconds(start)); start = Clock::now(); drawGraph(memory, {0, 0, 1000, 600}, history, 119.5, 100, GraphStyle{}); if (run >= 5) graphTimes.push_back(milliseconds(start)); }
   SelectObject(memory, old); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(nullptr, dc); metric(stream, "graphPaint1000x600", graphTimes); stream << ','; metric(stream, "graphWindow", historyTimes); stream << '}'; return stream ? 0 : 1;
 }
+static int samplerBenchmark(const std::vector<std::wstring>& arguments, const std::wstring& output) {
+  const auto initialization = Clock::now(); Sampler sampler;
+  const double initializationMilliseconds = milliseconds(initialization);
+  const int samples = std::clamp(std::stoi(option(arguments, L"--samples", L"30")), 2, 1000);
+  const int interval = std::clamp(std::stoi(option(arguments, L"--interval", L"100")), 0, 4000);
+  const int warmup = std::clamp(std::stoi(option(arguments, L"--warmup-samples", L"5")), 0, 100);
+  for (int index = 0; index < warmup; ++index) { sampler.sample(); if (interval) Sleep(DWORD(interval)); }
+  std::vector<double> times; times.reserve(size_t(samples)); std::array<std::vector<double>, 6> stages;
+  for (auto& values : stages) values.reserve(size_t(samples));
+  FILETIME created{}, exited{}, kernelStart{}, userStart{}, kernelEnd{}, userEnd{};
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernelStart, &userStart)) return 1;
+  const auto began = Clock::now(); size_t minimumProcesses = SIZE_MAX, maximumProcesses = 0;
+  for (int index = 0; index < samples; ++index) {
+    const auto sample = sampler.sample(); times.push_back(sample.duration);
+    minimumProcesses = std::min(minimumProcesses, sample.processes.size()); maximumProcesses = std::max(maximumProcesses, sample.processes.size());
+    for (size_t stage = 0; stage < stages.size(); ++stage) stages[stage].push_back(sample.stages[stage]);
+    if (index + 1 < samples && interval) Sleep(DWORD(interval));
+  }
+  const double elapsed = std::chrono::duration<double>(Clock::now() - began).count();
+  PROCESS_MEMORY_COUNTERS_EX memory{sizeof(memory)}; DWORD handles = 0;
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernelEnd, &userEnd) ||
+      !GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory)) ||
+      !GetProcessHandleCount(GetCurrentProcess(), &handles)) return 1;
+  const double cpuSeconds = double(ticks(kernelEnd) + ticks(userEnd) - ticks(kernelStart) - ticks(userStart)) / 10000000;
+  Report stream{output}; stream << "{\"native\":true,\"passed\":true,\"initializationMilliseconds\":" << initializationMilliseconds
+    << ",\"warmupSamples\":" << warmup << ",\"intervalMilliseconds\":" << interval << ",\"elapsedSeconds\":" << elapsed
+    << ",\"processCpuSeconds\":" << cpuSeconds << ",\"processCpuPercentOneCore\":" << cpuSeconds * 100 / std::max(.001, elapsed)
+    << ",\"cpuMillisecondsPerSample\":" << cpuSeconds * 1000 / samples << ",\"privateBytes\":" << memory.PrivateUsage
+    << ",\"workingSetBytes\":" << memory.WorkingSetSize << ",\"peakWorkingSetBytes\":" << memory.PeakWorkingSetSize
+    << ",\"handles\":" << handles << ",\"minimumProcesses\":" << minimumProcesses << ",\"maximumProcesses\":" << maximumProcesses << ',';
+  metric(stream, "sampler", times);
+  static constexpr const char* names[] = {"processInventory", "cpuAndMemory", "pdhAndDisk", "network", "gpuAggregation", "servicesSessionsStartup"};
+  for (size_t stage = 0; stage < stages.size(); ++stage) { stream << ','; metric(stream, names[stage], stages[stage]); }
+  stream << '}'; return stream ? 0 : 1;
+}
 int diagnostics(const std::vector<std::wstring>& arguments) {
   if (flag(arguments, L"--test-child")) { Sleep(60000); return 0; }
   const auto output = option(arguments, L"--output", L"native-report.json");
@@ -151,7 +201,7 @@ int diagnostics(const std::vector<std::wstring>& arguments) {
   if (flag(arguments, L"--component-benchmark")) return components(output);
   if (flag(arguments, L"--ui-benchmark")) { RunOptions options; options.hidden = true; options.theme = flag(arguments, L"--dark") ? 1 : 0; options.benchmarkSeconds = std::clamp(std::stoi(option(arguments, L"--seconds", L"15")), 5, 600); options.output = output; options.interval = std::clamp(std::stoi(option(arguments, L"--interval", L"1000")), 0, 4000); options.tab = std::clamp(std::stoi(option(arguments, L"--tab", L"-1")), -1, 6); options.minimized = flag(arguments, L"--minimized"); options.idle = flag(arguments, L"--idle"); options.sortSpam = flag(arguments, L"--sort-spam"); options.tabSpam = flag(arguments, L"--tab-spam"); options.warmup = std::clamp(std::stoi(option(arguments, L"--warmup", L"2")), 0, 60); return runApplication(options); }
   if (flag(arguments, L"--screenshots")) { RunOptions options; options.theme = flag(arguments, L"--dark") ? 1 : 0; options.screenshots = option(arguments, L"--screenshots", L"screenshots"); std::error_code error; std::filesystem::create_directories(options.screenshots, error); return runApplication(options); }
-  if (flag(arguments, L"--benchmark")) { Sampler sampler; std::vector<double> times; const int samples = std::clamp(std::stoi(option(arguments, L"--samples", L"30")), 2, 1000), interval = std::clamp(std::stoi(option(arguments, L"--interval", L"100")), 0, 4000); for (int index = 0; index < samples; ++index) { const auto sample = sampler.sample(); times.push_back(sample.duration); if (index + 1 < samples) Sleep(DWORD(interval)); } Report stream{output}; stream << "{\"native\":true,\"passed\":true,"; metric(stream, "sampler", times); stream << '}'; return stream ? 0 : 1; }
+  if (flag(arguments, L"--benchmark")) return samplerBenchmark(arguments, output);
   return 2;
 }
 }
