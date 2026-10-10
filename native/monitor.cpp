@@ -30,8 +30,10 @@ static void aggregateGpuEngines(GpuInfo& gpu, std::span<const std::pair<std::wst
   for (const auto& [name, value] : engines) {
     if (name.find(gpu.key) == std::wstring::npos) continue;
     const auto engine = name.find(L"_engtype_"); if (engine == std::wstring::npos) continue;
-    const auto engineNumber = name.find(L"_eng_"); const auto type = name.substr(engine + 9);
-    const auto instance = (engineNumber == std::wstring::npos ? L"" : name.substr(engineNumber + 5, engine - engineNumber - 5)) + L"|" + type;
+    const auto engineNumber = name.find(L"_eng_"), physicalAdapter = name.find(L"_phys_"); const auto type = name.substr(engine + 9);
+    // Linked physical adapters share a LUID but can reuse engine numbers.
+    const auto instanceStart = physicalAdapter < engineNumber ? physicalAdapter : engineNumber;
+    const auto instance = (instanceStart == std::wstring::npos ? L"" : name.substr(instanceStart, engine - instanceStart)) + L"|" + type;
     engineTotals[instance] += value;
     if (name.starts_with(L"pid_")) {
       const auto end = name.find(L'_', 4);
@@ -52,7 +54,7 @@ static void aggregateGpuEngines(GpuInfo& gpu, std::span<const std::pair<std::wst
 std::vector<std::pair<std::string, bool>> gpuEngineTests() {
   std::vector<std::pair<std::string, bool>> checks;
   const std::wstring firstKey = L"luid_0x00000000_0x00000001", secondKey = L"luid_0x00000000_0x00000002";
-  const auto name = [](DWORD pid, const std::wstring& key, unsigned engine, const wchar_t* type) { return L"pid_" + std::to_wstring(pid) + L"_" + key + L"_phys_0_eng_" + std::to_wstring(engine) + L"_engtype_" + type; };
+  const auto name = [](DWORD pid, const std::wstring& key, unsigned engine, const wchar_t* type, unsigned physical = 0) { return L"pid_" + std::to_wstring(pid) + L"_" + key + L"_phys_" + std::to_wstring(physical) + L"_eng_" + std::to_wstring(engine) + L"_engtype_" + type; };
   {
     GpuInfo gpu; gpu.key = firstKey;
     std::unordered_map<DWORD, ProcessGpu> processes;
@@ -60,6 +62,14 @@ std::vector<std::pair<std::string, bool>> gpuEngineTests() {
     aggregateGpuEngines(gpu, engines, processes);
     checks.emplace_back("gpu_process_uses_busiest_engine_of_same_type", processes.at(10).value == 50 && processes.at(10).engine == L"GPU 0 - 3D");
     checks.emplace_back("gpu_adapter_uses_busiest_engine_of_same_type", gpu.usage == 50 && gpu.engines == std::vector<std::pair<std::wstring, double>>{{L"3D", 50}});
+  }
+  {
+    GpuInfo gpu; gpu.key = firstKey;
+    std::unordered_map<DWORD, ProcessGpu> processes;
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D", 0), 40}, {name(10, firstKey, 0, L"3D", 1), 50}};
+    aggregateGpuEngines(gpu, engines, processes);
+    checks.emplace_back("gpu_process_distinguishes_linked_physical_adapters", processes.at(10).value == 50 && processes.at(10).engine == L"GPU 0 - 3D");
+    checks.emplace_back("gpu_adapter_distinguishes_linked_physical_adapters", gpu.usage == 50 && gpu.engines == std::vector<std::pair<std::wstring, double>>{{L"3D", 50}});
   }
   {
     GpuInfo gpu; gpu.key = firstKey;
