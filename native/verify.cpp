@@ -4,6 +4,54 @@
 #include <windowsx.h>
 
 namespace taskmgr {
+bool Application::verifyTrayLifecycle() {
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  // This fixture has no window, sampler or persistent files. Intercept every
+  // notification so only its owned GDI objects are created, never shell icons.
+  Application fixture(RunOptions{});
+  std::vector<DWORD> messages; bool acceptModify = true, acceptAdd = true;
+  fixture.trayNotification = [&](DWORD message) { messages.push_back(message); return message == NIM_ADD ? acceptAdd : acceptModify; };
+  fixture.current = std::make_shared<Sample>(); fixture.current->cpu = 10;
+  fixture.pending = std::make_shared<Sample>(); fixture.pending->cpu = 75; fixture.pending->memory.total = 100; fixture.pending->memory.available = 40;
+  const auto displayed = fixture.current, newest = fixture.pending;
+  fixture.minimized = true; fixture.notification = true; fixture.consume();
+  check(fixture.trayAdded && fixture.trayLevel == 11 && std::wstring_view(fixture.tray.szTip).starts_with(L"CPU: 75%\nMemory: 60%"), "minimized-tray-uses-new-sample");
+  check(messages == std::vector<DWORD>{NIM_ADD} && !fixture.notification, "minimized-tray-acknowledges-notification");
+  check(fixture.current == displayed && fixture.pending == newest && fixture.fullRebuilds == 0 && fixture.updates == 0 && fixture.histories.empty() && fixture.usage.empty(), "minimized-tray-retains-display-snapshot-without-rebuilding");
+  messages.clear(); acceptModify = acceptAdd = false;
+  fixture.pending = std::make_shared<Sample>(); fixture.pending->cpu = 25;
+  const auto following = fixture.pending; fixture.notification = true; fixture.consume();
+  check(messages == std::vector<DWORD>{NIM_MODIFY, NIM_ADD} && !fixture.trayAdded && fixture.trayLevel == 4 && std::wstring_view(fixture.tray.szTip).starts_with(L"CPU: 25%"), "tray-notification-failure-keeps-new-meter");
+  check(fixture.current == displayed && fixture.pending == following && !fixture.notification, "minimized-tray-keeps-latest-pending-snapshot");
+  messages.clear(); acceptAdd = true; fixture.interval = 0; fixture.publishTray();
+  check(fixture.trayAdded && messages == std::vector<DWORD>{NIM_ADD} && fixture.pending == following && !fixture.force && fixture.interval == 0, "paused-tray-retry-does-not-refresh-sample");
+  messages.clear(); fixture.closing = true; fixture.publishTray();
+  check(messages.empty(), "closing-tray-does-not-register-again");
+
+  // Verify the actual registered-message and timer routes on this app's hidden
+  // test window. Its tray callback is intercepted for the entire scope.
+  auto savedCallback = std::move(trayNotification); const bool savedAdded = trayAdded; const int savedInterval = interval.load();
+  struct Restore {
+    std::function<bool(DWORD)>& callback; std::function<bool(DWORD)>& original;
+    bool& added; bool oldAdded; std::atomic<int>& interval; int oldInterval; std::condition_variable& wake;
+    ~Restore() { callback = std::move(original); added = oldAdded; interval = oldInterval; wake.notify_one(); }
+  } restore{trayNotification, savedCallback, trayAdded, savedAdded, interval, savedInterval, wake};
+  messages.clear(); bool available = false;
+  trayNotification = [&](DWORD message) { messages.push_back(message); return available; };
+  const auto sampleBefore = current; const unsigned rebuildsBefore = fullRebuilds;
+  const std::wstring tipBefore = tray.szTip; const HICON iconBefore = tray.hIcon;
+  trayAdded = true; interval = 0;
+  check(taskbarCreatedMessage != 0, "taskbar-created-message-registered");
+  if (taskbarCreatedMessage) {
+    SendMessageW(window, taskbarCreatedMessage, 0, 0);
+    check(messages == std::vector<DWORD>{NIM_ADD} && !trayAdded, "taskbar-created-readds-lost-icon");
+    messages.clear(); available = true; SendMessageW(window, WM_TIMER, 1, 0);
+    check(messages == std::vector<DWORD>{NIM_ADD} && trayAdded, "taskbar-created-retries-failed-registration");
+    check(current == sampleBefore && fullRebuilds == rebuildsBefore && interval == 0 && tray.szTip == tipBefore && tray.hIcon == iconBefore, "paused-taskbar-recovery-retains-meter-and-display");
+  }
+  return passed;
+}
 bool Application::verifySorting() {
   verifyingSorting = true;
   const int savedTab = selectedTab; const bool savedGrouping = groupByType; const auto savedExpanded = expanded;
@@ -12,6 +60,7 @@ bool Application::verifySorting() {
   auto check = [&](bool result, const std::string& name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   const bool priorMeasured = measured; const unsigned priorTests = tests;
   benchmarkTick(); check(measured == priorMeasured && tests == priorTests, "benchmark-nested-tick-skipped");
+  check(verifyTrayLifecycle(), "tray-lifecycle");
   {
     Row previous; previous.key = L"identity"; previous.cells = {{L"1.0%", 1.01, 0}};
     auto next = previous; next.cells[0].value = 1.04; next.process = 5;

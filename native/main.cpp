@@ -144,7 +144,9 @@ void Application::create() {
   AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File"); AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(options_), L"&Options"); AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&View");
   SetMenu(window, menuBar);
   tray.hWnd = window; tray.uID = 1; tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; tray.uCallbackMessage = TrayMessage; tray.hIcon = smallIcon; wcscpy_s(tray.szTip, L"Task Manager");
-  if (persistent()) trayAdded = Shell_NotifyIconW(NIM_ADD, &tray) != FALSE;
+  taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
+  if (taskbarCreatedMessage) ChangeWindowMessageFilterEx(window, taskbarCreatedMessage, MSGFLT_ALLOW, nullptr);
+  publishTray();
   applyTheme(); columns(); layout(); updateFooter();
 }
 void Application::layout() {
@@ -297,28 +299,46 @@ void Application::updateMenu(HMENU popup) {
   EnableMenuItem(popup, GroupId, MF_BYCOMMAND | (selectedTab == ProcessesTab ? MF_ENABLED : MF_GRAYED));
   EnableMenuItem(popup, ExpandAllId, MF_BYCOMMAND | (tree ? MF_ENABLED : MF_GRAYED)); EnableMenuItem(popup, CollapseAllId, MF_BYCOMMAND | (tree ? MF_ENABLED : MF_GRAYED));
 }
+bool Application::notifyTray(DWORD message) {
+#ifdef TASKMGR_DIAGNOSTICS
+  if (trayNotification) return trayNotification(message);
+#endif
+  return persistent() && Shell_NotifyIconW(message, &tray) != FALSE;
+}
+void Application::publishTray() {
+  if (closing) return;
+  if (trayAdded && notifyTray(NIM_MODIFY)) return;
+  trayAdded = notifyTray(NIM_ADD);
+}
 // The notification-area icon is a CPU meter, like Windows' own Task Manager.
-void Application::updateTray() {
-  if (!trayAdded || !current) return;
-  const int level = int(std::lround(current->cpu / 100 * 14));
-  const double memory = current->memory.total ? 100.0 * double(current->memory.total - current->memory.available) / double(current->memory.total) : 0;
-  double disk = 0; for (const auto& item : current->disks) disk = std::max(disk, item.active);
-  double network = 0; for (const auto& item : current->networks) if (item.speed) network = std::max(network, 800.0 * (item.send + item.receive) / double(item.speed));
-  swprintf_s(tray.szTip, L"CPU: %.0f%%\nMemory: %.0f%%\nDisk: %.0f%%\nNetwork: %.0f%%", current->cpu, memory, disk, std::min(100.0, network));
+void Application::updateTray(const Sample& sample) {
+  if (closing || (!persistent()
+#ifdef TASKMGR_DIAGNOSTICS
+      && !trayNotification
+#endif
+      )) return;
+  const int level = int(std::lround(sample.cpu / 100 * 14));
+  const double memory = sample.memory.total ? 100.0 * double(sample.memory.total - sample.memory.available) / double(sample.memory.total) : 0;
+  double disk = 0; for (const auto& item : sample.disks) disk = std::max(disk, item.active);
+  double network = 0; for (const auto& item : sample.networks) if (item.speed) network = std::max(network, 800.0 * (item.send + item.receive) / double(item.speed));
+  swprintf_s(tray.szTip, L"CPU: %.0f%%\nMemory: %.0f%%\nDisk: %.0f%%\nNetwork: %.0f%%", sample.cpu, memory, disk, std::min(100.0, network));
   if (level != trayLevel) {
-    trayLevel = level; const int size = GetSystemMetrics(SM_CXSMICON);
+    const int size = GetSystemMetrics(SM_CXSMICON);
     BITMAPINFO information{}; information.bmiHeader = {sizeof(BITMAPINFOHEADER), size, -size, 1, 32, BI_RGB}; void* bits = nullptr;
     HBITMAP color = CreateDIBSection(nullptr, &information, DIB_RGB_COLORS, &bits, nullptr, 0), mask = CreateBitmap(size, size, 1, 1, nullptr);
-    auto pixels = static_cast<DWORD*>(bits); const int fill = int(std::lround(double(level) / 14 * (size - 4)));
-    for (int y = 0; y < size; ++y) for (int x = 0; x < size; ++x) {
-      const bool frame = x >= 1 && x <= size - 2 && y >= 1 && y <= size - 2, edge = frame && (x == 1 || x == size - 2 || y == 1 || y == size - 2);
-      DWORD value = 0; if (edge) value = 0xff5a5a5a; else if (frame) value = y >= size - 2 - fill ? 0xff36b04a : 0xff1e1e1e;
-      pixels[y * size + x] = value;
+    if (color && mask && bits) {
+      auto pixels = static_cast<DWORD*>(bits); const int fill = int(std::lround(double(level) / 14 * (size - 4)));
+      for (int y = 0; y < size; ++y) for (int x = 0; x < size; ++x) {
+        const bool frame = x >= 1 && x <= size - 2 && y >= 1 && y <= size - 2, edge = frame && (x == 1 || x == size - 2 || y == 1 || y == size - 2);
+        DWORD value = 0; if (edge) value = 0xff5a5a5a; else if (frame) value = y >= size - 2 - fill ? 0xff36b04a : 0xff1e1e1e;
+        pixels[y * size + x] = value;
+      }
+      ICONINFO iconInfo{TRUE, 0, 0, mask, color}; HICON next = CreateIconIndirect(&iconInfo);
+      if (next) { trayLevel = level; tray.hIcon = next; if (trayIcon) DestroyIcon(trayIcon); trayIcon = next; }
     }
-    ICONINFO iconInfo{TRUE, 0, 0, mask, color}; HICON next = CreateIconIndirect(&iconInfo); DeleteObject(color); DeleteObject(mask);
-    if (next) { tray.hIcon = next; if (trayIcon) DestroyIcon(trayIcon); trayIcon = next; }
+    if (color) DeleteObject(color); if (mask) DeleteObject(mask);
   }
-  Shell_NotifyIconW(NIM_MODIFY, &tray);
+  publishTray();
 }
 void Application::loadSettings() {
   auto read = [&](const wchar_t* section, const wchar_t* key, int fallback) { return persistent() ? int(GetPrivateProfileIntW(section, key, fallback, preferences.c_str())) : fallback; };
@@ -419,17 +439,22 @@ void Application::worker() {
 }
 void Application::consume() {
   if (rebuilding || verifyingSorting) return;
-  if (!hidden() && (minimized || (GetKeyState(VK_CONTROL) & 0x8000))) return;
+  if (!hidden() && (GetKeyState(VK_CONTROL) & 0x8000)) return;
+  const bool trayOnly = !hidden() && minimized;
   std::shared_ptr<Sample> sample;
 #ifdef TASKMGR_DIAGNOSTICS
   Time publish;
 #endif
-  { std::lock_guard lock(workerMutex); notification = false; sample.swap(pending);
+  { std::lock_guard lock(workerMutex); notification = false;
+    // Keep the newest display snapshot for restore, but acknowledge its tray
+    // update so the worker can notify us about the next minimized sample.
+    if (trayOnly) sample = pending; else sample.swap(pending);
 #ifdef TASKMGR_DIAGNOSTICS
     publish = published;
 #endif
   }
   if (!sample) return;
+  if (trayOnly) { updateTray(*sample); return; }
   const auto displayStarted = Clock::now();
 #ifdef TASKMGR_DIAGNOSTICS
   if (hidden() && measured && sample->elapsed > 0) sampleCadenceTimes.push_back(sample->elapsed * 1000);
@@ -468,7 +493,7 @@ void Application::consume() {
   else if (selectedTab != StartupTab || compact || startupChanged) rebuild();
   if (selectedTab == StartupTab && startupChanged) InvalidateRect(window, nullptr, FALSE);
   if (twoLineHeader()) InvalidateRect(header, nullptr, FALSE);
-  updateTray();
+  updateTray(*current);
   const double cost = milliseconds(displayStarted); displayCost = displayCost.load() * .8 + cost * .2;
 }
 LRESULT CALLBACK Application::linkProcedure(HWND target, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR) {
@@ -482,6 +507,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
   auto app = reinterpret_cast<Application*>(GetWindowLongPtrW(target, GWLP_USERDATA));
   if (message == WM_NCCREATE) { app = static_cast<Application*>(reinterpret_cast<CREATESTRUCTW*>(data)->lpCreateParams); app->window = target; app->dpi = GetDpiForWindow(target); SetWindowLongPtrW(target, GWLP_USERDATA, LONG_PTR(app)); }
   if (!app) return DefWindowProcW(target, message, word, data);
+  if (app->taskbarCreatedMessage && message == app->taskbarCreatedMessage) { app->trayAdded = false; app->publishTray(); return 0; }
   switch (message) {
   case WM_CREATE: app->create(); return 0;
   case WM_SETTINGCHANGE: case WM_THEMECHANGED: app->indexedServices.clear(); app->indexedInventory.reset(); app->applyTheme(); return 0;
@@ -513,6 +539,9 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     if (word == 4) { KillTimer(target, 4); app->writeSettings(); return 0; }
     if (word == 3) { if (app->sortQueued) { app->rebuild(true); InvalidateRect(app->header, nullptr, FALSE); } return 0; }
     if (word == 2) { if (app->verifyingSorting || app->rebuilding) return 0; KillTimer(target, 2); app->iconRefreshQueued = false; if (!app->minimized && !(app->selectedTab == PerformanceTab && !app->compact)) app->rebuild(); return 0; }
+    // Explorer may not yet accept icons when it broadcasts TaskbarCreated.
+    // Retry registration without taking another sample, including while paused.
+    if (!app->trayAdded) app->publishTray();
 #ifdef TASKMGR_DIAGNOSTICS
     if (app->hidden()) app->benchmarkTick(); else if (!app->options.screenshots.empty()) app->screenshotTick(); else
 #endif

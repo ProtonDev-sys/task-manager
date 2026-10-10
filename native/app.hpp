@@ -106,6 +106,7 @@ private:
   std::mutex actionMutex;
   std::deque<ActionResult> actionResults;
   NOTIFYICONDATAW tray{sizeof(tray)};
+  UINT taskbarCreatedMessage = 0;
   bool sortQueued = false;
 #ifdef TASKMGR_DIAGNOSTICS
   Time published{}, firstSample{};
@@ -126,6 +127,7 @@ private:
   mutable unsigned performanceItemBuilds = 0;
   unsigned performancePaints = 0, performanceDetailPaints = 0;
   unsigned headerPaints = 0, columnGeometryCommits = 0, scrollbarPaints = 0;
+  std::function<bool(DWORD)> trayNotification;
   unsigned tabRequests = 0, tabCommits = 0;
   FILETIME cpuStartKernel{}, cpuStartUser{};
 #else
@@ -161,7 +163,9 @@ private:
   void setSummary(int value);
   void updateMenu(HMENU menu);
   void updateFooter();
-  void updateTray();
+  bool notifyTray(DWORD message);
+  void publishTray();
+  void updateTray(const Sample& sample);
   void paintWindow(HDC dc);
   void loadSettings();
   void saveSettings();
@@ -232,6 +236,7 @@ private:
   // diagnostics
 #ifdef TASKMGR_DIAGNOSTICS
   void benchmarkTick();
+  bool verifyTrayLifecycle();
   bool verifySorting();
   bool verifyPerformanceHover();
   bool verifyTabSwitching();
