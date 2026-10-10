@@ -272,6 +272,7 @@ PowerPolicy powerPolicy(const Process& process);
 void efficiencyAction(const Process& process, bool enabled);
 void processAction(const Process& process, Action action, const std::wstring& argument = L"");
 std::vector<Identity> processTree(std::span<const Process> processes, const Process& root);
+std::vector<Identity> processTree(std::span<const Process> processes, std::span<const Identity> roots);
 std::wstring waitChain(const Process& process);
 void serviceAction(const Entry& entry, int action);
 void startupAction(const Entry& entry);

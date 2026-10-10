@@ -48,6 +48,20 @@ bool Application::verifyActionSnapshots() {
   rows[0].kind = RowKind::Window;
   check(!selectedProcess() && !selectedEntry() && selectedMembers().empty(), "action-stale-selection-has-no-target");
 
+  sample = std::make_shared<Sample>(); sample->processes.resize(5000);
+  Row group; group.kind = RowKind::Group; group.key = L"large-action-group";
+  for (size_t index = 0; index < sample->processes.size(); ++index) {
+    auto& member = sample->processes[index]; member.id = DWORD(900000 + index); member.parent = index ? member.id - 1 : 0; member.created = 1000 + index;
+    group.members.push_back(int(sample->processes.size() - index - 1));
+  }
+  current = sample; selectedTab = ProcessesTab; rows = {std::move(group)}; select(0);
+  const auto groupedTree = selectedMembers(true);
+  bool completeGroup = groupedTree.size() == sample->processes.size();
+  for (size_t index = 0; completeGroup && index < groupedTree.size(); ++index) completeGroup = groupedTree[index].id == sample->processes[groupedTree.size() - index - 1].id;
+  check(completeGroup, "action-group-tree-complete-unique-and-children-first");
+  sample->processes.clear();
+  check(groupedTree.size() == 5000 && groupedTree.front().created == 5999 && groupedTree.back().created == 1000, "action-group-tree-owns-large-snapshot");
+
   current = savedSample; selectedTab = savedTab; rows = std::move(savedRows);
   ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
   ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);

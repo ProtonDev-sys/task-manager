@@ -96,13 +96,33 @@ void processAction(const Process& process, Action action, const std::wstring& ar
   if (!success) throw std::runtime_error(utf8(winerror()));
 }
 // The process and every descendant, matched by parent PID and creation order so reused PIDs are not included.
-std::vector<Identity> processTree(std::span<const Process> processes, const Process& root) {
-  std::vector<Identity> result{{root.id, root.created}}; std::vector<std::pair<DWORD, uint64_t>> pending{{root.id, root.created}};
-  while (!pending.empty() && result.size() < 4096) {
-    const auto [parent, created] = pending.back(); pending.pop_back();
-    for (const auto& process : processes) if (process.parent == parent && process.id != parent && process.created >= created && std::none_of(result.begin(), result.end(), [&](const Identity& known) { return known.pid == process.id; })) { result.push_back({process.id, process.created}); pending.emplace_back(process.id, process.created); }
+std::vector<Identity> processTree(std::span<const Process> processes, std::span<const Identity> roots) {
+  if (roots.empty()) return {};
+  std::unordered_map<DWORD, std::vector<const Process*>> children; children.reserve(processes.size());
+  for (const auto& process : processes) children[process.parent].push_back(&process);
+  std::unordered_set<DWORD> seen; seen.reserve(processes.size());
+  std::vector<Identity> result; std::vector<std::pair<Identity, bool>> pending;
+  // Visiting each PID once bounds traversal by the snapshot, including malformed
+  // cycles and overlapping selected roots, without dropping large descendants.
+  for (const auto& root : roots) {
+    if (seen.contains(root.pid)) continue;
+    pending.emplace_back(root, false);
+    while (!pending.empty()) {
+      const auto [parent, finished] = pending.back(); pending.pop_back();
+      if (finished) { result.push_back(parent); continue; }
+      if (!seen.insert(parent.pid).second) continue;
+      // Emit the parent only after its descendants, even if a selected group
+      // lists a child before its parent.
+      pending.emplace_back(parent, true);
+      const auto found = children.find(parent.pid); if (found == children.end()) continue;
+      for (const auto* process : found->second) if (process->created >= parent.created) pending.emplace_back(Identity{process->id, process->created}, false);
+    }
   }
-  std::reverse(result.begin(), result.end()); return result;
+  return result;
+}
+std::vector<Identity> processTree(std::span<const Process> processes, const Process& root) {
+  const Identity identity{root.id, root.created};
+  return processTree(processes, std::span<const Identity>(&identity, 1));
 }
 std::wstring waitChain(const Process& process) {
   Handle handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process.id)); verify(handle.value, process, false);

@@ -383,13 +383,18 @@ std::vector<Process> Application::selectedMembers(bool tree) const {
   std::vector<Process> result; const auto row = selectedRow();
   if (!current || !row || (row->kind != RowKind::Group && row->kind != RowKind::Process && row->kind != RowKind::Window)) return result;
   const std::span<const int> members = row->kind == RowKind::Window ? std::span<const int>(&row->process, 1) : std::span<const int>(row->members);
+  std::vector<Identity> roots;
   for (const int member : members) {
     if (member < 0 || size_t(member) >= current->processes.size()) continue;
     const auto& process = current->processes[size_t(member)];
-    if (!tree) { result.push_back(process); continue; }
-    for (const auto& identity : processTree(current->processes, process)) {
-      const auto found = std::find_if(current->processes.begin(), current->processes.end(), [&](const Process& candidate) { return candidate.id == identity.pid && candidate.created == identity.created; });
-      if (found != current->processes.end()) result.push_back(*found);
+    if (tree) roots.push_back({process.id, process.created}); else result.push_back(process);
+  }
+  if (!roots.empty()) {
+    std::unordered_map<Identity, const Process*, IdentityHash> identities; identities.reserve(current->processes.size());
+    for (const auto& process : current->processes) identities.emplace(Identity{process.id, process.created}, &process);
+    for (const auto& identity : processTree(current->processes, roots)) {
+      const auto found = identities.find(identity);
+      if (found != identities.end()) result.push_back(*found->second);
     }
   }
   return result;

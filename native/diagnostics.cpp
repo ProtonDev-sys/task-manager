@@ -41,6 +41,33 @@ static void metric(Report& stream, const std::string& name, std::vector<double> 
 static int selfTest(const std::wstring& output) {
   std::vector<std::pair<std::string, bool>> checks; auto check = [&](std::string name, bool passed) { checks.emplace_back(std::move(name), passed); };
   for (auto& test : startupTests()) checks.push_back(std::move(test));
+  {
+    // Synthetic identities only: these tests never open or terminate a process.
+    std::vector<Process> family(5000);
+    for (size_t index = 0; index < family.size(); ++index) { auto& process = family[index]; process.id = DWORD(900000 + index); process.parent = index ? process.id - 1 : 0; process.created = 1000 + index; }
+    const auto root = family.front(); std::reverse(family.begin(), family.end());
+    const auto deep = processTree(family, root);
+    bool complete = deep.size() == family.size();
+    for (size_t index = 0; complete && index < deep.size(); ++index) complete = deep[index].pid == family[index].id && deep[index].created == family[index].created;
+    check("process_tree_deep_snapshot_complete_and_children_first", complete);
+    std::vector<Identity> roots; for (const auto& process : family) roots.push_back({process.id, process.created});
+    check("process_tree_overlapping_child_first_roots", processTree(family, roots) == deep);
+    std::reverse(roots.begin(), roots.end());
+    check("process_tree_overlapping_parent_first_roots", processTree(family, roots) == deep);
+    for (auto& process : family) if (process.id != root.id) process.parent = root.id;
+    const auto wide = processTree(family, root);
+    std::unordered_set<DWORD> unique; for (const auto& identity : wide) unique.insert(identity.pid);
+    check("process_tree_wide_snapshot_complete", wide.size() == family.size() && unique.size() == family.size() && wide.back() == Identity{root.id, root.created});
+    std::vector<Process> malformed(5); malformed[0] = root; malformed[0].parent = root.id + 1;
+    malformed[1].id = root.id + 1; malformed[1].parent = root.id; malformed[1].created = root.created;
+    malformed[2] = malformed[1]; malformed[3].id = root.id + 2; malformed[3].parent = root.id; malformed[3].created = root.created - 1;
+    malformed[4].id = root.id + 3; malformed[4].parent = malformed[3].id; malformed[4].created = root.created + 1;
+    const auto cyclic = processTree(malformed, malformed[0]);
+    check("process_tree_cycles_duplicates_and_reused_parent_excluded", cyclic.size() == 2 && cyclic.front() == Identity{root.id + 1, root.created} && cyclic.back() == Identity{root.id, root.created});
+    const std::array<Identity, 3> repeatedRoots{{{root.id, root.created}, {root.id + 1, root.created}, {root.id, root.created}}};
+    check("process_tree_overlapping_cycles_once", processTree(malformed, repeatedRoots) == cyclic);
+    check("process_tree_root_without_snapshot", processTree({}, root) == std::vector<Identity>{{root.id, root.created}});
+  }
   check("hexadecimal_bounds", hexadecimal(0) == L"0" && hexadecimal(UINT64_MAX) == L"ffffffffffffffff");
   check("counter_integer_decimal", counterInteger(L"0", 10) == 0u && counterInteger(L"0042", 10) == 42u && counterInteger(L"4294967295", 10) == UINT32_MAX);
   check("counter_integer_hexadecimal", counterInteger(L"0000002a", 16) == 42u && counterInteger(L"FFFFFFFF", 16) == UINT32_MAX);
