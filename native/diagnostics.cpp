@@ -116,6 +116,8 @@ static int selfTest(const std::wstring& output) {
     check("run_command_blank", matches(L" \t\r\n", L"", L""));
     bool unclosed = false; try { parseRunCommand(L"\"C:\\Missing App\\tool.exe"); } catch (const std::exception&) { unclosed = true; }
     check("run_command_unclosed_quote", unclosed);
+    check("inventory_command_malformed_retained", commandExecutable(L"\"C:\\Missing App\\tool.exe").empty());
+    check("inventory_command_missing_program", commandExecutable(L"\"C:\\Missing App\\tool.exe\" --flag") == L"C:\\Missing App\\tool.exe");
     wchar_t temporary[MAX_PATH]{}; const DWORD length = GetTempPathW(MAX_PATH, temporary);
     const auto suffix = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
     const auto directory = length > 0 && length < MAX_PATH ? std::wstring(temporary) + L"TaskManagerRun-" + suffix : L"";
@@ -135,12 +137,19 @@ static int selfTest(const std::wstring& output) {
         check("run_command_spaced_path_without_arguments", matches(program, program, L""));
         check("run_command_inferred_extension", matches(program.substr(0, program.size() - 4) + L" " + arguments, program, arguments));
         check("run_command_existing_directory", matches(spaced, spaced, L""));
+        check("inventory_command_spaced_path", commandExecutable(program) == program);
+        check("inventory_command_tab_arguments", commandExecutable(program + L"\t--flag") == program);
+        check("inventory_command_inferred_extension", commandExecutable(program.substr(0, program.size() - 4) + L" --flag") == program);
         environmentCreated = SetEnvironmentVariableW(variable.c_str(), spaced.c_str()) != FALSE;
         check("run_command_fixture_environment", environmentCreated);
         if (environmentCreated) {
           check("run_command_unquoted_environment_path", matches(token + L"\\Example App.exe " + arguments, program, arguments));
           check("run_command_quoted_environment_path", matches(L"\"" + token + L"\\Example App.exe\" " + arguments, program, arguments));
           check("run_command_argument_environment_preserved", matches(L"\"" + program + L"\" " + token, program, token));
+          check("inventory_command_environment_path", commandExecutable(token + L"\\Example App.exe --flag") == program);
+          const bool longEnvironment = SetEnvironmentVariableW(variable.c_str(), std::wstring(16384, L'x').c_str()) != FALSE;
+          check("inventory_command_long_environment_fixture", longEnvironment);
+          if (longEnvironment) check("inventory_command_expansion_bound", commandExecutable(token + token).empty());
         }
       } catch (const std::exception&) { check("run_command_fixture_parsing", false); }
       const bool environmentRemoved = !environmentCreated || SetEnvironmentVariableW(variable.c_str(), nullptr) != FALSE;

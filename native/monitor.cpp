@@ -58,14 +58,11 @@ std::string utf8(const std::wstring& value) {
 }
 std::wstring executable() { std::wstring path(32768, L'\0'); path.resize(GetModuleFileNameW(nullptr, path.data(), DWORD(path.size()))); return path; }
 std::wstring windowsDirectory() { wchar_t path[MAX_PATH]{}; GetWindowsDirectoryW(path, MAX_PATH); return path; }
-// The program a command line starts: quoted or up to the first space, with environment variables expanded.
+// Inventory entries may be malformed or refer to missing programs; retain the
+// registration even when its executable cannot be extracted safely.
 std::wstring commandExecutable(const std::wstring& command) {
-  std::wstring expanded(32768, L'\0'); expanded.resize(std::max<DWORD>(1, ExpandEnvironmentStringsW(command.c_str(), expanded.data(), DWORD(expanded.size()))) - 1);
-  while (!expanded.empty() && iswspace(expanded.front())) expanded.erase(expanded.begin());
-  if (expanded.empty()) return L"";
-  if (expanded.front() == L'"') { const auto close = expanded.find(L'"', 1); return expanded.substr(1, close == expanded.npos ? expanded.npos : close - 1); }
-  for (size_t space = expanded.find(L' '); space != expanded.npos; space = expanded.find(L' ', space + 1)) { auto candidate = expanded.substr(0, space); if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) return candidate; if (GetFileAttributesW((candidate + L".exe").c_str()) != INVALID_FILE_ATTRIBUTES) return candidate + L".exe"; }
-  return expanded.substr(0, expanded.find(L' '));
+  try { return parseRunCommand(command).file; }
+  catch (const std::exception&) { return L""; }
 }
 Counter::Counter() { PdhOpenQueryW(nullptr, 0, &query); }
 Counter::~Counter() { if (query) PdhCloseQuery(query); }
