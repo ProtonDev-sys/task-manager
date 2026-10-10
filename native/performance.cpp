@@ -176,7 +176,7 @@ void Application::paintDetail(HDC dc, RECT bounds, const PerfItem& item) {
     stat(L"Paged pool", bytes(double(value.paged)), left, stats + scale(104), false); stat(L"Non-paged pool", bytes(double(value.nonpaged)), left + scale(230), stats + scale(104), false);
     if (width >= scale(640)) {
       int y = stats + scale(4);
-      pair(L"Speed:", value.speed ? std::to_wstring(value.speed) + L" MHz" : L"—", pairs, y, pairWidth); y += scale(21);
+      pair(L"Speed:", value.speed ? std::to_wstring(value.speed) + L" MT/s" : L"—", pairs, y, pairWidth); y += scale(21);
       pair(L"Slots used:", value.slots ? std::to_wstring(value.usedSlots) + L" of " + std::to_wstring(value.slots) : L"—", pairs, y, pairWidth); y += scale(21);
       pair(L"Form factor:", value.formFactor.empty() ? L"—" : value.formFactor, pairs, y, pairWidth); y += scale(21);
       pair(L"Hardware reserved:", value.installed > value.total ? bytes(double(value.installed - value.total)) : L"—", pairs, y, pairWidth);
