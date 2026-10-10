@@ -44,6 +44,7 @@ bool Application::verifySorting() {
   check(fallbackIcon != nullptr, "generic-process-icon-available");
   if (fallbackIcon) DestroyIcon(fallbackIcon);
   check(verifyPerformanceHover(), "performance-hover");
+  check(verifyGraphPanels(), "performance-graph-panels");
   check(verifyTabSwitching(), "tab-switching");
   for (const auto& process : current->processes) { const auto found = activity.find({process.id, process.created}); check(found != activity.end() && found->second.ticks == process.cpuTicks && found->second.seen == activityGeneration && std::isfinite(found->second.trend), "activity-live-identity"); }
   for (const int tab : {ProcessesTab, UsersTab, DetailsTab, HistoryTab, StartupTab, ServicesTab}) {

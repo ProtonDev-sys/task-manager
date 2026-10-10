@@ -234,6 +234,7 @@ private:
   void benchmarkTick();
   bool verifySorting();
   bool verifyPerformanceHover();
+  bool verifyGraphPanels();
   bool verifyTabSwitching();
   void writeBenchmark();
   void screenshotTick();
