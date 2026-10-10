@@ -20,6 +20,9 @@ bool Application::verifyActionSnapshots() {
   Row row; row.key = L"action-fixture"; row.process = 0; row.members = {0}; rows = {row};
   ListView_SetItemCountEx(list, 1, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL); select(0);
   const auto process = selectedProcess(); const auto members = selectedMembers(); const auto tree = selectedMembers(true);
+  rows[0].kind = RowKind::Window; rows[0].members.clear();
+  const auto windowMembers = selectedMembers();
+  rows[0].process = -1; check(selectedMembers().empty(), "action-window-without-owner-has-no-target"); rows[0].process = 0;
   auto inventory = std::make_shared<ServiceInventory>(); Entry user; user.key = L"original-session"; user.session = 123; user.cells = {L"Original user"}; inventory->sessions = {user};
   sample->inventory = inventory; sample->sessions = inventory->sessions;
   selectedTab = UsersTab; rows[0].kind = RowKind::User; rows[0].entry = 0;
@@ -37,10 +40,12 @@ bool Application::verifyActionSnapshots() {
   startup->entries[0].enabled = false; startup->entries[0].path = L"C:\\Fixture\\replacement.exe"; inventory->services[0].key = L"replacement-service";
   check(process && process->id == 900001 && process->created == 100 && process->name == L"Original process", "action-process-keeps-confirmed-identity");
   check(members.size() == 1 && members[0].id == 900001 && members[0].created == 100, "action-members-own-process-snapshots");
+  check(windowMembers.size() == 1 && windowMembers[0].id == 900001 && windowMembers[0].created == 100, "action-window-targets-owning-process-snapshot");
   check(tree.size() == 2 && tree[0].id == 900002 && tree[1].id == 900001 && tree[1].created == 100, "action-tree-keeps-original-descendants");
   check(session && session->session == 123 && session->cells[0] == L"Original user", "action-session-keeps-confirmed-target");
   check(startupEntry && startupEntry->enabled && startupEntry->path == L"C:\\Fixture\\original.exe", "action-startup-entry-owns-snapshot");
   check(service && service->key == L"original-service", "action-service-entry-owns-snapshot");
+  rows[0].kind = RowKind::Window;
   check(!selectedProcess() && !selectedEntry() && selectedMembers().empty(), "action-stale-selection-has-no-target");
 
   current = savedSample; selectedTab = savedTab; rows = std::move(savedRows);

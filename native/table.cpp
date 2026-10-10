@@ -381,7 +381,9 @@ std::optional<Entry> Application::selectedEntry() const {
 }
 std::vector<Process> Application::selectedMembers(bool tree) const {
   std::vector<Process> result; const auto row = selectedRow();
-  if (current && row && (row->kind == RowKind::Group || row->kind == RowKind::Process || row->kind == RowKind::Window)) for (const int member : row->members) {
+  if (!current || !row || (row->kind != RowKind::Group && row->kind != RowKind::Process && row->kind != RowKind::Window)) return result;
+  const std::span<const int> members = row->kind == RowKind::Window ? std::span<const int>(&row->process, 1) : std::span<const int>(row->members);
+  for (const int member : members) {
     if (member < 0 || size_t(member) >= current->processes.size()) continue;
     const auto& process = current->processes[size_t(member)];
     if (!tree) { result.push_back(process); continue; }
