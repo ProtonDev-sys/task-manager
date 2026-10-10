@@ -107,6 +107,50 @@ static int selfTest(const std::wstring& output) {
   History secondary; secondary.add(0, 10, 20); secondary.add(1, 30, 5); check("graph_secondary_series", secondary.window(1).back().secondary == 5 && secondary.peak(1) == 30);
   check("number_grouping", grouped(1234567.26, 1) == L"1,234,567.3" && grouped(999) == L"999" && grouped(-12345) == L"-12,345"); check("bits_format", bits(125) == L"1.0 Kbps" && bits(12) == L"96 bps");
   check("duration_format", duration(90061) == L"1:01:01:01"); check("command_executable", commandExecutable(L"\"C:\\Program Files\\App\\app.exe\" --flag") == L"C:\\Program Files\\App\\app.exe");
+  {
+    auto matches = [](const std::wstring& text, const std::wstring& file, const std::wstring& parameters) { const auto parsed = parseRunCommand(text); return parsed.file == file && parsed.parameters == parameters; };
+    check("run_command_bare_program", matches(L"notepad.exe report.txt", L"notepad.exe", L"report.txt"));
+    check("run_command_leading_whitespace", matches(L" \t notepad.exe \t report.txt", L"notepad.exe", L"report.txt"));
+    check("run_command_tab_separator", matches(L"notepad.exe\t\"report name.txt\"", L"notepad.exe", L"\"report name.txt\""));
+    check("run_command_quoted_path", matches(L" \t\"C:\\Missing App\\tool.exe\" \t \"report name.txt\"  --flag", L"C:\\Missing App\\tool.exe", L"\"report name.txt\"  --flag"));
+    check("run_command_blank", matches(L" \t\r\n", L"", L""));
+    bool unclosed = false; try { parseRunCommand(L"\"C:\\Missing App\\tool.exe"); } catch (const std::exception&) { unclosed = true; }
+    check("run_command_unclosed_quote", unclosed);
+    wchar_t temporary[MAX_PATH]{}; const DWORD length = GetTempPathW(MAX_PATH, temporary);
+    const auto suffix = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    const auto directory = length > 0 && length < MAX_PATH ? std::wstring(temporary) + L"TaskManagerRun-" + suffix : L"";
+    const bool created = !directory.empty() && CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
+    check("run_command_fixture_directory", created);
+    if (created) {
+      const auto prefix = directory + L"\\Example", spaced = directory + L"\\Example Folder", program = spaced + L"\\Example App.exe";
+      const bool prefixCreated = CreateDirectoryW(prefix.c_str(), nullptr) != FALSE, spacedCreated = CreateDirectoryW(spaced.c_str(), nullptr) != FALSE;
+      bool fileCreated = false;
+      { Handle file(CreateFileW(program.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)); fileCreated = file.value != INVALID_HANDLE_VALUE; }
+      check("run_command_fixture_file", prefixCreated && spacedCreated && fileCreated);
+      const auto variable = L"TASKMGR_RUN_TEST_" + suffix, token = L"%" + variable + L"%";
+      bool environmentCreated = false;
+      if (prefixCreated && spacedCreated && fileCreated) try {
+        const std::wstring arguments = L"\"report name.txt\"  --flag=\"a b\"";
+        check("run_command_unquoted_spaced_path", matches(program + L" " + arguments, program, arguments));
+        check("run_command_spaced_path_without_arguments", matches(program, program, L""));
+        check("run_command_inferred_extension", matches(program.substr(0, program.size() - 4) + L" " + arguments, program, arguments));
+        check("run_command_existing_directory", matches(spaced, spaced, L""));
+        environmentCreated = SetEnvironmentVariableW(variable.c_str(), spaced.c_str()) != FALSE;
+        check("run_command_fixture_environment", environmentCreated);
+        if (environmentCreated) {
+          check("run_command_unquoted_environment_path", matches(token + L"\\Example App.exe " + arguments, program, arguments));
+          check("run_command_quoted_environment_path", matches(L"\"" + token + L"\\Example App.exe\" " + arguments, program, arguments));
+          check("run_command_argument_environment_preserved", matches(L"\"" + program + L"\" " + token, program, token));
+        }
+      } catch (const std::exception&) { check("run_command_fixture_parsing", false); }
+      const bool environmentRemoved = !environmentCreated || SetEnvironmentVariableW(variable.c_str(), nullptr) != FALSE;
+      const bool fileRemoved = !fileCreated || DeleteFileW(program.c_str()) != FALSE;
+      const bool spacedRemoved = !spacedCreated || RemoveDirectoryW(spaced.c_str()) != FALSE;
+      const bool prefixRemoved = !prefixCreated || RemoveDirectoryW(prefix.c_str()) != FALSE;
+      const bool directoryRemoved = RemoveDirectoryW(directory.c_str()) != FALSE;
+      check("run_command_fixture_cleanup", environmentRemoved && fileRemoved && spacedRemoved && prefixRemoved && directoryRemoved);
+    }
+  }
   check("service_group_caption", serviceGroupCaption(L"LocalSystemNetworkRestricted") == L"Local System (Network Restricted)" && serviceGroupCaption(L"custom") == L"custom");
   Sampler sampler; const auto sample = sampler.sample(); check("native_process_snapshot", !sample.processes.empty()); check("native_memory", sample.memory.total > 0 && sample.memory.available <= sample.memory.total); check("native_cpu_bounds", sample.cpu >= 0 && sample.cpu <= 100); check("native_resources", sample.memory.total > 0 && !sample.cores.empty()); check("own_process_present", std::any_of(sample.processes.begin(), sample.processes.end(), [](const Process& value) { return value.id == GetCurrentProcessId(); }));
   check("adaptive_refresh_fast_floor", adaptiveRefreshInterval(0, 0) == 250 && adaptiveRefreshInterval(3, 2) == 250);

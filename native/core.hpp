@@ -63,6 +63,8 @@ std::string utf8(const std::wstring& value);
 std::wstring executable();
 std::wstring windowsDirectory();
 std::wstring commandExecutable(const std::wstring& command);
+struct RunCommand { std::wstring file, parameters; };
+RunCommand parseRunCommand(const std::wstring& command);
 struct Handle {
   HANDLE value = nullptr;
   explicit Handle(HANDLE handle = nullptr) : value(handle) {}

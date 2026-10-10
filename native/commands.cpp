@@ -4,6 +4,43 @@
 #include <windowsx.h>
 
 namespace taskmgr {
+static std::wstring expandRunFile(const std::wstring& file) {
+  const DWORD needed = ExpandEnvironmentStringsW(file.c_str(), nullptr, 0);
+  if (!needed) throw std::runtime_error(utf8(winerror()));
+  if (needed > 32768) throw std::runtime_error("The expanded program path is too long.");
+  std::wstring expanded(needed, L'\0');
+  const DWORD written = ExpandEnvironmentStringsW(file.c_str(), expanded.data(), needed);
+  if (!written) throw std::runtime_error(utf8(winerror()));
+  if (written > needed) throw std::runtime_error("The environment changed while preparing the command. Try again.");
+  expanded.resize(written - 1); return expanded;
+}
+RunCommand parseRunCommand(const std::wstring& command) {
+  size_t start = 0; while (start < command.size() && iswspace(command[start])) ++start;
+  if (start == command.size()) return {};
+  const auto text = std::wstring_view(command).substr(start);
+  auto result = [&](std::wstring file, size_t end) {
+    while (end < text.size() && iswspace(text[end])) ++end;
+    return RunCommand{std::move(file), std::wstring(text.substr(end))};
+  };
+  if (text.front() == L'"') {
+    const auto close = text.find(L'"', 1);
+    if (close == text.npos) throw std::runtime_error("Add a closing quotation mark after the program path.");
+    return result(expandRunFile(std::wstring(text.substr(1, close - 1))), close + 1);
+  }
+  auto regularFile = [](const std::wstring& file) { const DWORD flags = GetFileAttributesW(file.c_str()); return flags != INVALID_FILE_ATTRIBUTES && !(flags & FILE_ATTRIBUTE_DIRECTORY); };
+  size_t first = text.size();
+  // Keep the boundary in the original input: expansion and an inferred .exe
+  // extension can change the file length without changing its arguments.
+  for (size_t end = 0; end <= text.size(); ++end) {
+    if (end < text.size() && !iswspace(text[end])) continue;
+    if (first == text.size()) first = end;
+    auto candidate = expandRunFile(std::wstring(text.substr(0, end)));
+    if (regularFile(candidate)) return result(std::move(candidate), end);
+    if (regularFile(candidate + L".exe")) return result(candidate + L".exe", end);
+    if (end == text.size() && GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) return result(std::move(candidate), end);
+  }
+  return result(expandRunFile(std::wstring(text.substr(0, first))), first);
+}
 struct RunInput { std::wstring text; bool elevated = false; };
 static INT_PTR CALLBACK runProcedure(HWND dialog, UINT message, WPARAM word, LPARAM data) {
   auto input = reinterpret_cast<RunInput*>(GetWindowLongPtrW(dialog, DWLP_USER));
@@ -67,12 +104,17 @@ HWND Application::appWindow(const Process& process) const {
 void Application::runTask() {
   RunInput input;
   if (DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101), window, runProcedure, LPARAM(&input)) != IDOK || input.text.empty()) return;
-  std::wstring file, parameters;
-  if (input.text.front() == L'"') { const auto close = input.text.find(L'"', 1); file = input.text.substr(1, close == input.text.npos ? input.text.npos : close - 1); if (close != input.text.npos) parameters = input.text.substr(close + 1); }
-  else { const auto executable = commandExecutable(input.text); file = executable.empty() ? input.text : executable; parameters = input.text.size() > file.size() && lower(input.text).starts_with(lower(file)) ? input.text.substr(file.size()) : input.text.substr(std::min(input.text.size(), input.text.find(L' ') == input.text.npos ? input.text.size() : input.text.find(L' '))); }
-  while (!parameters.empty() && parameters.front() == L' ') parameters.erase(parameters.begin());
-  SHELLEXECUTEINFOW execute{sizeof(execute)}; execute.fMask = SEE_MASK_FLAG_NO_UI; execute.hwnd = window; execute.lpVerb = input.elevated ? L"runas" : nullptr; execute.lpFile = file.c_str(); execute.lpParameters = parameters.empty() ? nullptr : parameters.c_str(); execute.nShow = SW_SHOWNORMAL;
-  if (!ShellExecuteExW(&execute)) { const DWORD error = GetLastError(); if (error != ERROR_CANCELLED) MessageBoxW(window, (L"Windows cannot find '" + file + L"'. Make sure you typed the name correctly, and then try again.\n\n" + winerror(error)).c_str(), L"Create new task", MB_OK | MB_ICONERROR); }
+  RunCommand launch;
+  try { launch = parseRunCommand(input.text); }
+  catch (const std::exception& error) {
+    const auto message = error.what(); const int length = MultiByteToWideChar(CP_UTF8, 0, message, -1, nullptr, 0);
+    std::wstring text(size_t(std::max(1, length)), L'\0');
+    if (length > 0) MultiByteToWideChar(CP_UTF8, 0, message, -1, text.data(), length);
+    MessageBoxW(window, text.c_str(), L"Create new task", MB_OK | MB_ICONERROR); return;
+  }
+  if (launch.file.empty()) return;
+  SHELLEXECUTEINFOW execute{sizeof(execute)}; execute.fMask = SEE_MASK_FLAG_NO_UI; execute.hwnd = window; execute.lpVerb = input.elevated ? L"runas" : nullptr; execute.lpFile = launch.file.c_str(); execute.lpParameters = launch.parameters.empty() ? nullptr : launch.parameters.c_str(); execute.nShow = SW_SHOWNORMAL;
+  if (!ShellExecuteExW(&execute)) { const DWORD error = GetLastError(); if (error != ERROR_CANCELLED) MessageBoxW(window, (L"Windows cannot find '" + launch.file + L"'. Make sure you typed the name correctly, and then try again.\n\n" + winerror(error)).c_str(), L"Create new task", MB_OK | MB_ICONERROR); }
 }
 void Application::endSelected(bool tree) {
   const auto row = selectedRow(); if (!row || !current) return;
