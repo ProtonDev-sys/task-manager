@@ -142,15 +142,15 @@ static int selfTest(const std::wstring& output) {
       constexpr char sentinel[] = "Existing temporary file belongs to another operation.";
       if (destinationCreated) {
         { Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-          temporaryCreated = file.value != INVALID_HANDLE_VALUE; DWORD count = 0;
-          written = temporaryCreated && WriteFile(file.value, sentinel, sizeof(sentinel), &count, nullptr) && count == sizeof(sentinel); }
+          temporaryCreated = file.value != INVALID_HANDLE_VALUE; DWORD bytesWritten = 0;
+          written = temporaryCreated && WriteFile(file.value, sentinel, sizeof(sentinel), &bytesWritten, nullptr) && bytesWritten == sizeof(sentinel); }
         if (written) {
           // CREATE_NEW must fail before MiniDumpWriteDump: this test never writes a dump.
           try { processAction(owned, Action::Dump, destination); }
           catch (const std::exception& error) { refused = std::string(error.what()) == utf8(winerror(ERROR_FILE_EXISTS)); }
           { Handle file(CreateFileW(temporary.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-            std::array<char, sizeof(sentinel) + 1> contents{}; DWORD count = 0;
-            preserved = file.value != INVALID_HANDLE_VALUE && ReadFile(file.value, contents.data(), DWORD(contents.size()), &count, nullptr) && count == sizeof(sentinel) && memcmp(contents.data(), sentinel, sizeof(sentinel)) == 0; }
+            std::array<char, sizeof(sentinel) + 1> contents{}; DWORD bytesRead = 0;
+            preserved = file.value != INVALID_HANDLE_VALUE && ReadFile(file.value, contents.data(), DWORD(contents.size()), &bytesRead, nullptr) && bytesRead == sizeof(sentinel) && memcmp(contents.data(), sentinel, sizeof(sentinel)) == 0; }
         }
       }
       check("dump_collision_fixture_created", destinationCreated && temporaryCreated && written);
