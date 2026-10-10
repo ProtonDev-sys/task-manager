@@ -107,6 +107,56 @@ struct NativeProcessor { int64_t idle, kernel, user, dpc, interrupt; ULONG inter
 static_assert(sizeof(NativeProcessor) == 48);
 using QuerySystem = LONG (WINAPI*)(ULONG, void*, ULONG, ULONG*);
 static QuerySystem querySystem() { static auto query = reinterpret_cast<QuerySystem>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation")); return query; }
+template <typename ReadGpus> static void refreshHardwareInventory(bool& invalidated, std::unordered_map<int, DiskInfo>& disks, std::vector<GpuInfo>& gpus, ReadGpus read) {
+  // Device discovery runs on explicit refresh, independently of periodic counter sampling.
+  if (!invalidated) return;
+  auto refreshed = read();
+  disks.clear(); gpus = std::move(refreshed); invalidated = false;
+}
+template <typename ReadDisk> static const DiskInfo& cachedDiskHardware(std::unordered_map<int, DiskInfo>& disks, int index, ReadDisk read) {
+  const auto found = disks.find(index);
+  return found != disks.end() ? found->second : disks.emplace(index, read(index)).first->second;
+}
+static void pruneDiskHardware(std::unordered_map<int, DiskInfo>& hardware, std::span<const DiskInfo> disks) {
+  // Disk snapshots are sorted by physical index before pruning cached metadata.
+  std::erase_if(hardware, [&](const auto& item) {
+    const auto found = std::lower_bound(disks.begin(), disks.end(), item.first, [](const DiskInfo& disk, int index) { return disk.index < index; });
+    return found == disks.end() || found->index != item.first;
+  });
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> hardwareInventoryTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  const auto check = [&](const char* name, bool pass) { checks.emplace_back(name, pass); };
+  GpuInfo firstGpu; firstGpu.key = L"anonymous-gpu-a"; firstGpu.name = L"Example GPU A";
+  GpuInfo addedGpu; addedGpu.key = L"anonymous-gpu-b"; addedGpu.name = L"Example GPU B";
+  std::unordered_map<int, DiskInfo> disks; std::vector<GpuInfo> gpus{firstGpu}; bool invalidated = false, replacement = false;
+  unsigned diskReads = 0, gpuReads = 0;
+  const auto readDisk = [&](int index) { ++diskReads; DiskInfo disk; disk.index = index; disk.model = replacement ? L"Example replacement" : L"Example original"; disk.type = replacement ? L"SSD" : L"HDD"; disk.capacity = replacement ? 2000 : 1000; return disk; };
+  const auto readGpuFixture = [&] { ++gpuReads; return std::vector<GpuInfo>{firstGpu, addedGpu}; };
+  const auto original = cachedDiskHardware(disks, 7, readDisk);
+  replacement = true;
+  refreshHardwareInventory(invalidated, disks, gpus, readGpuFixture);
+  const auto cached = cachedDiskHardware(disks, 7, readDisk);
+  check("hardware_ordinary_samples_reuse_inventory", diskReads == 1 && gpuReads == 0 && cached.model == original.model && gpus.size() == 1);
+  invalidated = true; refreshHardwareInventory(invalidated, disks, gpus, readGpuFixture);
+  check("hardware_explicit_refresh_adds_gpu", !invalidated && gpuReads == 1 && gpus.size() == 2 && gpus.back().key == addedGpu.key);
+  check("hardware_explicit_refresh_discards_disk_metadata", disks.empty());
+  const auto replaced = cachedDiskHardware(disks, 7, readDisk);
+  check("hardware_refresh_replaces_same_disk_index", diskReads == 2 && replaced.index == original.index && replaced.model == L"Example replacement" && replaced.type == L"SSD" && replaced.capacity == 2000);
+  refreshHardwareInventory(invalidated, disks, gpus, readGpuFixture); (void)cachedDiskHardware(disks, 7, readDisk);
+  check("hardware_refresh_discovery_runs_once", gpuReads == 1 && diskReads == 2);
+  const auto retained = cachedDiskHardware(disks, 9, readDisk);
+  const std::array<DiskInfo, 1> visible{retained}; pruneDiskHardware(disks, visible);
+  check("hardware_prunes_disappeared_disk", !disks.contains(7) && disks.contains(9) && diskReads == 3);
+  replacement = false; const auto reappeared = cachedDiskHardware(disks, 7, readDisk);
+  check("hardware_reappeared_index_reads_new_metadata", diskReads == 4 && reappeared.model == original.model && reappeared.capacity == original.capacity);
+  pruneDiskHardware(disks, {}); check("hardware_empty_disk_snapshot_releases_metadata", disks.empty());
+  invalidated = true; refreshHardwareInventory(invalidated, disks, gpus, [&] { ++gpuReads; return std::vector<GpuInfo>{addedGpu}; });
+  check("hardware_refresh_removes_departed_gpu", gpuReads == 2 && gpus.size() == 1 && gpus.front().key == addedGpu.key);
+  return checks;
+}
+#endif
 Sampler::Sampler(bool attribution, std::function<void()> startupNotification) : buffer(64 * 1024) {
   startupNotify = std::move(startupNotification);
   cpuInfo = readCpu(); memoryHardware = readMemoryHardware(); gpuDescriptors = readGpus();
@@ -244,6 +294,7 @@ Sample Sampler::sample(bool startupVisible) {
   result.stages[1] = milliseconds(phase); phase = Clock::now();
 #endif
   if (refreshResources) {
+  refreshHardwareInventory(hardwareInvalidated, diskHardware, gpuDescriptors, readGpus);
   counters.collect();
   for (const auto& [name, value] : counters.values(L"performance")) { (void)name; result.cpuSpeed = cpuInfo.baseMhz * value / 100 / 1000; }
   if (result.cpuSpeed <= 0) result.cpuSpeed = cpuInfo.baseMhz / 1000;
@@ -255,8 +306,8 @@ Sample Sampler::sample(bool startupVisible) {
   for (const auto& [name, value] : counters.values(L"idle")) {
     if (name == L"_Total") continue;
     DiskInfo disk; disk.key = name; disk.index = _wtoi(name.c_str());
-    auto hardware = diskHardware.find(disk.index); if (hardware == diskHardware.end()) hardware = diskHardware.emplace(disk.index, readDiskHardware(disk.index)).first;
-    disk.model = hardware->second.model; disk.type = hardware->second.type; disk.capacity = hardware->second.capacity;
+    const auto& hardware = cachedDiskHardware(diskHardware, disk.index, readDiskHardware);
+    disk.model = hardware.model; disk.type = hardware.type; disk.capacity = hardware.capacity;
     const auto space = name.find(L' '); disk.letters = space == name.npos ? L"" : name.substr(space + 1);
     disk.title = L"Disk " + std::to_wstring(disk.index) + (disk.letters.empty() ? L"" : L" (" + disk.letters + L")");
     for (size_t position = 0; position + 1 < disk.letters.size(); ++position) if (disk.letters[position + 1] == L':') {
@@ -269,6 +320,7 @@ Sample Sampler::sample(bool startupVisible) {
     result.disks.push_back(std::move(disk));
   }
   std::sort(result.disks.begin(), result.disks.end(), [](const DiskInfo& left, const DiskInfo& right) { return left.index < right.index; });
+  pruneDiskHardware(diskHardware, result.disks);
   }
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[2] = milliseconds(phase); phase = Clock::now();

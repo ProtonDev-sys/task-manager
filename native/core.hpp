@@ -163,6 +163,7 @@ class Sampler {
   std::unordered_map<ULONG64, std::array<std::wstring, 3>> adapterAddresses;
   std::unordered_map<int, DiskInfo> diskHardware;
   std::vector<GpuInfo> gpuDescriptors;
+  bool hardwareInvalidated = false;
   std::unique_ptr<NetworkTrace> trace;
   void readUsers();
 public:
@@ -171,7 +172,7 @@ public:
   Sample sample(bool startupVisible = false);
   bool startupReady() const { return startupProgressReady.load() || (startupJob.valid() && startupJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready); }
   bool startupPending() const { return startupJob.valid(); }
-  void invalidateInventory() { inventoryAt = {}; resourcesAt = {}; startupInvalidated = true; }
+  void invalidateInventory() { inventoryAt = {}; resourcesAt = {}; startupInvalidated = hardwareInvalidated = true; }
 };
 CpuInfo readCpu();
 MemoryInfo readMemoryHardware();
@@ -185,6 +186,7 @@ std::vector<Entry> readSessions();
 StartupInventory readStartup(const std::function<void(const StartupInventory&)>& progress = {});
 #ifdef TASKMGR_DIAGNOSTICS
 std::vector<std::pair<std::string, bool>> startupTests();
+std::vector<std::pair<std::string, bool>> hardwareInventoryTests();
 #endif
 std::wstring fullAccountName(const std::wstring& user);
 class Icons {
