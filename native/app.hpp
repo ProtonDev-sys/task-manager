@@ -169,6 +169,8 @@ private:
   void captureColumns();
   void saveHistory();
   void loadHistory();
+  bool writeHistoryFile(const std::wstring& path) const;
+  void readHistoryFile(const std::wstring& path);
   void worker();
   void consume();
   void refresh(bool inventory = true) { { std::lock_guard lock(workerMutex); const auto now = Clock::now(); if (stopping || force || (refreshAt != Time{} && now - refreshAt < std::chrono::milliseconds(250))) return; refreshAt = now; force = true; forceInventory = inventory; } wake.notify_one(); }
@@ -232,6 +234,7 @@ private:
   // diagnostics
 #ifdef TASKMGR_DIAGNOSTICS
   void benchmarkTick();
+  bool verifyHistoryPersistence();
   bool verifySorting();
   bool verifyPerformanceHover();
   bool verifyTabSwitching();

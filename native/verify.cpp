@@ -2,8 +2,56 @@
 #include "report.hpp"
 #include <dwmapi.h>
 #include <windowsx.h>
+#include <iterator>
 
 namespace taskmgr {
+bool Application::verifyHistoryPersistence() {
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  auto saved = std::move(usage);
+  struct Restore { decltype(usage)& target; decltype(usage)& original; ~Restore() { target = std::move(original); } } restore{usage, saved};
+  wchar_t temporary[MAX_PATH]{};
+  const DWORD length = GetTempPathW(MAX_PATH, temporary);
+  const auto directory = length > 0 && length < MAX_PATH ? std::wstring(temporary) + L"TaskManagerHistory-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) : L"";
+  const bool created = !directory.empty() && CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
+  check(created, "history-fixture-directory"); if (!created) return false;
+  const auto path = directory + L"\\history.tsv";
+  struct Cleanup { std::wstring directory, path; ~Cleanup() { DeleteFileW((path + L".tmp").c_str()); DeleteFileW(path.c_str()); RemoveDirectoryW(path.c_str()); RemoveDirectoryW(directory.c_str()); } } cleanup{directory, path};
+  const std::wstring key = L"\u5de5\u5177.exe", name = L"Caf\u00e9 \U0001f680\tTabbed\r\nsecond line\\literal", executablePath = L"C:\\\u7528\u6237\\M\u00fcnchen\\\u5de5\u5177.exe";
+  usage.clear(); usage[key] = {name, executablePath, 123456789, true}; usage[L"empty.exe"] = {L"", L"", 0, false};
+  check(writeHistoryFile(path), "history-unicode-write");
+  {
+    std::ifstream input{std::filesystem::path(path), std::ios::binary}; const std::string bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    check(bytes.find("\xe5\xb7\xa5\xe5\x85\xb7.exe") != std::string::npos && bytes.find("\xf0\x9f\x9a\x80") != std::string::npos, "history-explicit-utf8-bytes");
+    check(std::count(bytes.begin(), bytes.end(), '\n') == 3, "history-metadata-newlines-escaped");
+  }
+  usage.clear(); readHistoryFile(path);
+  const auto found = usage.find(key), empty = usage.find(L"empty.exe");
+  check(usage.size() == 2 && found != usage.end() && found->second.name == name && found->second.path == executablePath && found->second.ticks == 123456789 && found->second.app, "history-unicode-round-trip");
+  check(empty != usage.end() && empty->second.name.empty() && empty->second.path.empty() && empty->second.ticks == 0 && !empty->second.app, "history-empty-fields-round-trip");
+  {
+    std::ofstream legacy{std::filesystem::path(path), std::ios::binary};
+    legacy << "legacy.exe\t42\tLegacy app\tC:\\Program Files\\Legacy\\tool.exe\t1\r\nold.exe\t7\tOld app\r\n";
+  }
+  usage.clear(); readHistoryFile(path);
+  const auto legacy = usage.find(L"legacy.exe"), old = usage.find(L"old.exe");
+  check(usage.size() == 2 && legacy != usage.end() && legacy->second.path == L"C:\\Program Files\\Legacy\\tool.exe" && legacy->second.ticks == 42 && legacy->second.app && old != usage.end() && old->second.path.empty() && old->second.ticks == 7, "history-legacy-ascii-compatible");
+  usage.clear(); check(writeHistoryFile(path), "history-invalid-fixture-header");
+  {
+    std::ofstream malformed{std::filesystem::path(path), std::ios::binary | std::ios::app};
+    malformed << "\xff.exe\t1\tBad UTF-8\t\t0\nnegative.exe\t-1\tNegative\t\t0\npartial.exe\t12x\tPartial\t\t0\nescape.exe\t1\tBad\\q\t\t0\ngood.exe\t9\tGood\t\t1\n";
+  }
+  readHistoryFile(path);
+  check(usage.size() == 1 && usage.contains(L"good.exe") && usage.at(L"good.exe").ticks == 9, "history-malformed-records-skipped");
+  const bool blocked = DeleteFileW(path.c_str()) && CreateDirectoryW(path.c_str(), nullptr);
+  check(blocked, "history-rename-failure-fixture");
+  if (blocked) {
+    check(!writeHistoryFile(path), "history-rename-failure-reported");
+    std::error_code error;
+    check(!std::filesystem::exists(std::filesystem::path(path + L".tmp"), error) && !error && std::filesystem::is_directory(std::filesystem::path(path), error) && !error, "history-rename-failure-cleans-owned-temporary");
+  }
+  return passed;
+}
 bool Application::verifySorting() {
   verifyingSorting = true;
   const int savedTab = selectedTab; const bool savedGrouping = groupByType; const auto savedExpanded = expanded;
@@ -12,6 +60,7 @@ bool Application::verifySorting() {
   auto check = [&](bool result, const std::string& name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   const bool priorMeasured = measured; const unsigned priorTests = tests;
   benchmarkTick(); check(measured == priorMeasured && tests == priorTests, "benchmark-nested-tick-skipped");
+  check(verifyHistoryPersistence(), "history-persistence");
   {
     Row previous; previous.key = L"identity"; previous.cells = {{L"1.0%", 1.01, 0}};
     auto next = previous; next.cells[0].value = 1.04; next.process = 5;

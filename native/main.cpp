@@ -3,6 +3,8 @@
 #include "report.hpp"
 #endif
 #include <commdlg.h>
+#include <charconv>
+#include <climits>
 #include <uxtheme.h>
 #include <shlobj.h>
 #include <windowsx.h>
@@ -373,19 +375,75 @@ void Application::writeSettings() {
     WritePrivateProfileStringW(section.c_str(), L"Columns", text.c_str(), preferences.c_str()); write(section, L"Sort", sortColumn[size_t(tab)]); write(section, L"Ascending", ascending[size_t(tab)]);
   }
 }
-void Application::saveHistory() {
-  if (!persistent() || historyFile.empty()) return; const auto temporary = historyFile + L".tmp";
-  { std::wofstream stream{std::filesystem::path(temporary)}; for (const auto& [key, value] : usage) stream << key << L'\t' << value.ticks << L'\t' << value.name << L'\t' << value.path << L'\t' << (value.app ? 1 : 0) << L'\n'; if (!stream) return; }
-  MoveFileExW(temporary.c_str(), historyFile.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+static constexpr std::string_view historyFormat = "# TaskManagerNative history UTF-8 v1";
+static std::string historyField(const std::wstring& value) {
+  std::string result;
+  for (const char character : utf8(value)) {
+    switch (character) {
+    case '\\': result += "\\\\"; break;
+    case '\t': result += "\\t"; break;
+    case '\r': result += "\\r"; break;
+    case '\n': result += "\\n"; break;
+    default: result += character; break;
+    }
+  }
+  return result;
 }
-void Application::loadHistory() {
-  std::wifstream stream{std::filesystem::path(historyFile)}; std::wstring line;
+static std::optional<std::wstring> historyText(std::string_view value, bool escaped) {
+  std::string bytes;
+  for (size_t index = 0; index < value.size(); ++index) {
+    char character = value[index];
+    if (escaped && character == '\\') {
+      if (++index == value.size()) return {};
+      switch (value[index]) {
+      case '\\': character = '\\'; break;
+      case 't': character = '\t'; break;
+      case 'r': character = '\r'; break;
+      case 'n': character = '\n'; break;
+      default: return {};
+      }
+    }
+    bytes += character;
+  }
+  if (bytes.empty()) return std::wstring{};
+  if (bytes.size() > size_t(INT_MAX)) return {};
+  const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), int(bytes.size()), nullptr, 0);
+  if (!size) return {};
+  std::wstring result(size_t(size), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), int(bytes.size()), result.data(), size) != size) return {};
+  return result;
+}
+bool Application::writeHistoryFile(const std::wstring& path) const {
+  const auto temporary = path + L".tmp";
+  std::ofstream stream{std::filesystem::path(temporary), std::ios::binary};
+  if (!stream) return false;
+  stream << historyFormat << '\n';
+  for (const auto& [key, value] : usage) stream << historyField(key) << '\t' << value.ticks << '\t' << historyField(value.name) << '\t' << historyField(value.path) << '\t' << (value.app ? 1 : 0) << '\n';
+  stream.close();
+  if (stream && MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+  DeleteFileW(temporary.c_str());
+  return false;
+}
+void Application::readHistoryFile(const std::wstring& path) {
+  std::ifstream stream{std::filesystem::path(path), std::ios::binary}; std::string line;
+  bool first = true, escaped = false;
   while (std::getline(stream, line) && usage.size() < 8192) {
-    const auto fields = splitFields(line, L'\t');
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (first) { first = false; if (line == historyFormat) { escaped = true; continue; } }
+    // Split before unescaping, so tabs/newlines in metadata cannot create fields or records.
+    std::vector<std::string_view> fields; size_t begin = 0;
+    for (size_t end = 0; end <= line.size(); ++end) if (end == line.size() || line[end] == '\t') { fields.emplace_back(line.data() + begin, end - begin); begin = end + 1; }
     if (fields.size() < 3) continue;
-    try { usage[std::wstring(fields[0])] = {std::wstring(fields[2]), fields.size() > 3 ? std::wstring(fields[3]) : L"", std::stoull(std::wstring(fields[1])), fields.size() > 4 && fields[4] == L"1"}; } catch (...) {}
+    const auto key = historyText(fields[0], escaped), name = historyText(fields[2], escaped), executablePath = historyText(fields.size() > 3 ? fields[3] : std::string_view{}, escaped);
+    if (!key || !name || !executablePath || key->empty()) continue;
+    uint64_t cpuTicks = 0;
+    const auto parsed = std::from_chars(fields[1].data(), fields[1].data() + fields[1].size(), cpuTicks);
+    if (parsed.ec != std::errc{} || parsed.ptr != fields[1].data() + fields[1].size()) continue;
+    usage[*key] = {*name, *executablePath, cpuTicks, fields.size() > 4 && fields[4] == "1"};
   }
 }
+void Application::saveHistory() { if (persistent() && !historyFile.empty()) writeHistoryFile(historyFile); }
+void Application::loadHistory() { readHistoryFile(historyFile); }
 void Application::worker() {
   try {
     const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
