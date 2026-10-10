@@ -432,7 +432,7 @@ void Application::readHistoryFile(const std::wstring& path) {
     if (first) { first = false; if (line == historyFormat) { escaped = true; continue; } }
     // Split before unescaping, so tabs/newlines in metadata cannot create fields or records.
     std::vector<std::string_view> fields; size_t begin = 0;
-    for (size_t end = 0; end <= line.size(); ++end) if (end == line.size() || line[end] == '\t') { fields.emplace_back(line.data() + begin, end - begin); begin = end + 1; }
+    for (size_t position = 0; position <= line.size(); ++position) if (position == line.size() || line[position] == '\t') { fields.emplace_back(line.data() + begin, position - begin); begin = position + 1; }
     if (fields.size() < 3) continue;
     const auto key = historyText(fields[0], escaped), name = historyText(fields[2], escaped), executablePath = historyText(fields.size() > 3 ? fields[3] : std::string_view{}, escaped);
     if (!key || !name || !executablePath || key->empty()) continue;
