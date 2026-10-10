@@ -365,10 +365,31 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
   if (hidden()) (sortOnly ? sortTimes : updateTimes).push_back(milliseconds(begin));
 #endif
 }
-const Process* Application::selectedProcess() const { const auto row = selectedRow(); return current && row && row->process >= 0 && row->kind != RowKind::Heading ? &current->processes[size_t(row->process)] : nullptr; }
-std::vector<const Process*> Application::selectedMembers() const {
-  std::vector<const Process*> result; const auto row = selectedRow();
-  if (current && row && (row->kind == RowKind::Group || row->kind == RowKind::Process || row->kind == RowKind::Window)) for (const int member : row->members) result.push_back(&current->processes[size_t(member)]);
+// Commands can open modal dialogs, whose message loops keep installing new samples.
+// Copy action targets before opening a dialog so refreshes cannot change their identity.
+std::optional<Process> Application::selectedProcess() const {
+  const auto row = selectedRow();
+  if (!current || !row || row->kind == RowKind::Heading || row->process < 0 || size_t(row->process) >= current->processes.size()) return std::nullopt;
+  return current->processes[size_t(row->process)];
+}
+std::optional<Entry> Application::selectedEntry() const {
+  const auto row = selectedRow();
+  if (!current || !row || row->entry < 0) return std::nullopt;
+  const std::span<const Entry> entries = selectedTab == StartupTab ? (current->startup ? std::span<const Entry>(current->startup->entries) : std::span<const Entry>{}) : selectedTab == UsersTab ? current->sessions : current->services;
+  if (size_t(row->entry) >= entries.size()) return std::nullopt;
+  return entries[size_t(row->entry)];
+}
+std::vector<Process> Application::selectedMembers(bool tree) const {
+  std::vector<Process> result; const auto row = selectedRow();
+  if (current && row && (row->kind == RowKind::Group || row->kind == RowKind::Process || row->kind == RowKind::Window)) for (const int member : row->members) {
+    if (member < 0 || size_t(member) >= current->processes.size()) continue;
+    const auto& process = current->processes[size_t(member)];
+    if (!tree) { result.push_back(process); continue; }
+    for (const auto& identity : processTree(current->processes, process)) {
+      const auto found = std::find_if(current->processes.begin(), current->processes.end(), [&](const Process& candidate) { return candidate.id == identity.pid && candidate.created == identity.created; });
+      if (found != current->processes.end()) result.push_back(*found);
+    }
+  }
   return result;
 }
 void Application::select(int index) {

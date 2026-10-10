@@ -199,8 +199,9 @@ private:
   std::wstring rowKey(int index) const { return index >= 0 && size_t(index) < rows.size() ? rows[size_t(index)].key : L""; }
   int selectedIndex() const { return ListView_GetNextItem(list, -1, LVNI_SELECTED); }
   const Row* selectedRow() const { const int index = selectedIndex(); return index >= 0 && size_t(index) < rows.size() ? &rows[size_t(index)] : nullptr; }
-  const Process* selectedProcess() const;
-  std::vector<const Process*> selectedMembers() const;
+  std::optional<Process> selectedProcess() const;
+  std::optional<Entry> selectedEntry() const;
+  std::vector<Process> selectedMembers(bool tree = false) const;
   void select(int index);
   void toggle(int index);
   void letter(wchar_t character);
@@ -233,6 +234,7 @@ private:
 #ifdef TASKMGR_DIAGNOSTICS
   void benchmarkTick();
   bool verifySorting();
+  bool verifyActionSnapshots();
   bool verifyPerformanceHover();
   bool verifyTabSwitching();
   void writeBenchmark();

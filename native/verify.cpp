@@ -4,6 +4,55 @@
 #include <windowsx.h>
 
 namespace taskmgr {
+bool Application::verifyActionSnapshots() {
+  const auto savedSample = current; const int savedTab = selectedTab, savedSelection = selectedIndex(), savedTop = ListView_GetTopIndex(list);
+  const bool savedRebuilding = rebuilding, wasVisible = (GetWindowLongPtrW(list, GWL_STYLE) & WS_VISIBLE) != 0;
+  rebuilding = true;
+  auto savedRows = std::move(rows);
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  SendMessageW(list, WM_SETREDRAW, FALSE, 0);
+  auto sample = std::make_shared<Sample>(); sample->processes.resize(3);
+  sample->processes[0].id = 900001; sample->processes[0].created = 100; sample->processes[0].name = L"Original process";
+  sample->processes[1].id = 900002; sample->processes[1].parent = 900001; sample->processes[1].created = 101;
+  sample->processes[2].id = 900003; sample->processes[2].parent = 900001; sample->processes[2].created = 99;
+  current = sample; selectedTab = DetailsTab;
+  Row row; row.key = L"action-fixture"; row.process = 0; row.members = {0}; rows = {row};
+  ListView_SetItemCountEx(list, 1, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL); select(0);
+  const auto process = selectedProcess(); const auto members = selectedMembers(); const auto tree = selectedMembers(true);
+  auto inventory = std::make_shared<ServiceInventory>(); Entry user; user.key = L"original-session"; user.session = 123; user.cells = {L"Original user"}; inventory->sessions = {user};
+  sample->inventory = inventory; sample->sessions = inventory->sessions;
+  selectedTab = UsersTab; rows[0].kind = RowKind::User; rows[0].entry = 0;
+  const auto session = selectedEntry();
+  auto startup = std::make_shared<StartupInventory>(); Entry item; item.key = L"original-startup"; item.enabled = true; item.path = L"C:\\Fixture\\original.exe"; startup->entries = {item}; sample->startup = startup;
+  selectedTab = StartupTab; const auto startupEntry = selectedEntry();
+  item.key = L"original-service"; inventory->services = {item}; sample->services = inventory->services;
+  selectedTab = ServicesTab; const auto service = selectedEntry();
+
+  // Simulate a refresh and selection change while a confirmation dialog is open.
+  // Reuse the old fixture storage as well, so borrowed references fail deterministically.
+  current = std::make_shared<Sample>(); rows[0].key = L"replacement-selection";
+  sample->processes[0].created = 200; sample->processes[0].name = L"Reused PID";
+  sample->processes[1].id = 900004; inventory->sessions[0].session = 456; inventory->sessions[0].cells[0] = L"Replacement user";
+  startup->entries[0].enabled = false; startup->entries[0].path = L"C:\\Fixture\\replacement.exe"; inventory->services[0].key = L"replacement-service";
+  check(process && process->id == 900001 && process->created == 100 && process->name == L"Original process", "action-process-keeps-confirmed-identity");
+  check(members.size() == 1 && members[0].id == 900001 && members[0].created == 100, "action-members-own-process-snapshots");
+  check(tree.size() == 2 && tree[0].id == 900002 && tree[1].id == 900001 && tree[1].created == 100, "action-tree-keeps-original-descendants");
+  check(session && session->session == 123 && session->cells[0] == L"Original user", "action-session-keeps-confirmed-target");
+  check(startupEntry && startupEntry->enabled && startupEntry->path == L"C:\\Fixture\\original.exe", "action-startup-entry-owns-snapshot");
+  check(service && service->key == L"original-service", "action-service-entry-owns-snapshot");
+  check(!selectedProcess() && !selectedEntry() && selectedMembers().empty(), "action-stale-selection-has-no-target");
+
+  current = savedSample; selectedTab = savedTab; rows = std::move(savedRows);
+  ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+  ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  if (savedSelection >= 0) select(savedSelection);
+  ListView_Scroll(list, 0, (savedTop - ListView_GetTopIndex(list)) * rowHeight());
+  SendMessageW(list, WM_SETREDRAW, TRUE, 0);
+  if (!wasVisible) ShowWindow(list, SW_HIDE);
+  rebuilding = savedRebuilding;
+  return passed;
+}
 bool Application::verifySorting() {
   verifyingSorting = true;
   const int savedTab = selectedTab; const bool savedGrouping = groupByType; const auto savedExpanded = expanded;
@@ -38,6 +87,7 @@ bool Application::verifySorting() {
     servicesByProcess(); check(indexedServices.size() == 1 && indexedServices.contains(43) && indexedInventory == replacement, "service-index-refresh");
     current = savedSample; indexedServices.clear(); indexedInventory.reset();
   }
+  check(verifyActionSnapshots(), "action-target-snapshots");
   check(activity.size() == current->processes.size(), "activity-live-count");
   check(ImageList_GetImageCount(icons->images) >= 4, "stock-icons-present");
   HICON fallbackIcon = ImageList_GetIcon(icons->images, Icons::DefaultIcon, ILD_NORMAL);

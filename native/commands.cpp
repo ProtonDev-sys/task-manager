@@ -76,24 +76,18 @@ void Application::runTask() {
 }
 void Application::endSelected(bool tree) {
   const auto row = selectedRow(); if (!row || !current) return;
-  const auto members = selectedMembers(); if (members.empty()) return;
+  const auto targets = selectedMembers(tree); if (targets.empty()) return;
   const auto name = cell(*row, 0);
   if (selectedTab == DetailsTab) {
     if (tree ? !confirm(L"Do you want to end the process tree of “" + name + L"”?", L"If open programs or processes are associated with this process tree, they will close and you will lose any unsaved data. If you end a system process, it might result in system instability. Are you sure you want to continue?", L"End process tree")
              : !confirm(L"Do you want to end “" + name + L"”?", L"If an open program is associated with this process, it will close and you will lose any unsaved data. If you end a system process, it might result in system instability. Are you sure you want to continue?", L"End process")) return;
   } else if (row->category == 2 && !confirm(L"Do you want to end the system process “" + name + L"”?", L"Ending this process will cause Windows to become unusable or shut down, causing you to lose any unsaved data. Are you sure you want to continue?", L"Shut down")) return;
-  std::vector<Process> targets;
-  for (const auto member : members) {
-    if (!tree) { targets.push_back(*member); continue; }
-    for (const auto& identity : processTree(current->processes, *member)) for (const auto& process : current->processes) if (process.id == identity.pid && process.created == identity.created) targets.push_back(process);
-  }
   asynchronous([targets] { std::wstring failures; for (const auto& process : targets) { try { processAction(process, Action::End); } catch (const std::exception& error) { if (failures.empty() || targets.size() == 1) failures = std::wstring(error.what(), error.what() + strlen(error.what())); } } if (!failures.empty()) throw std::runtime_error(utf8(L"Unable to terminate process.\n\n" + failures)); return std::wstring{}; });
 }
 void Application::command(int id) {
   if (tabQueued && pendingTab >= 0) { const int tab = pendingTab; pendingTab = -1; SendMessageW(tabs, WM_SETREDRAW, TRUE, 0); selectTab(tab); InvalidateRect(tabs, nullptr, FALSE); }
   const auto row = selectedRow(); const auto process = selectedProcess();
-  const Entry* entry = nullptr;
-  if (row && current && row->entry >= 0) { const auto& entries = selectedTab == StartupTab ? current->startup->entries : selectedTab == UsersTab ? current->sessions : current->services; if (size_t(row->entry) < entries.size()) entry = &entries[size_t(row->entry)]; }
+  const auto entry = selectedEntry();
   if (id >= ColumnId && id < ColumnId + 64) {
     const int column = id - ColumnId; const auto defs = definitions(selectedTab);
     if (column == 0 || size_t(column) >= defs.size() || compact || selectedTab == PerformanceTab) return;
@@ -168,7 +162,7 @@ void Application::command(int id) {
   }
   case SwitchTo: case BringToFront: case MinimizeWindow: case MaximizeWindow: {
     HWND target = row && row->kind == RowKind::Window && IsWindow(row->window) ? row->window : nullptr;
-    if (!target) for (const auto member : selectedMembers()) if ((target = appWindow(*member)) != nullptr) break;
+    if (!target) for (const auto& member : selectedMembers()) if ((target = appWindow(member)) != nullptr) break;
     if (!target) return;
     if (id == MinimizeWindow) { ShowWindow(target, SW_MINIMIZE); return; }
     if (id == MaximizeWindow) { ShowWindow(target, SW_MAXIMIZE); return; }
@@ -227,7 +221,7 @@ void Application::command(int id) {
     const auto target = *process; const auto action = choices[id - PriorityRealtime]; asynchronous([target, action] { processAction(target, action); return std::wstring{}; }); return;
   }
   case ServiceStart: case ServiceStop: case ServiceRestart: {
-    const Entry* service = entry; if (!service && row && row->kind == RowKind::Service && current) { const auto key = row->key.substr(2); for (const auto& item : current->services) if (item.key == key) service = &item; }
+    const Entry* service = entry ? &*entry : nullptr; if (!service && row && row->kind == RowKind::Service && current) { const auto key = row->key.substr(2); for (const auto& item : current->services) if (item.key == key) service = &item; }
     if (!service) return; const auto target = *service; const int action = id - ServiceStart; asynchronous([target, action] { serviceAction(target, action); return std::wstring{}; }); return;
   }
   case OpenServices: ShellExecuteW(window, nullptr, L"services.msc", nullptr, nullptr, SW_SHOWNORMAL); return;
@@ -256,7 +250,7 @@ void Application::menu(POINT point) {
   auto separator = [&](HMENU target) { AppendMenuW(target, MF_SEPARATOR, 0, nullptr); };
   auto submenu = [&](HMENU target, const std::wstring& text) { HMENU child = CreatePopupMenu(); children.push_back(child); AppendMenuW(target, MF_POPUP, reinterpret_cast<UINT_PTR>(child), text.c_str()); return child; };
   const auto process = selectedProcess(); const auto members = selectedMembers();
-  HWND appTarget = row->kind == RowKind::Window ? row->window : nullptr; if (!appTarget) for (const auto member : members) if (member->app && (appTarget = appWindow(*member)) != nullptr) break;
+  HWND appTarget = row->kind == RowKind::Window ? row->window : nullptr; if (!appTarget) for (const auto& member : members) if (member.app && (appTarget = appWindow(member)) != nullptr) break;
   const bool path = process && !icons->get(*process).path.empty();
   if ((selectedTab == ProcessesTab || selectedTab == DetailsTab) && row->kind == RowKind::Process && process && process->id > 4 && process->id != GetCurrentProcessId()) {
     try { const auto policy = powerPolicy(*process); add(popup, EfficiencyId, L"&Efficiency mode", true, (policy.control & policy.state & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0); }
@@ -280,7 +274,7 @@ void Application::menu(POINT point) {
       add(networkMenu, NetworkValues, L"&Values"); add(networkMenu, NetworkPercents, L"&Percents"); CheckMenuRadioItem(networkMenu, NetworkValues, NetworkPercents, networkPercent ? NetworkPercents : NetworkValues, MF_BYCOMMAND);
     }
     separator(popup); add(popup, CreateDump, L"Create &dump file", process && row->kind != RowKind::Interrupts); separator(popup);
-    add(popup, GoToDetails, L"&Go to details", process != nullptr); add(popup, OpenLocation, L"&Open file location", path); add(popup, SearchOnline, L"S&earch online"); add(popup, Properties, L"Propert&ies", path);
+    add(popup, GoToDetails, L"&Go to details", process.has_value()); add(popup, OpenLocation, L"&Open file location", path); add(popup, SearchOnline, L"S&earch online"); add(popup, Properties, L"Propert&ies", path);
   } else if (selectedTab == UsersTab) {
     add(popup, Toggle, row->expanded ? L"Colla&pse" : L"Ex&pand"); add(popup, Disconnect, L"&Disconnect"); add(popup, SignOff, L"Sign o&ff"); separator(popup); add(popup, ManageAccounts, L"&Manage user accounts"); defaultItem = Toggle;
   } else if (selectedTab == DetailsTab) {
