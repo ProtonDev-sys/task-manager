@@ -70,18 +70,23 @@ struct Handle {
   Handle(const Handle&) = delete;
   Handle& operator=(const Handle&) = delete;
 };
+struct GpuEngineUsage { std::wstring key, label; double value = 0; };
+struct ProcessGpu { double value = 0; std::wstring engine; std::vector<GpuEngineUsage> engines; };
 struct Process {
   DWORD id = 0, parent = 0, session = 0, threads = 0, handles = 0, pageFaults = 0;
   LONG priority = 8;
   uint64_t created = 0, cpuTicks = 0, working = 0, privateWorking = 0, privateBytes = 0, peakWorking = 0, readBytes = 0, writeBytes = 0;
   double cpu = 0, ioRate = 0, gpu = 0, network = -1;
   std::wstring name, gpuEngine;
+  // Share immutable engine data between process samples until the next resource refresh.
+  std::shared_ptr<const ProcessGpu> gpuUsage;
   bool app = false, suspended = false, hung = false;
 };
 struct Metadata { std::wstring path, description, publisher, user, commandLine, package, virtualization; int icon = 0; bool resolved = false; };
 struct FileInfo { std::wstring description, publisher; int icon = -1; };
 struct Identity { DWORD pid; uint64_t created; bool operator==(const Identity&) const = default; };
 struct IdentityHash { size_t operator()(const Identity& key) const { return std::hash<uint64_t>{}(key.created) ^ (std::hash<DWORD>{}(key.pid) << 1); } };
+using ProcessGpuCache = std::unordered_map<Identity, std::shared_ptr<const ProcessGpu>, IdentityHash>;
 struct Entry { std::wstring key; std::vector<std::wstring> cells; DWORD pid = 0, session = 0; bool enabled = false, startupEditable = false; std::wstring path, location, group, description; };
 struct StartupInventory { std::vector<Entry> entries; std::vector<std::wstring> warnings; bool complete = true; };
 struct ServiceInventory { std::vector<Entry> services, sessions; };
@@ -140,7 +145,7 @@ class Sampler {
   uint64_t generation = 0;
   Time last{};
   Sample cachedResources;
-  std::unordered_map<Identity, std::pair<double, std::wstring>, IdentityHash> cachedProcessGpu;
+  ProcessGpuCache cachedProcessGpu;
   Time resourcesAt{};
   uint64_t idle = 0, total = 0;
   std::vector<std::array<uint64_t, 3>> corePrevious;

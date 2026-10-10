@@ -23,7 +23,17 @@ std::vector<std::wstring_view> splitFields(std::wstring_view text, wchar_t delim
   while (!text.empty()) { const size_t end = text.find(delimiter); fields.push_back(text.substr(0, end)); if (end == text.npos) break; text.remove_prefix(end + 1); }
   return fields;
 }
-struct ProcessGpu { double value = 0; std::wstring engine; };
+static void cacheProcessGpu(std::span<const Process> processes, std::unordered_map<DWORD, ProcessGpu>& values, ProcessGpuCache& cache) {
+  cache.clear();
+  for (const auto& process : processes) if (const auto found = values.find(process.id); found != values.end() && found->second.value > 0)
+    cache.emplace(Identity{process.id, process.created}, std::make_shared<const ProcessGpu>(std::move(found->second)));
+}
+static void applyProcessGpu(std::span<Process> processes, const ProcessGpuCache& cache) {
+  for (auto& process : processes) {
+    const auto found = cache.find(Identity{process.id, process.created}); process.gpuUsage = found == cache.end() ? nullptr : found->second;
+    process.gpu = process.gpuUsage ? process.gpuUsage->value : 0; process.gpuEngine = process.gpuUsage ? process.gpuUsage->engine : L"";
+  }
+}
 static void aggregateGpuEngines(GpuInfo& gpu, std::span<const std::pair<std::wstring, double>> engines, std::unordered_map<DWORD, ProcessGpu>& processGpu) {
   std::map<std::wstring, double> engineTotals;
   std::unordered_map<DWORD, std::map<std::wstring, double>> perProcess;
@@ -47,7 +57,9 @@ static void aggregateGpuEngines(GpuInfo& gpu, std::span<const std::pair<std::wst
   // across all GPUs; summing engines of the same type overstates simultaneous activity.
   for (const auto& [pid, instances] : perProcess) for (const auto& [instance, value] : instances) {
     auto& slot = processGpu[pid];
-    if (value > slot.value) { slot.value = std::min(100.0, value); slot.engine = L"GPU " + std::to_wstring(gpu.index) + L" - " + instance.substr(instance.find(L'|') + 1); }
+    const double usage = std::min(100.0, value); const auto label = L"GPU " + std::to_wstring(gpu.index) + L" - " + instance.substr(instance.find(L'|') + 1);
+    if (usage > 0) slot.engines.push_back({gpu.key + L"|" + instance, label, usage});
+    if (usage > slot.value) { slot.value = usage; slot.engine = label; }
   }
 }
 #ifdef TASKMGR_DIAGNOSTICS
@@ -62,6 +74,8 @@ std::vector<std::pair<std::string, bool>> gpuEngineTests() {
     aggregateGpuEngines(gpu, engines, processes);
     checks.emplace_back("gpu_process_uses_busiest_engine_of_same_type", processes.at(10).value == 50 && processes.at(10).engine == L"GPU 0 - 3D");
     checks.emplace_back("gpu_adapter_uses_busiest_engine_of_same_type", gpu.usage == 50 && gpu.engines == std::vector<std::pair<std::wstring, double>>{{L"3D", 50}});
+    const auto& details = processes.at(10).engines;
+    checks.emplace_back("gpu_process_retains_distinct_engine_contributions", details.size() == 2 && details[0].key != details[1].key && details[0].value == 40 && details[1].value == 50);
   }
   {
     GpuInfo gpu; gpu.key = firstKey;
@@ -70,21 +84,27 @@ std::vector<std::pair<std::string, bool>> gpuEngineTests() {
     aggregateGpuEngines(gpu, engines, processes);
     checks.emplace_back("gpu_process_distinguishes_linked_physical_adapters", processes.at(10).value == 50 && processes.at(10).engine == L"GPU 0 - 3D");
     checks.emplace_back("gpu_adapter_distinguishes_linked_physical_adapters", gpu.usage == 50 && gpu.engines == std::vector<std::pair<std::wstring, double>>{{L"3D", 50}});
+    const auto& details = processes.at(10).engines;
+    checks.emplace_back("gpu_process_retains_physical_adapter_identity", details.size() == 2 && details[0].key != details[1].key);
   }
   {
     GpuInfo gpu; gpu.key = firstKey;
     std::unordered_map<DWORD, ProcessGpu> processes;
-    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 25}, {name(20, firstKey, 0, L"3D"), 35}, {name(10, firstKey, 1, L"Copy"), 45}};
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 10}, {name(10, firstKey, 0, L"3D"), 15}, {name(20, firstKey, 0, L"3D"), 35}, {name(10, firstKey, 1, L"Copy"), 45}};
     aggregateGpuEngines(gpu, engines, processes);
     checks.emplace_back("gpu_shared_engine_adds_process_contributions", gpu.usage == 60 && gpu.engines == std::vector<std::pair<std::wstring, double>>{{L"3D", 60}, {L"Copy", 45}});
     checks.emplace_back("gpu_processes_keep_individual_busiest_engine", processes.at(10).value == 45 && processes.at(10).engine == L"GPU 0 - Copy" && processes.at(20).value == 35 && processes.at(20).engine == L"GPU 0 - 3D");
+    const auto& first = processes.at(10).engines; const auto& second = processes.at(20).engines;
+    checks.emplace_back("gpu_process_contributions_share_actual_engine_identity", first.size() == 2 && second.size() == 1 && first[0].key == second[0].key && first[0].value == 25 && second[0].value == 35);
   }
   {
     GpuInfo first; first.key = firstKey; GpuInfo second; second.key = secondKey; second.index = 1;
     std::unordered_map<DWORD, ProcessGpu> processes;
-    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 40}, {name(10, firstKey, 1, L"3D"), 50}, {name(10, secondKey, 0, L"Copy"), 80}};
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 40}, {name(10, firstKey, 1, L"3D"), 50}, {name(10, secondKey, 0, L"3D"), 80}};
     aggregateGpuEngines(first, engines, processes); aggregateGpuEngines(second, engines, processes);
-    checks.emplace_back("gpu_process_selects_busiest_engine_across_adapters", processes.at(10).value == 80 && processes.at(10).engine == L"GPU 1 - Copy" && first.usage == 50 && second.usage == 80);
+    checks.emplace_back("gpu_process_selects_busiest_engine_across_adapters", processes.at(10).value == 80 && processes.at(10).engine == L"GPU 1 - 3D" && first.usage == 50 && second.usage == 80);
+    const auto& details = processes.at(10).engines;
+    checks.emplace_back("gpu_process_retains_logical_adapter_identity", details.size() == 3 && details[0].key != details[2].key);
   }
   {
     GpuInfo gpu; gpu.key = firstKey;
@@ -93,6 +113,23 @@ std::vector<std::pair<std::string, bool>> gpuEngineTests() {
     aggregateGpuEngines(gpu, engines, processes);
     checks.emplace_back("gpu_usage_capped_at_one_hundred", processes.at(10).value == 100 && gpu.usage == 100 && gpu.engines.front().second == 100);
     checks.emplace_back("gpu_idle_process_has_no_busy_engine", processes.at(30).value == 0 && processes.at(30).engine.empty());
+  }
+  {
+    GpuInfo gpu; gpu.key = firstKey;
+    std::unordered_map<DWORD, ProcessGpu> values;
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 25}, {name(10, firstKey, 1, L"Copy"), 45}, {name(20, firstKey, 0, L"3D"), 35}};
+    aggregateGpuEngines(gpu, engines, values);
+    std::vector<Process> processes(2); processes[0].id = 10; processes[0].created = 100; processes[1].id = 20; processes[1].created = 200;
+    ProcessGpuCache cache; cacheProcessGpu(processes, values, cache); applyProcessGpu(processes, cache);
+    const auto retained = processes[0].gpuUsage;
+    checks.emplace_back("gpu_fresh_sample_owns_engine_contributions", retained && retained->engines.size() == 2 && processes[0].gpu == 45 && processes[0].gpuEngine == L"GPU 0 - Copy" && processes[1].gpu == 35);
+    applyProcessGpu(processes, cache);
+    checks.emplace_back("gpu_cached_sample_reuses_immutable_contributions", processes[0].gpuUsage == retained);
+    processes[0].created = 101; applyProcessGpu(processes, cache);
+    checks.emplace_back("gpu_cached_sample_rejects_reused_pid", !processes[0].gpuUsage && processes[0].gpu == 0 && processes[0].gpuEngine.empty() && processes[1].gpu == 35);
+    values.clear(); cacheProcessGpu(processes, values, cache); applyProcessGpu(processes, cache);
+    checks.emplace_back("gpu_missing_counters_clear_cached_contributions", cache.empty() && !processes[1].gpuUsage && processes[1].gpu == 0 && processes[1].gpuEngine.empty());
+    checks.emplace_back("gpu_previous_sample_keeps_owned_contributions", retained && retained->engines.size() == 2 && retained->engines[0].value == 25 && retained->engines[1].value == 45);
   }
   return checks;
 }
@@ -394,16 +431,13 @@ Sample Sampler::sample(bool startupVisible) {
     gpu.temperature = gpuTemperature(gpu.key);
     result.gpus.push_back(std::move(gpu));
   }
-  for (auto& process : result.processes) if (auto found = processGpu.find(process.id); found != processGpu.end()) { process.gpu = found->second.value; process.gpuEngine = found->second.engine; }
-  cachedProcessGpu.clear();
-  for (const auto& process : result.processes) if (process.gpu > 0 || !process.gpuEngine.empty()) cachedProcessGpu.emplace(Identity{process.id, process.created}, std::pair{process.gpu, process.gpuEngine});
+  cacheProcessGpu(result.processes, processGpu, cachedProcessGpu);
   cachedResources.cpuSpeed = result.cpuSpeed; cachedResources.interrupts = result.interrupts; cachedResources.memory = result.memory;
   cachedResources.cores = result.cores; cachedResources.disks = result.disks; cachedResources.networks = result.networks; cachedResources.gpus = result.gpus;
   resourcesAt = started;
   cachedResources.resourcesSampledAt = started;
-  } else {
-    for (auto& process : result.processes) if (auto found = cachedProcessGpu.find(Identity{process.id, process.created}); found != cachedProcessGpu.end()) { process.gpu = found->second.first; process.gpuEngine = found->second.second; }
   }
+  applyProcessGpu(result.processes, cachedProcessGpu);
   result.resourcesSampledAt = resourcesAt;
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[4] = milliseconds(phase); phase = Clock::now();

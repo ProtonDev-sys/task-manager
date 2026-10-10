@@ -46,6 +46,49 @@ bool Application::verifySorting() {
   check(verifyPerformanceHover(), "performance-hover");
   check(verifyTabSwitching(), "tab-switching");
   for (const auto& process : current->processes) { const auto found = activity.find({process.id, process.created}); check(found != activity.end() && found->second.ticks == process.cpuTicks && found->second.seen == activityGeneration && std::isfinite(found->second.trend), "activity-live-identity"); }
+  {
+    // Group labels follow the busiest engine; samples without engine detail retain the legacy fallback.
+    const auto savedSample = current; const int originalTab = selectedTab; const bool originalRebuilding = rebuilding; rebuilding = true;
+    auto sample = std::make_shared<Sample>(); sample->processes.resize(3);
+    sample->processes[0].gpu = 30; sample->processes[0].gpuEngine = L"GPU 0 - 3D";
+    sample->processes[1].gpu = 25; sample->processes[1].gpuEngine = L"GPU 0 - Copy";
+    sample->processes[2].gpu = 40; sample->processes[2].gpuEngine = L"GPU 0 - Compute";
+    current = sample; selectedTab = ProcessesTab;
+    std::array<int, 3> members{0, 1, 2};
+    do {
+      Row row; row.kind = RowKind::Group; processCells(row, members);
+      check(row.cells[12].text == L"GPU 0 - Compute" && row.cells[11].value == 95, "gpu-group-legacy-fallback-uses-busiest-member-label");
+    } while (std::next_permutation(members.begin(), members.end()));
+    const auto setEngines = [&](size_t index, std::initializer_list<GpuEngineUsage> engines) {
+      auto usage = std::make_shared<ProcessGpu>(); usage->engines = engines;
+      for (const auto& engine : engines) if (engine.value > usage->value) { usage->value = engine.value; usage->engine = engine.label; }
+      auto& process = sample->processes[index]; process.gpu = std::min(100.0, usage->value); process.gpuEngine = usage->engine; process.gpuUsage = std::move(usage);
+    };
+    const std::wstring first = L"luid_1|_phys_0_eng_0|3D", second = L"luid_1|_phys_0_eng_1|Copy", third = L"luid_1|_phys_0_eng_2|Compute";
+    setEngines(0, {{first, L"GPU 0 - 3D", 30}}); setEngines(1, {{second, L"GPU 0 - Copy", 25}}); setEngines(2, {{third, L"GPU 0 - Compute", 40}});
+    do {
+      Row row; row.kind = RowKind::Group; processCells(row, members);
+      check(row.cells[11].value == 40 && row.cells[12].text == L"GPU 0 - Compute", "gpu-group-uses-busiest-actual-engine");
+    } while (std::next_permutation(members.begin(), members.end()));
+    sample->processes[1].gpuUsage.reset();
+    Row mixed; processCells(mixed, members); check(mixed.cells[11].value == 95 && mixed.cells[12].text == L"GPU 0 - Compute", "gpu-group-mixed-samples-use-whole-row-fallback");
+    sample->processes[1].gpu = 0;
+    Row inactive; processCells(inactive, members); check(inactive.cells[11].value == 40 && inactive.cells[12].text == L"GPU 0 - Compute", "gpu-group-idle-member-needs-no-engine-detail");
+    setEngines(0, {{first, L"GPU 0 - 3D", 25}, {second, L"GPU 0 - Copy", 45}}); setEngines(1, {{first, L"GPU 0 - 3D", 35}}); setEngines(2, {});
+    Row shared; processCells(shared, members); check(shared.cells[11].value == 60 && shared.cells[12].text == L"GPU 0 - 3D", "gpu-group-sums-shared-engine-including-nonpeak-contributions");
+    Row single; processCells(single, std::span<const int>(members).first(1)); check(single.cells[11].value == 45 && single.cells[12].text == L"GPU 0 - Copy", "gpu-single-process-retains-summary");
+    setEngines(0, {{first, L"GPU 0 - 3D", 70}}); setEngines(1, {{first, L"GPU 0 - 3D", 55}});
+    Row capped; processCells(capped, members); check(capped.cells[11].value == 100 && capped.cells[12].text == L"GPU 0 - 3D", "gpu-group-shared-engine-capped-at-one-hundred");
+    setEngines(0, {{first, L"GPU 0 - 3D", 30}}); setEngines(1, {{L"luid_2|_phys_0_eng_0|3D", L"GPU 1 - 3D", 40}});
+    Row adapters; processCells(adapters, members); check(adapters.cells[11].value == 40 && adapters.cells[12].text == L"GPU 1 - 3D", "gpu-group-distinguishes-logical-adapters");
+    setEngines(1, {{L"luid_1|_phys_1_eng_0|3D", L"GPU 0 - 3D", 40}});
+    Row physical; processCells(physical, members); check(physical.cells[11].value == 40 && physical.cells[12].text == L"GPU 0 - 3D", "gpu-group-distinguishes-linked-physical-adapters");
+    setEngines(1, {{L"luid_1|_phys_0_eng_1|3D", L"GPU 0 - 3D", 40}});
+    Row independent; processCells(independent, members); check(independent.cells[11].value == 40, "gpu-group-distinguishes-engines-with-the-same-type");
+    for (size_t index = 0; index < sample->processes.size(); ++index) setEngines(index, {});
+    Row idle; processCells(idle, members); check(idle.cells[12].text.empty() && idle.cells[11].value == 0, "gpu-idle-group-clears-engine-label");
+    current = savedSample; selectedTab = originalTab; rebuilding = originalRebuilding;
+  }
   for (const int tab : {ProcessesTab, UsersTab, DetailsTab, HistoryTab, StartupTab, ServicesTab}) {
     selectTab(tab);
     for (size_t index = 0; index < rows.size(); ++index) if (rows[index].kind != RowKind::Heading) { select(int(index)); break; }

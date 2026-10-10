@@ -92,13 +92,22 @@ std::wstring Application::processName(int index, const std::unordered_map<DWORD,
   return metadata.description.empty() ? process.name : metadata.description;
 }
 void Application::processCells(Row& row, std::span<const int> members) const {
-  Aggregate total; bool suspended = !members.empty(), hung = false;
+  Aggregate total; double peakGpu = 0; bool suspended = !members.empty(), hung = false;
+  // A summary-only active member cannot be assigned to a real engine; retain the whole-row legacy fallback.
+  const bool detailedGpu = selectedTab != UsersTab && members.size() > 1 && std::all_of(members.begin(), members.end(), [&](int index) { const auto& process = current->processes[size_t(index)]; return process.gpu <= 0 || process.gpuUsage; });
+  std::map<std::wstring_view, std::pair<double, std::wstring_view>> gpuEngines;
   for (const int index : members) {
     const auto& process = current->processes[size_t(index)];
     total.cpu += process.cpu; total.memory += double(process.privateWorking); total.disk += process.ioRate; if (process.network >= 0) total.network += process.network;
-    if (process.gpu > total.gpu) total.engine = process.gpuEngine; total.gpu += process.gpu; suspended = suspended && process.suspended; hung = hung || process.hung;
+    if (detailedGpu && process.gpuUsage) {
+      for (const auto& engine : process.gpuUsage->engines) { auto& value = gpuEngines[engine.key]; value.first += engine.value; value.second = engine.label; }
+    } else {
+      if (process.gpu > peakGpu) { peakGpu = process.gpu; total.engine = process.gpuEngine; } total.gpu += process.gpu;
+    }
+    suspended = suspended && process.suspended; hung = hung || process.hung;
     const auto tracked = activity.find({process.id, process.created}); total.trend += tracked == activity.end() ? 0 : tracked->second.trend;
   }
+  for (const auto& [key, engine] : gpuEngines) if (engine.first > total.gpu) { total.gpu = engine.first; total.engine = engine.second; }
   if (row.kind == RowKind::Interrupts) total.cpu = current->interrupts;
   total.gpu = std::min(100.0, total.gpu); total.power = total.cpu + total.gpu * 0.5 + total.disk / 1048576 * 0.2 + total.network / 125000 * 0.1;
   total.status = hung ? L"Not responding" : suspended ? L"Suspended" : L"";
