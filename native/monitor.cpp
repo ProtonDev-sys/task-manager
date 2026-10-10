@@ -173,7 +173,7 @@ static bool updateProcessorTopology(const std::vector<unsigned>& groups, std::ve
 std::vector<std::pair<std::string, bool>> processorGroupTests() {
   std::vector<std::pair<std::string, bool>> checks;
   const std::vector<unsigned> groups{64, 64};
-  checks.emplace_back("cpu_counts_all_processor_groups", processorCount(groups) == 128 && 640000000.0 / (100000 * *processorCount(groups)) == 50);
+  checks.emplace_back("cpu_counts_all_processor_groups", processorCount(groups) == 128u && 640000000.0 / (100000 * *processorCount(groups)) == 50);
   checks.emplace_back("cpu_rejects_invalid_group_counts", !processorCount({}) && !processorCount(std::vector<unsigned>{64, 0}) && !processorCount(std::vector<unsigned>{UINT32_MAX}) && !processorCount(std::vector<unsigned>(UINT16_MAX + 1u, 1)));
   unsigned epoch = 1; bool fail = false; int extent = 0; std::vector<WORD> visited;
   const auto query = [&](WORD group, NativeProcessor* processors, ULONG size, ULONG* returned) {
@@ -200,7 +200,7 @@ std::vector<std::pair<std::string, bool>> processorGroupTests() {
   checks.emplace_back("cpu_rejects_topology_change_during_query", !readProcessorGroups(groups, query, [] { return std::vector<unsigned>{64, 32}; }));
   const std::vector<unsigned> changed{64, 32};
   const auto resized = readProcessorGroups(changed, query, [&] { return changed; });
-  checks.emplace_back("cpu_hot_added_or_removed_processors_resize_sample", processorCount(changed) == 96 && resized && resized->size() == 96);
+  checks.emplace_back("cpu_hot_added_or_removed_processors_resize_sample", processorCount(changed) == 96u && resized && resized->size() == 96);
   {
     auto previousGroups = groups; auto changedIdle = idle, changedTotal = total; double changedUsage = usage;
     std::vector<std::array<uint64_t, 3>> coreBaseline(128, {100, 50, 10}); std::vector<NativeProcessor> changedProcessors;
