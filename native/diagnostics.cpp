@@ -1,5 +1,7 @@
 #include "core.hpp"
 #include "report.hpp"
+#include <sddl.h>
+#include <iterator>
 
 namespace taskmgr {
 static int findNext(std::span<const std::wstring> names, std::wstring_view prefix, int start) {
@@ -15,13 +17,7 @@ static int findNext(std::span<const std::wstring> names, std::wstring_view prefi
 static std::wstring option(const std::vector<std::wstring>& arguments, const std::wstring& key, const std::wstring& fallback = L"") { const auto found = std::find(arguments.begin(), arguments.end(), key); return found != arguments.end() && found + 1 != arguments.end() ? *(found + 1) : fallback; }
 static bool flag(const std::vector<std::wstring>& arguments, const std::wstring& key) { return std::find(arguments.begin(), arguments.end(), key) != arguments.end(); }
 static void jsonString(Report& stream, const std::wstring& value) {
-  stream << '"';
-  for (const unsigned char character : utf8(value)) {
-    if (character == '"' || character == '\\') stream << '\\' << char(character);
-    else if (character < 32) { const char hex[] = "0123456789abcdef"; stream << "\\u00" << hex[character >> 4] << hex[character & 15]; }
-    else stream << char(character);
-  }
-  stream << '"';
+  stream.jsonString(utf8(value));
 }
 static int startupReport(const std::wstring& output) {
   const auto began = Clock::now(); double firstEntries = -1; size_t snapshots = 0, previousCount = 0; bool progressive = true, completed = false;
@@ -37,15 +33,128 @@ static int startupReport(const std::wstring& output) {
   }
   stream << "]}"; return stream && progressive && completed && snapshots == 6 ? 0 : 1;
 }
+static std::vector<std::pair<std::string, bool>> servicePermissionTests() {
+  std::vector<std::pair<std::string, bool>> result;
+  Handle token, impersonation;
+  const bool available = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &token.value) && DuplicateToken(token.value, SecurityImpersonation, &impersonation.value);
+  result.emplace_back("service_permissions_owned_token", available);
+  if (available) {
+    // Check actual Windows authorization against an in-memory service-style ACL.
+    // No service is created, queried or controlled by these fixtures.
+    auto permits = [&](DWORD allowed, int action) -> std::optional<bool> {
+      const auto text = L"O:SYG:SYD:(A;;0x" + hexadecimal(allowed) + L";;;WD)";
+      PSECURITY_DESCRIPTOR descriptor = nullptr;
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(text.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) return std::nullopt;
+      GENERIC_MAPPING mapping{READ_CONTROL | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_INTERROGATE | SERVICE_ENUMERATE_DEPENDENTS,
+                              READ_CONTROL | SERVICE_CHANGE_CONFIG,
+                              READ_CONTROL | SERVICE_START | SERVICE_STOP | SERVICE_PAUSE_CONTINUE | SERVICE_USER_DEFINED_CONTROL, SERVICE_ALL_ACCESS};
+      std::vector<BYTE> privileges(1024); DWORD size = DWORD(privileges.size()), granted = 0; BOOL permitted = FALSE;
+      const bool checked = AccessCheck(descriptor, impersonation.value, serviceActionAccess(action), &mapping, reinterpret_cast<PRIVILEGE_SET*>(privileges.data()), &size, &granted, &permitted) != FALSE;
+      LocalFree(descriptor);
+      if (!checked) return std::nullopt;
+      return permitted != FALSE;
+    };
+    result.emplace_back("service_start_without_stop_permission", permits(SERVICE_START | SERVICE_QUERY_STATUS, 0) == true);
+    result.emplace_back("service_stop_without_start_permission", permits(SERVICE_STOP | SERVICE_QUERY_STATUS, 1) == true);
+    result.emplace_back("service_start_does_not_require_query_permission", permits(SERVICE_START, 0) == true);
+    result.emplace_back("service_restart_requires_both_permissions", permits(SERVICE_START | SERVICE_QUERY_STATUS, 2) == false && permits(SERVICE_STOP | SERVICE_QUERY_STATUS, 2) == false);
+    result.emplace_back("service_restart_with_required_permissions", permits(SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS, 2) == true);
+  }
+  return result;
+}
 static void metric(Report& stream, const std::string& name, std::vector<double> times) { std::sort(times.begin(), times.end()); stream << '"' << name << "\":{\"count\":" << times.size() << ",\"meanMilliseconds\":" << (times.empty() ? 0 : std::accumulate(times.begin(), times.end(), 0.0) / double(times.size())) << ",\"p95Milliseconds\":" << (times.empty() ? 0 : times[size_t(std::ceil(double(times.size()) * .95)) - 1]) << '}'; }
+static bool cacheTimingMatches(Time previous, Time checked, Time current, Clock::duration lifetime, bool invalidated = false) {
+  if (previous == Time{} || checked < previous) return false;
+  return !invalidated && checked - previous < lifetime ? current == previous : current >= checked;
+}
+static std::vector<std::pair<std::string, bool>> cacheTimingTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  const Time previous = Time{} + std::chrono::seconds(10);
+  for (const auto lifetime : {std::chrono::seconds(1), std::chrono::seconds(5)}) {
+    const std::string name = lifetime == std::chrono::seconds(1) ? "resource_cache_" : "inventory_cache_";
+    const Time boundary = previous + lifetime, before = boundary - std::chrono::milliseconds(1), after = boundary + std::chrono::seconds(2);
+    checks.emplace_back(name + "reuses_before_deadline", cacheTimingMatches(previous, before, previous, lifetime));
+    checks.emplace_back(name + "refreshes_at_deadline", cacheTimingMatches(previous, boundary, boundary, lifetime));
+    checks.emplace_back(name + "accepts_refresh_after_slow_sample", cacheTimingMatches(previous, after, after + std::chrono::milliseconds(1), lifetime));
+    checks.emplace_back(name + "rejects_premature_refresh", !cacheTimingMatches(previous, before, before, lifetime));
+    checks.emplace_back(name + "rejects_expired_reuse", !cacheTimingMatches(previous, boundary, previous, lifetime));
+    if (lifetime == std::chrono::seconds(1)) {
+      checks.emplace_back(name + "accepts_topology_refresh_before_deadline", cacheTimingMatches(previous, before, before, lifetime, true));
+      checks.emplace_back(name + "rejects_reuse_after_topology_change", !cacheTimingMatches(previous, before, previous, lifetime, true));
+    }
+  }
+  return checks;
+}
+static std::vector<std::pair<std::string, bool>> reportEncodingTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  wchar_t directory[MAX_PATH]{}, path[MAX_PATH]{};
+  const DWORD length = GetTempPathW(MAX_PATH, directory);
+  const bool created = length > 0 && length < MAX_PATH && GetTempFileNameW(directory, L"tmr", 0, path) != 0;
+  checks.emplace_back("report_encoding_owned_fixture", created);
+  if (!created) return checks;
+  struct Cleanup { const wchar_t* path; ~Cleanup() { DeleteFileW(path); } } cleanup{path};
+  auto contents = [&] { std::ifstream input{std::filesystem::path(path), std::ios::binary}; return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()); };
+  const std::string message = "Cannot open \"C:\\Folder\\tool.exe\"\r\n\t" + std::string("\0\x01\x1f", 3) + " Caf\xc3\xa9 \xf0\x9f\x9a\x80";
+  const std::string expected = "{\"native\":true,\"passed\":false,\"error\":\"Cannot open \\\"C:\\\\Folder\\\\tool.exe\\\"\\u000d\\u000a\\u0009\\u0000\\u0001\\u001f Caf\xc3\xa9 \xf0\x9f\x9a\x80\"}";
+  checks.emplace_back("report_error_write_succeeds", writeDiagnosticError(path, message));
+  checks.emplace_back("report_error_escapes_controls_quotes_paths_and_keeps_utf8", contents() == expected);
+  checks.emplace_back("report_empty_error_write_succeeds", writeDiagnosticError(path, ""));
+  checks.emplace_back("report_empty_error_is_quoted", contents() == "{\"native\":true,\"passed\":false,\"error\":\"\"}");
+  return checks;
+}
 static int selfTest(const std::wstring& output) {
   std::vector<std::pair<std::string, bool>> checks; auto check = [&](std::string name, bool passed) { checks.emplace_back(std::move(name), passed); };
   for (auto& test : startupTests()) checks.push_back(std::move(test));
+  for (auto& test : gpuEngineTests()) checks.push_back(std::move(test));
+  {
+    // Synthetic identities only: these tests never open or terminate a process.
+    std::vector<Process> family(5000);
+    for (size_t index = 0; index < family.size(); ++index) { auto& process = family[index]; process.id = DWORD(900000 + index); process.parent = index ? process.id - 1 : 0; process.created = 1000 + index; }
+    const auto root = family.front(); std::reverse(family.begin(), family.end());
+    const auto deep = processTree(family, root);
+    bool complete = deep.size() == family.size();
+    for (size_t index = 0; complete && index < deep.size(); ++index) complete = deep[index].pid == family[index].id && deep[index].created == family[index].created;
+    check("process_tree_deep_snapshot_complete_and_children_first", complete);
+    std::vector<Identity> roots; for (const auto& process : family) roots.push_back({process.id, process.created});
+    check("process_tree_overlapping_child_first_roots", processTree(family, roots) == deep);
+    std::reverse(roots.begin(), roots.end());
+    check("process_tree_overlapping_parent_first_roots", processTree(family, roots) == deep);
+    for (auto& process : family) if (process.id != root.id) process.parent = root.id;
+    const auto wide = processTree(family, root);
+    std::unordered_set<DWORD> unique; for (const auto& identity : wide) unique.insert(identity.pid);
+    check("process_tree_wide_snapshot_complete", wide.size() == family.size() && unique.size() == family.size() && wide.back() == Identity{root.id, root.created});
+    std::vector<Process> malformed(5); malformed[0] = root; malformed[0].parent = root.id + 1;
+    malformed[1].id = root.id + 1; malformed[1].parent = root.id; malformed[1].created = root.created;
+    malformed[2] = malformed[1]; malformed[3].id = root.id + 2; malformed[3].parent = root.id; malformed[3].created = root.created - 1;
+    malformed[4].id = root.id + 3; malformed[4].parent = malformed[3].id; malformed[4].created = root.created + 1;
+    const auto cyclic = processTree(malformed, malformed[0]);
+    check("process_tree_cycles_duplicates_and_reused_parent_excluded", cyclic.size() == 2 && cyclic.front() == Identity{root.id + 1, root.created} && cyclic.back() == Identity{root.id, root.created});
+    const std::array<Identity, 3> repeatedRoots{{{root.id, root.created}, {root.id + 1, root.created}, {root.id, root.created}}};
+    check("process_tree_overlapping_cycles_once", processTree(malformed, repeatedRoots) == cyclic);
+    check("process_tree_root_without_snapshot", processTree({}, root) == std::vector<Identity>{{root.id, root.created}});
+  }
+  for (auto& test : networkSamplingTests()) checks.push_back(std::move(test));
+  for (auto& test : cacheTimingTests()) checks.push_back(std::move(test));
+  for (auto& test : servicePermissionTests()) checks.push_back(std::move(test));
+  for (auto& test : processorGroupTests()) checks.push_back(std::move(test));
+  for (auto& test : accountNameTests()) checks.push_back(std::move(test));
+  for (auto& test : sessionIdentityTests()) checks.push_back(std::move(test));
+  for (auto& test : reportEncodingTests()) checks.push_back(std::move(test));
+  for (auto& test : hardwareInventoryTests()) checks.push_back(std::move(test));
   check("hexadecimal_bounds", hexadecimal(0) == L"0" && hexadecimal(UINT64_MAX) == L"ffffffffffffffff");
   check("counter_integer_decimal", counterInteger(L"0", 10) == 0u && counterInteger(L"0042", 10) == 42u && counterInteger(L"4294967295", 10) == UINT32_MAX);
   check("counter_integer_hexadecimal", counterInteger(L"0000002a", 16) == 42u && counterInteger(L"FFFFFFFF", 16) == UINT32_MAX);
   check("counter_integer_overflow", !counterInteger(L"4294967296", 10) && !counterInteger(L"100000000", 16));
   check("counter_integer_invalid", !counterInteger(L"", 10) && !counterInteger(L"-1", 10) && !counterInteger(L" 1", 10) && !counterInteger(L"1_", 10) && !counterInteger(L"a", 10) && !counterInteger(L"0x42", 16) && !counterInteger(L"1", 2));
+  check("utf8_decode_empty", fromUtf8({}).empty());
+  check("utf8_decode_ascii", fromUtf8("Access denied.\r\n") == L"Access denied.\r\n");
+  check("utf8_decode_localized", fromUtf8("Accès refusé : C:\\资料\\Не найдено.txt") == L"Accès refusé : C:\\资料\\Не найдено.txt");
+  check("utf8_decode_supplementary", fromUtf8("\xf0\x9f\x93\x84") == L"\U0001f4c4");
+  check("utf8_decode_view_length", fromUtf8(std::string_view("prefix:suffix").substr(0, 6)) == L"prefix");
+  check("utf8_decode_embedded_null", fromUtf8(std::string_view("before\0after", 12)) == std::wstring(L"before\0after", 12));
+  check("utf8_decode_replacement", fromUtf8("before\xff" "after") == L"before\ufffdafter");
+  const std::runtime_error localizedError("Accès refusé : C:\\资料\\report.txt");
+  check("utf8_decode_exception_roundtrip", fromUtf8(utf8(L"Unable to terminate process.\n\n" + fromUtf8(localizedError.what()))) == L"Unable to terminate process.\n\nAccès refusé : C:\\资料\\report.txt");
   check("gpu_temperature_invalid_key", gpuTemperature(L"luid_0x100000000_0x0") == -1 && gpuTemperature(L"luid_0x0_0x1trailing") == -1 && gpuTemperature(L"invalid") == -1);
   check("split_empty", splitFields(L"", L',').empty());
   check("split_delimiters", splitFields(L",alpha,,beta,", L',') == std::vector<std::wstring_view>{L"", L"alpha", L"", L"beta"});
@@ -107,6 +216,59 @@ static int selfTest(const std::wstring& output) {
   History secondary; secondary.add(0, 10, 20); secondary.add(1, 30, 5); check("graph_secondary_series", secondary.window(1).back().secondary == 5 && secondary.peak(1) == 30);
   check("number_grouping", grouped(1234567.26, 1) == L"1,234,567.3" && grouped(999) == L"999" && grouped(-12345) == L"-12,345"); check("bits_format", bits(125) == L"1.0 Kbps" && bits(12) == L"96 bps");
   check("duration_format", duration(90061) == L"1:01:01:01"); check("command_executable", commandExecutable(L"\"C:\\Program Files\\App\\app.exe\" --flag") == L"C:\\Program Files\\App\\app.exe");
+  {
+    auto matches = [](const std::wstring& text, const std::wstring& file, const std::wstring& parameters) { const auto parsed = parseRunCommand(text); return parsed.file == file && parsed.parameters == parameters; };
+    check("run_command_bare_program", matches(L"notepad.exe report.txt", L"notepad.exe", L"report.txt"));
+    check("run_command_leading_whitespace", matches(L" \t notepad.exe \t report.txt", L"notepad.exe", L"report.txt"));
+    check("run_command_tab_separator", matches(L"notepad.exe\t\"report name.txt\"", L"notepad.exe", L"\"report name.txt\""));
+    check("run_command_quoted_path", matches(L" \t\"C:\\Missing App\\tool.exe\" \t \"report name.txt\"  --flag", L"C:\\Missing App\\tool.exe", L"\"report name.txt\"  --flag"));
+    check("run_command_blank", matches(L" \t\r\n", L"", L""));
+    bool unclosed = false; try { parseRunCommand(L"\"C:\\Missing App\\tool.exe"); } catch (const std::exception&) { unclosed = true; }
+    check("run_command_unclosed_quote", unclosed);
+    check("inventory_command_malformed_retained", commandExecutable(L"\"C:\\Missing App\\tool.exe").empty());
+    check("inventory_command_missing_program", commandExecutable(L"\"C:\\Missing App\\tool.exe\" --flag") == L"C:\\Missing App\\tool.exe");
+    wchar_t temporary[MAX_PATH]{}; const DWORD length = GetTempPathW(MAX_PATH, temporary);
+    const auto suffix = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    const auto directory = length > 0 && length < MAX_PATH ? std::wstring(temporary) + L"TaskManagerRun-" + suffix : L"";
+    const bool created = !directory.empty() && CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
+    check("run_command_fixture_directory", created);
+    if (created) {
+      const auto prefix = directory + L"\\Example", spaced = directory + L"\\Example Folder", program = spaced + L"\\Example App.exe";
+      const bool prefixCreated = CreateDirectoryW(prefix.c_str(), nullptr) != FALSE, spacedCreated = CreateDirectoryW(spaced.c_str(), nullptr) != FALSE;
+      bool fileCreated = false;
+      { Handle file(CreateFileW(program.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)); fileCreated = file.value != INVALID_HANDLE_VALUE; }
+      check("run_command_fixture_file", prefixCreated && spacedCreated && fileCreated);
+      const auto variable = L"TASKMGR_RUN_TEST_" + suffix, token = L"%" + variable + L"%";
+      bool environmentCreated = false;
+      if (prefixCreated && spacedCreated && fileCreated) try {
+        const std::wstring arguments = L"\"report name.txt\"  --flag=\"a b\"";
+        check("run_command_unquoted_spaced_path", matches(program + L" " + arguments, program, arguments));
+        check("run_command_spaced_path_without_arguments", matches(program, program, L""));
+        check("run_command_inferred_extension", matches(program.substr(0, program.size() - 4) + L" " + arguments, program, arguments));
+        check("run_command_existing_directory", matches(spaced, spaced, L""));
+        check("inventory_command_spaced_path", commandExecutable(program) == program);
+        check("inventory_command_tab_arguments", commandExecutable(program + L"\t--flag") == program);
+        check("inventory_command_inferred_extension", commandExecutable(program.substr(0, program.size() - 4) + L" --flag") == program);
+        environmentCreated = SetEnvironmentVariableW(variable.c_str(), spaced.c_str()) != FALSE;
+        check("run_command_fixture_environment", environmentCreated);
+        if (environmentCreated) {
+          check("run_command_unquoted_environment_path", matches(token + L"\\Example App.exe " + arguments, program, arguments));
+          check("run_command_quoted_environment_path", matches(L"\"" + token + L"\\Example App.exe\" " + arguments, program, arguments));
+          check("run_command_argument_environment_preserved", matches(L"\"" + program + L"\" " + token, program, token));
+          check("inventory_command_environment_path", commandExecutable(token + L"\\Example App.exe --flag") == program);
+          const bool longEnvironment = SetEnvironmentVariableW(variable.c_str(), std::wstring(16384, L'x').c_str()) != FALSE;
+          check("inventory_command_long_environment_fixture", longEnvironment);
+          if (longEnvironment) check("inventory_command_expansion_bound", commandExecutable(token + token).empty());
+        }
+      } catch (const std::exception&) { check("run_command_fixture_parsing", false); }
+      const bool environmentRemoved = !environmentCreated || SetEnvironmentVariableW(variable.c_str(), nullptr) != FALSE;
+      const bool fileRemoved = !fileCreated || DeleteFileW(program.c_str()) != FALSE;
+      const bool spacedRemoved = !spacedCreated || RemoveDirectoryW(spaced.c_str()) != FALSE;
+      const bool prefixRemoved = !prefixCreated || RemoveDirectoryW(prefix.c_str()) != FALSE;
+      const bool directoryRemoved = RemoveDirectoryW(directory.c_str()) != FALSE;
+      check("run_command_fixture_cleanup", environmentRemoved && fileRemoved && spacedRemoved && prefixRemoved && directoryRemoved);
+    }
+  }
   check("service_group_caption", serviceGroupCaption(L"LocalSystemNetworkRestricted") == L"Local System (Network Restricted)" && serviceGroupCaption(L"custom") == L"custom");
   Sampler sampler; const auto sample = sampler.sample(); check("native_process_snapshot", !sample.processes.empty()); check("native_memory", sample.memory.total > 0 && sample.memory.available <= sample.memory.total); check("native_cpu_bounds", sample.cpu >= 0 && sample.cpu <= 100); check("native_resources", sample.memory.total > 0 && !sample.cores.empty()); check("own_process_present", std::any_of(sample.processes.begin(), sample.processes.end(), [](const Process& value) { return value.id == GetCurrentProcessId(); }));
   check("adaptive_refresh_fast_floor", adaptiveRefreshInterval(0, 0) == 250 && adaptiveRefreshInterval(3, 2) == 250);
@@ -115,10 +277,13 @@ static int selfTest(const std::wstring& output) {
   check("adaptive_refresh_invalid_costs", adaptiveRefreshInterval(NAN, 0) == 4000 && adaptiveRefreshInterval(INFINITY, 0) == 4000 && adaptiveRefreshInterval(-1, 0) == 4000);
   {
     const auto retained = sample; const auto next = sampler.sample();
-    check("resource_counters_reused_between_fast_samples", next.resourcesSampledAt == sample.resourcesSampledAt && next.cores == sample.cores && next.disks.size() == sample.disks.size());
+    const bool resourcesReused = next.resourcesSampledAt == sample.resourcesSampledAt;
+    check("resource_counters_follow_cache_interval", cacheTimingMatches(sample.resourcesSampledAt, next.resourcesCheckedAt, next.resourcesSampledAt, std::chrono::seconds(1), next.cpuTopologyChanged) &&
+      (resourcesReused ? next.cores == sample.cores && next.disks.size() == sample.disks.size() : next.resourcesSampledAt == next.resourcesCheckedAt));
     Sleep(1050); const auto later = sampler.sample();
     check("resource_counters_refresh_after_one_second", later.resourcesSampledAt > next.resourcesSampledAt);
-    check("inventory_shared_between_samples", sample.inventory && next.inventory == sample.inventory && next.services.data() == sample.services.data() && next.sessions.data() == sample.sessions.data());
+    check("inventory_snapshots_follow_cache_interval", sample.inventory && next.inventory && cacheTimingMatches(sample.inventorySampledAt, next.inventoryCheckedAt, next.inventorySampledAt, std::chrono::seconds(5)) &&
+      ((next.inventory == sample.inventory) == (next.inventorySampledAt == sample.inventorySampledAt)) && next.services.data() == next.inventory->services.data() && next.sessions.data() == next.inventory->sessions.data());
     sampler.invalidateInventory(); const auto refreshed = sampler.sample();
     check("manual_refresh_invalidates_resource_cache", refreshed.resourcesSampledAt > later.resourcesSampledAt);
     check("inventory_refresh_replaces_snapshot", refreshed.inventory && refreshed.inventory != sample.inventory && refreshed.services.data() == refreshed.inventory->services.data());
@@ -133,6 +298,33 @@ static int selfTest(const std::wstring& output) {
     Handle childHandle(child.hProcess), thread(child.hThread); FILETIME created{}, exited{}, kernel{}, user{}; GetProcessTimes(childHandle.value, &created, &exited, &kernel, &user); Process owned; owned.id = child.dwProcessId; owned.created = ticks(created); owned.name = L"Owned test child";
     const auto withChild = sampler.sample();
     check("fast_process_snapshot_detects_new_child", std::any_of(withChild.processes.begin(), withChild.processes.end(), [&](const Process& process) { return process.id == owned.id && process.created == owned.created; }));
+    {
+      wchar_t directory[MAX_PATH]{}, destination[MAX_PATH]{};
+      const DWORD length = GetTempPathW(MAX_PATH, directory);
+      const bool destinationCreated = length > 0 && length < MAX_PATH && GetTempFileNameW(directory, L"tmd", 0, destination) != 0;
+      bool temporaryCreated = false, written = false, refused = false, preserved = false;
+      const auto temporary = destinationCreated ? std::wstring(destination) + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp" : L"";
+      constexpr char sentinel[] = "Existing temporary file belongs to another operation.";
+      if (destinationCreated) {
+        { Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+          temporaryCreated = file.value != INVALID_HANDLE_VALUE; DWORD bytesWritten = 0;
+          written = temporaryCreated && WriteFile(file.value, sentinel, sizeof(sentinel), &bytesWritten, nullptr) && bytesWritten == sizeof(sentinel); }
+        if (written) {
+          // CREATE_NEW must fail before MiniDumpWriteDump: this test never writes a dump.
+          try { processAction(owned, Action::Dump, destination); }
+          catch (const std::exception& error) { refused = std::string(error.what()) == utf8(winerror(ERROR_FILE_EXISTS)); }
+          { Handle file(CreateFileW(temporary.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+            std::array<char, sizeof(sentinel) + 1> contents{}; DWORD bytesRead = 0;
+            preserved = file.value != INVALID_HANDLE_VALUE && ReadFile(file.value, contents.data(), DWORD(contents.size()), &bytesRead, nullptr) && bytesRead == sizeof(sentinel) && memcmp(contents.data(), sentinel, sizeof(sentinel)) == 0; }
+        }
+      }
+      check("dump_collision_fixture_created", destinationCreated && temporaryCreated && written);
+      check("dump_collision_error_reported", refused);
+      check("dump_collision_existing_file_preserved", preserved);
+      const bool temporaryRemoved = !temporaryCreated || DeleteFileW(temporary.c_str()) != FALSE || GetLastError() == ERROR_FILE_NOT_FOUND;
+      const bool destinationRemoved = !destinationCreated || DeleteFileW(destination) != FALSE;
+      check("dump_collision_fixture_cleanup", temporaryRemoved && destinationRemoved);
+    }
     PROCESS_POWER_THROTTLING_STATE available{}; available.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
     const bool supportsEfficiency = GetProcessInformation(childHandle.value, ProcessPowerThrottling, &available, sizeof(available)) != FALSE;
     const DWORD efficiencyError = supportsEfficiency ? ERROR_SUCCESS : GetLastError();
@@ -144,6 +336,26 @@ static int selfTest(const std::wstring& output) {
       efficiencyAction(owned, true); efficiencyAction(owned, false); const auto restored = powerPolicy(owned);
       check("owned_child_efficiency_restore", restored.priority == BELOW_NORMAL_PRIORITY_CLASS && restored.control == before.control && restored.state == before.state);
       efficiencyAction(owned, false); check("owned_child_efficiency_idempotent", powerPolicy(owned).priority == BELOW_NORMAL_PRIORITY_CLASS);
+      efficiencyAction(owned, true);
+      PROCESS_POWER_THROTTLING_STATE external{}; external.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+      external.ControlMask = before.control | PROCESS_POWER_THROTTLING_EXECUTION_SPEED; external.StateMask = before.state & ~PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+      const bool changed = SetProcessInformation(childHandle.value, ProcessPowerThrottling, &external, sizeof(external)) != FALSE;
+      check("owned_child_efficiency_external_disable", changed);
+      if (changed) {
+        efficiencyAction(owned, false); const auto afterExternal = powerPolicy(owned);
+        check("owned_child_efficiency_restore_after_external_disable", afterExternal.priority == BELOW_NORMAL_PRIORITY_CLASS && afterExternal.control == before.control && afterExternal.state == before.state);
+        processAction(owned, Action::Normal); efficiencyAction(owned, true); efficiencyAction(owned, false);
+        check("owned_child_efficiency_releases_saved_policy", powerPolicy(owned).priority == NORMAL_PRIORITY_CLASS);
+        processAction(owned, Action::BelowNormal); efficiencyAction(owned, true); processAction(owned, Action::Normal);
+        const bool changedAgain = SetProcessInformation(childHandle.value, ProcessPowerThrottling, &external, sizeof(external)) != FALSE;
+        check("owned_child_efficiency_external_priority_setup", changedAgain);
+        if (changedAgain) {
+          efficiencyAction(owned, false);
+          check("owned_child_efficiency_preserves_external_priority", powerPolicy(owned).priority == NORMAL_PRIORITY_CLASS);
+          efficiencyAction(owned, true); efficiencyAction(owned, false);
+          check("owned_child_efficiency_external_priority_becomes_new_baseline", powerPolicy(owned).priority == NORMAL_PRIORITY_CLASS);
+        }
+      }
       auto stalePower = owned; ++stalePower.created; bool rejected = false; try { efficiencyAction(stalePower, true); } catch (...) { rejected = true; }
       check("efficiency_stale_identity_refused", rejected);
       processAction(owned, Action::Normal);

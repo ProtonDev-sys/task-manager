@@ -34,7 +34,6 @@ void efficiencyAction(const Process& process, bool enabled) {
   const auto original = readPowerPolicy(handle.value); const Identity identity{process.id, process.created};
   const DWORD execution = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
   const bool active = (original.control & original.state & execution) != 0;
-  if (active == enabled) return;
   for (auto entry = previous.begin(); entry != previous.end();) {
     Handle known(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry->first.pid));
     FILETIME created{}, exited{}, kernel{}, user{};
@@ -42,6 +41,9 @@ void efficiencyAction(const Process& process, bool enabled) {
   }
   const auto saved = previous.find(identity);
   const bool hadSaved = saved != previous.end();
+  // Another actor can clear EcoQoS before a queued disable runs. Our priority
+  // change still needs restoring, even when execution throttling is already off.
+  if (active == enabled && (enabled || !hadSaved)) return;
   PowerPolicy requested = original;
   if (enabled) {
     if (previous.size() >= 256 && !hadSaved) throw std::runtime_error("Efficiency mode restoration limit reached. Disable some managed processes first.");
@@ -85,10 +87,14 @@ void processAction(const Process& process, Action action, const std::wstring& ar
   case Action::Dump: {
     static std::mutex gate; std::lock_guard lock(gate);
     const auto temporary = argument + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
+    bool created = false;
     try {
-      { Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)); if (file.value == INVALID_HANDLE_VALUE || !MiniDumpWriteDump(handle.value, process.id, file.value, MiniDumpWithFullMemory, nullptr, nullptr, nullptr)) throw std::runtime_error(utf8(winerror())); }
+      { Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (file.value == INVALID_HANDLE_VALUE) throw std::runtime_error(utf8(winerror()));
+        created = true;
+        if (!MiniDumpWriteDump(handle.value, process.id, file.value, MiniDumpWithFullMemory, nullptr, nullptr, nullptr)) throw std::runtime_error(utf8(winerror())); }
       if (!MoveFileExW(temporary.c_str(), argument.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) throw std::runtime_error(utf8(winerror()));
-    } catch (...) { DeleteFileW(temporary.c_str()); throw; }
+    } catch (...) { if (created) DeleteFileW(temporary.c_str()); throw; }
     success = TRUE; break;
   }
   default: throw std::runtime_error("Unsupported action");
@@ -96,13 +102,33 @@ void processAction(const Process& process, Action action, const std::wstring& ar
   if (!success) throw std::runtime_error(utf8(winerror()));
 }
 // The process and every descendant, matched by parent PID and creation order so reused PIDs are not included.
-std::vector<Identity> processTree(std::span<const Process> processes, const Process& root) {
-  std::vector<Identity> result{{root.id, root.created}}; std::vector<std::pair<DWORD, uint64_t>> pending{{root.id, root.created}};
-  while (!pending.empty() && result.size() < 4096) {
-    const auto [parent, created] = pending.back(); pending.pop_back();
-    for (const auto& process : processes) if (process.parent == parent && process.id != parent && process.created >= created && std::none_of(result.begin(), result.end(), [&](const Identity& known) { return known.pid == process.id; })) { result.push_back({process.id, process.created}); pending.emplace_back(process.id, process.created); }
+std::vector<Identity> processTree(std::span<const Process> processes, std::span<const Identity> roots) {
+  if (roots.empty()) return {};
+  std::unordered_map<DWORD, std::vector<const Process*>> children; children.reserve(processes.size());
+  for (const auto& process : processes) children[process.parent].push_back(&process);
+  std::unordered_set<DWORD> seen; seen.reserve(processes.size());
+  std::vector<Identity> result; std::vector<std::pair<Identity, bool>> pending;
+  // Visiting each PID once bounds traversal by the snapshot, including malformed
+  // cycles and overlapping selected roots, without dropping large descendants.
+  for (const auto& root : roots) {
+    if (seen.contains(root.pid)) continue;
+    pending.emplace_back(root, false);
+    while (!pending.empty()) {
+      const auto [parent, finished] = pending.back(); pending.pop_back();
+      if (finished) { result.push_back(parent); continue; }
+      if (!seen.insert(parent.pid).second) continue;
+      // Emit the parent only after its descendants, even if a selected group
+      // lists a child before its parent.
+      pending.emplace_back(parent, true);
+      const auto found = children.find(parent.pid); if (found == children.end()) continue;
+      for (const auto* process : found->second) if (process->created >= parent.created) pending.emplace_back(Identity{process->id, process->created}, false);
+    }
   }
-  std::reverse(result.begin(), result.end()); return result;
+  return result;
+}
+std::vector<Identity> processTree(std::span<const Process> processes, const Process& root) {
+  const Identity identity{root.id, root.created};
+  return processTree(processes, std::span<const Identity>(&identity, 1));
 }
 std::wstring waitChain(const Process& process) {
   Handle handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process.id)); verify(handle.value, process, false);
@@ -125,10 +151,19 @@ std::wstring waitChain(const Process& process) {
   } while (Thread32Next(threads.value, &thread));
   CloseThreadWaitChainSession(session); return result.empty() ? L"No accessible threads." : result;
 }
+DWORD serviceActionAccess(int action) {
+  switch (action) {
+  case 0: return SERVICE_START;
+  case 1: return SERVICE_STOP | SERVICE_QUERY_STATUS;
+  case 2: return SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS;
+  default: throw std::runtime_error("Unsupported service action");
+  }
+}
 void serviceAction(const Entry& entry, int action) {
+  const DWORD access = serviceActionAccess(action);
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (!manager) throw std::runtime_error(utf8(winerror()));
-  SC_HANDLE service = OpenServiceW(manager, entry.key.c_str(), SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS);
+  SC_HANDLE service = OpenServiceW(manager, entry.key.c_str(), access);
   if (!service) { const DWORD error = GetLastError(); CloseServiceHandle(manager); throw std::runtime_error(utf8(winerror(error))); }
   try {
     if (action != 0) {
@@ -171,7 +206,7 @@ void startupAction(const Entry& entry) {
 }
 void sessionAction(const Entry& entry, bool logoff) {
   const auto sessions = readSessions();
-  if (std::none_of(sessions.begin(), sessions.end(), [&](const Entry& current) { return current.session == entry.session && current.cells[0] == entry.cells[0]; })) throw std::runtime_error("Session changed. Refresh it first.");
+  if (std::none_of(sessions.begin(), sessions.end(), [&](const Entry& current) { return sameSessionAccount(entry, current); })) throw std::runtime_error("Session account could not be verified or has changed. Refresh it first.");
   if (!(logoff ? WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, entry.session, FALSE) : WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE, entry.session, FALSE))) throw std::runtime_error(utf8(winerror()));
 }
 }

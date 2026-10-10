@@ -11,6 +11,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Verify release publication guards
+        shell: pwsh
+        run: python -m unittest discover -s .github/scripts -p test_release.py -v
+      - name: Verify benchmark report validation
+        shell: pwsh
+        run: ./tests/benchmark.ps1
       - name: Build and verify published application
         shell: pwsh
         run: ./build.ps1 -TestConfiguration Release
@@ -22,11 +28,28 @@ jobs:
       - name: Exercise native UI headlessly
         shell: pwsh
         run: ./benchmark.ps1 -Seconds 5
+      - name: Prepare verified release package
+        shell: pwsh
+        run: |
+          $match = [regex]::Match((Get-Content CMakeLists.txt -Raw), 'project\(TaskManagerNative VERSION (\d+\.\d+\.\d+) ')
+          if (-not $match.Success) { throw 'Cannot read the release version.' }
+          $version = $match.Groups[1].Value
+          $binary = Get-Item artifacts/app/TaskManager.exe
+          if ($binary.VersionInfo.FileVersion -ne "$version.0" -or $binary.VersionInfo.ProductVersion -ne "$version.0") { throw 'Executable version differs from CMake.' }
+          [xml]$manifest = Get-Content app.manifest -Raw
+          $identity = $manifest.SelectSingleNode("/*[local-name()='assembly']/*[local-name()='assemblyIdentity']")
+          if ($identity.version -ne "$version.0") { throw 'Application manifest version differs from CMake.' }
+          Copy-Item -LiteralPath "docs/releases/v$version.md" -Destination artifacts/app/RELEASE_NOTES.md
+          $hash = (Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  TaskManager.exe" | Set-Content -LiteralPath artifacts/app/SHA256SUMS.txt -Encoding ascii
+          @{ version = $version; sha = $env:GITHUB_SHA } | ConvertTo-Json | Set-Content -LiteralPath artifacts/app/release.json -Encoding utf8
+          python .github/scripts/release.py --artifact-dir artifacts/app
+          if ($LASTEXITCODE -ne 0) { throw 'Release package validation failed.' }
       - name: Upload standalone native executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: native-task-manager
-          path: artifacts/app/TaskManager.exe
+          path: artifacts/app/
           if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
@@ -36,3 +59,25 @@ jobs:
             artifacts/native-tests/*.json
             artifacts/ci-components.json
             artifacts/benchmark-suite/
+  release:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: task-manager-release
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download the verified production build
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name native-task-manager --dir artifacts/app
+      - name: Publish the verified version
+        run: python .github/scripts/release.py --artifact-dir artifacts/app --publish

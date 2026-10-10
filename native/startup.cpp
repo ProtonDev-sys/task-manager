@@ -44,6 +44,19 @@ struct Scan {
     inventory.entries.push_back(std::move(entry));
   }
 };
+template<typename ReadEntry>
+void enumerateRegistry(Scan& scan, const std::wstring& source, ReadEntry readEntry) {
+  for (DWORD index = 0;; ++index) {
+    const LSTATUS status = readEntry(index);
+    if (status == ERROR_NO_MORE_ITEMS) return;
+    if (status != ERROR_SUCCESS) {
+      scan.warning(source, DWORD(status));
+      // A value that outgrew its buffer can be skipped. A deleted or
+      // inaccessible key cannot make progress by trying another index.
+      if (status != ERROR_MORE_DATA) return;
+    }
+  }
+}
 std::wstring registryString(HKEY root, const std::wstring& key, const wchar_t* name, REGSAM view = 0) {
   DWORD size = 0;
   const DWORD flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND | (view == KEY_WOW64_32KEY ? RRF_SUBKEY_WOW6432KEY : view == KEY_WOW64_64KEY ? RRF_SUBKEY_WOW6464KEY : 0);
@@ -100,13 +113,12 @@ void scanRegistry(Scan& scan, HKEY root, const std::wstring& keyPath, REGSAM vie
   if (queried != ERROR_SUCCESS) { scan.warning(identity + L"\\" + keyPath, queried); return; }
   if (maxData > 1024 * 1024) { scan.inventory.warnings.push_back(identity + L": oversized registry value; source skipped."); return; }
   std::vector<wchar_t> name(size_t(maxName) + 2), data(size_t(maxData) / sizeof(wchar_t) + 2);
-  for (DWORD index = 0;; ++index) {
+  enumerateRegistry(scan, identity + L"\\" + keyPath, [&](DWORD index) -> LSTATUS {
     DWORD nameSize = DWORD(name.size()), size = DWORD(data.size() * sizeof(wchar_t) - sizeof(wchar_t)), type = 0;
     std::fill(data.begin(), data.end(), L'\0');
     const auto status = RegEnumValueW(key.value, index, name.data(), &nameSize, nullptr, &type, reinterpret_cast<BYTE*>(data.data()), &size);
-    if (status == ERROR_NO_MORE_ITEMS) break;
-    if (status != ERROR_SUCCESS) { scan.warning(identity + L"\\" + keyPath, status); continue; }
-    if ((type != REG_SZ && type != REG_EXPAND_SZ) || !data.front()) continue;
+    if (status != ERROR_SUCCESS) return status;
+    if ((type != REG_SZ && type != REG_EXPAND_SZ) || !data.front()) return ERROR_SUCCESS;
     const std::wstring valueName(name.data(), nameSize), command(data.data()); const auto state = readApproval(root, approval, valueName);
     Entry entry; entry.key = identity + L"\\" + keyPath + L"\\" + valueName; entry.location = identity; entry.group = command;
     entry.enabled = state.enabled; entry.startupEditable = editable && state.known;
@@ -114,7 +126,8 @@ void scanRegistry(Scan& scan, HKEY root, const std::wstring& keyPath, REGSAM vie
     if (expanded.find(L'%') == std::wstring::npos) entry.path = commandExecutable(expanded);
     entry.cells = {valueName.empty() ? L"(Default)" : valueName, L"", state.known ? state.enabled ? L"Enabled" : L"Disabled" : L"Unknown", L"Not measured", kind, command, valueName, owner, identity + L"\\" + keyPath};
     scan.add(std::move(entry));
-  }
+    return ERROR_SUCCESS;
+  });
 }
 std::wstring shortcutTarget(const std::wstring& path, const std::wstring& profile, HKEY hive, bool current) {
   if (lower(std::filesystem::path(path).extension().wstring()) != L".lnk") return path;
@@ -175,20 +188,20 @@ void scanProfiles(Scan& scan) {
   std::map<std::wstring, std::wstring> profiles; RegistryKey list;
   auto opened = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", 0, KEY_READ | KEY_WOW64_64KEY, &list.value);
   if (opened == ERROR_SUCCESS) {
-    for (DWORD index = 0;; ++index) {
+    enumerateRegistry(scan, L"ProfileList", [&](DWORD index) -> LSTATUS {
       wchar_t name[512]{}; DWORD size = DWORD(std::size(name)); const auto status = RegEnumKeyExW(list.value, index, name, &size, nullptr, nullptr, nullptr, nullptr);
-      if (status == ERROR_NO_MORE_ITEMS) break;
-      if (status != ERROR_SUCCESS) { scan.warning(L"ProfileList", status); continue; }
-      PSID sid = nullptr; if (!ConvertStringSidToSidW(name, &sid)) continue; LocalFree(sid);
+      if (status != ERROR_SUCCESS) return status;
+      PSID sid = nullptr; if (!ConvertStringSidToSidW(name, &sid)) return ERROR_SUCCESS; LocalFree(sid);
       profiles[name] = expandForProfile(registryString(list.value, name, L"ProfileImagePath"), L"", nullptr, false);
-    }
+      return ERROR_SUCCESS;
+    });
   } else scan.warning(L"ProfileList", opened);
-  for (DWORD index = 0;; ++index) {
+  enumerateRegistry(scan, L"HKEY_USERS", [&](DWORD index) -> LSTATUS {
     wchar_t name[512]{}; DWORD size = DWORD(std::size(name)); const auto status = RegEnumKeyExW(HKEY_USERS, index, name, &size, nullptr, nullptr, nullptr, nullptr);
-    if (status == ERROR_NO_MORE_ITEMS) break;
-    if (status != ERROR_SUCCESS) { scan.warning(L"HKEY_USERS", status); continue; }
-    PSID sid = nullptr; if (!ConvertStringSidToSidW(name, &sid)) continue; LocalFree(sid); profiles.try_emplace(name);
-  }
+    if (status != ERROR_SUCCESS) return status;
+    PSID sid = nullptr; if (!ConvertStringSidToSidW(name, &sid)) return ERROR_SUCCESS; LocalFree(sid); profiles.try_emplace(name);
+    return ERROR_SUCCESS;
+  });
   for (const auto& [sid, profile] : profiles) {
     if (sid == activeSid) continue;
     RegistryKey hive; auto status = RegOpenKeyExW(HKEY_USERS, sid.c_str(), 0, KEY_READ, &hive.value);
@@ -398,6 +411,42 @@ std::vector<std::pair<std::string, bool>> startupTests() {
     result.emplace_back("startup_owner_environment", expandForProfile(L"%USERPROFILE%\\bin\\app.exe", L"C:\\Users\\Other", nullptr, false) == L"C:\\Users\\Other\\bin\\app.exe");
     result.emplace_back("startup_unresolved_user_environment_retained", expandForProfile(L"%USERNAME%\\app.exe", L"C:\\Users\\Other", nullptr, false) == L"%USERNAME%\\app.exe");
     bool refused = false; try { startupAction(scan.inventory.entries.front()); } catch (...) { refused = true; } result.emplace_back("startup_read_only_action_refused", refused);
+  }
+  {
+    RegistryKey deleted;
+    const bool fixtureCreated = RegCreateKeyExW(root.value, L"DeletedEnumeration", 0, nullptr, REG_OPTION_VOLATILE, KEY_ALL_ACCESS, nullptr, &deleted.value, nullptr) == ERROR_SUCCESS;
+    const bool fixtureDeleted = fixtureCreated && RegDeleteKeyW(root.value, L"DeletedEnumeration") == ERROR_SUCCESS;
+    result.emplace_back("startup_deleted_key_fixture", fixtureDeleted);
+    if (fixtureDeleted) for (const bool values : {true, false}) {
+      Scan scan; DWORD attempts = 0; LSTATUS observed = ERROR_SUCCESS;
+      enumerateRegistry(scan, L"Deleted fixture", [&](DWORD index) -> LSTATUS {
+        // Bound the regression even if a future change retries permanent errors.
+        if (++attempts > 4) return ERROR_NO_MORE_ITEMS;
+        wchar_t name[16]{}; DWORD size = DWORD(std::size(name));
+        observed = values ? RegEnumValueW(deleted.value, index, name, &size, nullptr, nullptr, nullptr, nullptr)
+                          : RegEnumKeyExW(deleted.value, index, name, &size, nullptr, nullptr, nullptr, nullptr);
+        return observed;
+      });
+      result.emplace_back(values ? "startup_deleted_key_value_enumeration_stops" : "startup_deleted_key_subkey_enumeration_stops", attempts == 1 && observed == ERROR_KEY_DELETED && scan.inventory.warnings.size() == 1);
+    }
+  }
+  {
+    RegistryKey oversized;
+    const bool fixtureCreated = RegCreateKeyExW(root.value, L"OversizedEnumeration", 0, nullptr, REG_OPTION_VOLATILE, KEY_ALL_ACCESS, nullptr, &oversized.value, nullptr) == ERROR_SUCCESS;
+    const BYTE data = 1; const std::wstring longName(64, L'Z');
+    const bool fixtureWritten = fixtureCreated && RegSetValueExW(oversized.value, longName.c_str(), 0, REG_BINARY, &data, sizeof(data)) == ERROR_SUCCESS && RegSetValueExW(oversized.value, L"ok", 0, REG_BINARY, &data, sizeof(data)) == ERROR_SUCCESS;
+    result.emplace_back("startup_oversized_enumeration_fixture", fixtureWritten);
+    if (fixtureWritten) {
+      Scan scan; DWORD attempts = 0; std::vector<std::wstring> names;
+      enumerateRegistry(scan, L"Oversized fixture", [&](DWORD index) -> LSTATUS {
+        if (++attempts > 4) return ERROR_NO_MORE_ITEMS;
+        wchar_t name[8]{}; DWORD size = DWORD(std::size(name));
+        const auto status = RegEnumValueW(oversized.value, index, name, &size, nullptr, nullptr, nullptr, nullptr);
+        if (status == ERROR_SUCCESS) names.emplace_back(name, size);
+        return status;
+      });
+      result.emplace_back("startup_oversized_entry_does_not_hide_later_values", attempts == 3 && names == std::vector<std::wstring>{L"ok"} && scan.inventory.warnings.size() == 1);
+    }
   }
   RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
   RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\TaskManagerNativeTests");

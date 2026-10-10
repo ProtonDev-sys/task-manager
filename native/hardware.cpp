@@ -19,7 +19,8 @@ template <typename Visit> static void logicalProcessors(LOGICAL_PROCESSOR_RELATI
   }
 }
 CpuInfo readCpu() {
-  CpuInfo cpu; SYSTEM_INFO system{}; GetNativeSystemInfo(&system); cpu.logical = std::max(1UL, system.dwNumberOfProcessors);
+  CpuInfo cpu; cpu.logical = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+  if (!cpu.logical) { SYSTEM_INFO system{}; GetNativeSystemInfo(&system); cpu.logical = std::max(1UL, system.dwNumberOfProcessors); }
   wchar_t name[512]{}; DWORD size = sizeof(name), mhz = 0, mhzSize = sizeof(mhz);
   if (RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", L"ProcessorNameString", RRF_RT_REG_SZ, nullptr, name, &size) == ERROR_SUCCESS) cpu.name = name;
   while (!cpu.name.empty() && iswspace(cpu.name.back())) cpu.name.pop_back();

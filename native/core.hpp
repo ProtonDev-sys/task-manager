@@ -60,9 +60,12 @@ std::wstring bits(double value);
 std::wstring duration(uint64_t seconds);
 std::wstring winerror(DWORD code = GetLastError());
 std::string utf8(const std::wstring& value);
+std::wstring fromUtf8(std::string_view value);
 std::wstring executable();
 std::wstring windowsDirectory();
 std::wstring commandExecutable(const std::wstring& command);
+struct RunCommand { std::wstring file, parameters; };
+RunCommand parseRunCommand(const std::wstring& command);
 struct Handle {
   HANDLE value = nullptr;
   explicit Handle(HANDLE handle = nullptr) : value(handle) {}
@@ -70,19 +73,24 @@ struct Handle {
   Handle(const Handle&) = delete;
   Handle& operator=(const Handle&) = delete;
 };
+struct GpuEngineUsage { std::wstring key, label; double value = 0; };
+struct ProcessGpu { double value = 0; std::wstring engine; std::vector<GpuEngineUsage> engines; };
 struct Process {
   DWORD id = 0, parent = 0, session = 0, threads = 0, handles = 0, pageFaults = 0;
   LONG priority = 8;
   uint64_t created = 0, cpuTicks = 0, working = 0, privateWorking = 0, privateBytes = 0, peakWorking = 0, readBytes = 0, writeBytes = 0;
   double cpu = 0, ioRate = 0, gpu = 0, network = -1;
   std::wstring name, gpuEngine;
+  // Share immutable engine data between process samples until the next resource refresh.
+  std::shared_ptr<const ProcessGpu> gpuUsage;
   bool app = false, suspended = false, hung = false;
 };
 struct Metadata { std::wstring path, description, publisher, user, commandLine, package, virtualization; int icon = 0; bool resolved = false; };
 struct FileInfo { std::wstring description, publisher; int icon = -1; };
 struct Identity { DWORD pid; uint64_t created; bool operator==(const Identity&) const = default; };
 struct IdentityHash { size_t operator()(const Identity& key) const { return std::hash<uint64_t>{}(key.created) ^ (std::hash<DWORD>{}(key.pid) << 1); } };
-struct Entry { std::wstring key; std::vector<std::wstring> cells; DWORD pid = 0, session = 0; bool enabled = false, startupEditable = false; std::wstring path, location, group, description; };
+using ProcessGpuCache = std::unordered_map<Identity, std::shared_ptr<const ProcessGpu>, IdentityHash>;
+struct Entry { std::wstring key; std::vector<std::wstring> cells; DWORD pid = 0, session = 0; bool enabled = false, startupEditable = false; std::wstring path, location, group, description, accountDomain; };
 struct StartupInventory { std::vector<Entry> entries; std::vector<std::wstring> warnings; bool complete = true; };
 struct ServiceInventory { std::vector<Entry> services, sessions; };
 struct CpuInfo { std::wstring name; double baseMhz = 0; unsigned sockets = 0, cores = 0, logical = 1; std::array<uint64_t, 3> caches{}; bool virtualization = false; };
@@ -103,6 +111,8 @@ struct Sample {
 #ifdef TASKMGR_DIAGNOSTICS
   double duration = 0;
   std::array<double, 6> stages{};
+  bool cpuTopologyChanged = false;
+  Time resourcesCheckedAt{}, inventoryCheckedAt{}, inventorySampledAt{};
 #endif
   uint64_t uptime = 0;
   unsigned threads = 0, handles = 0;
@@ -140,9 +150,11 @@ class Sampler {
   uint64_t generation = 0;
   Time last{};
   Sample cachedResources;
-  std::unordered_map<Identity, std::pair<double, std::wstring>, IdentityHash> cachedProcessGpu;
+  ProcessGpuCache cachedProcessGpu;
   Time resourcesAt{};
   uint64_t idle = 0, total = 0;
+  double cpuUsage = 0;
+  std::vector<unsigned> processorGroups;
   std::vector<std::array<uint64_t, 3>> corePrevious;
   CpuInfo cpuInfo;
   MemoryInfo memoryHardware;
@@ -159,10 +171,12 @@ class Sampler {
   std::shared_ptr<const std::unordered_map<DWORD, std::wstring>> cachedUsers;
   std::unordered_map<std::wstring, std::wstring> accounts;
   Time inventoryAt{};
+  Time networkAt{};
   std::unordered_map<ULONG64, std::pair<ULONG64, ULONG64>> networkPrevious;
   std::unordered_map<ULONG64, std::array<std::wstring, 3>> adapterAddresses;
   std::unordered_map<int, DiskInfo> diskHardware;
   std::vector<GpuInfo> gpuDescriptors;
+  bool hardwareInvalidated = false;
   std::unique_ptr<NetworkTrace> trace;
   void readUsers();
 public:
@@ -171,7 +185,7 @@ public:
   Sample sample(bool startupVisible = false);
   bool startupReady() const { return startupProgressReady.load() || (startupJob.valid() && startupJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready); }
   bool startupPending() const { return startupJob.valid(); }
-  void invalidateInventory() { inventoryAt = {}; resourcesAt = {}; startupInvalidated = true; }
+  void invalidateInventory() { inventoryAt = {}; resourcesAt = {}; startupInvalidated = hardwareInvalidated = true; }
 };
 CpuInfo readCpu();
 MemoryInfo readMemoryHardware();
@@ -182,11 +196,19 @@ double lastBiosSeconds();
 std::wstring serviceGroupCaption(const std::wstring& group);
 std::vector<Entry> readServices();
 std::vector<Entry> readSessions();
+bool sameSessionAccount(const Entry& expected, const Entry& current);
 StartupInventory readStartup(const std::function<void(const StartupInventory&)>& progress = {});
 #ifdef TASKMGR_DIAGNOSTICS
 std::vector<std::pair<std::string, bool>> startupTests();
+std::vector<std::pair<std::string, bool>> gpuEngineTests();
+std::vector<std::pair<std::string, bool>> networkSamplingTests();
+std::vector<std::pair<std::string, bool>> processorGroupTests();
+std::vector<std::pair<std::string, bool>> accountNameTests();
+std::vector<std::pair<std::string, bool>> sessionIdentityTests();
+std::vector<std::pair<std::string, bool>> hardwareInventoryTests();
 #endif
-std::wstring fullAccountName(const std::wstring& user);
+std::wstring accountName(const std::wstring& user, const std::wstring& domain);
+std::wstring fullAccountName(const std::wstring& user, const std::wstring& domain);
 class Icons {
   struct Request {
     DWORD pid = 0; uint64_t created = 0; std::wstring path;
@@ -230,6 +252,7 @@ public:
 #ifdef TASKMGR_DIAGNOSTICS
   std::vector<double> latencies;
   std::vector<double> displayLatencies;
+  void setTestMetadata(const Process& process, Metadata metadata) { entries[{process.id, process.created}] = std::move(metadata); }
   Icons(HWND window, int iconSize, bool measure = false);
 #else
   Icons(HWND window, int iconSize);
@@ -239,6 +262,7 @@ public:
   const FileInfo& file(const std::wstring& path, bool urgent = false);
   void consume();
   const Metadata& get(const Process& process) const;
+  bool draw(HDC dc, int index, int left, int top, int pixels) const;
   template<class Live> void prune(const Live& live) {
     std::erase_if(entries, [&](const auto& item) { return !live.contains(item.first); });
     std::lock_guard lock(mutex);
@@ -272,7 +296,9 @@ PowerPolicy powerPolicy(const Process& process);
 void efficiencyAction(const Process& process, bool enabled);
 void processAction(const Process& process, Action action, const std::wstring& argument = L"");
 std::vector<Identity> processTree(std::span<const Process> processes, const Process& root);
+std::vector<Identity> processTree(std::span<const Process> processes, std::span<const Identity> roots);
 std::wstring waitChain(const Process& process);
+DWORD serviceActionAccess(int action);
 void serviceAction(const Entry& entry, int action);
 void startupAction(const Entry& entry);
 void sessionAction(const Entry& entry, bool logoff);

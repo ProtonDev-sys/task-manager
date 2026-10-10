@@ -89,7 +89,7 @@ int configureReplacement(bool enabled) {
       requireSuccess(RegSetValueExW(key.value, L"Debugger", 0, REG_SZ, reinterpret_cast<const BYTE*>(expected.c_str()), DWORD((expected.size() + 1) * sizeof(wchar_t))));
     } else if (!existing.empty()) requireSuccess(RegDeleteValueW(key.value, L"Debugger"));
     return 0;
-  } catch (const std::exception& error) { MessageBoxA(nullptr, error.what(), "Task Manager replacement", MB_OK | MB_ICONERROR); return 1; }
+  } catch (const std::exception& error) { MessageBoxW(nullptr, fromUtf8(error.what()).c_str(), L"Task Manager replacement", MB_OK | MB_ICONERROR); return 1; }
 }
 void requestReplacement(HWND owner, bool enabled) {
   const auto path = executable(); SHELLEXECUTEINFOW request{sizeof(request)};
