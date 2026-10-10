@@ -159,6 +159,7 @@ class Sampler {
   std::shared_ptr<const std::unordered_map<DWORD, std::wstring>> cachedUsers;
   std::unordered_map<std::wstring, std::wstring> accounts;
   Time inventoryAt{};
+  Time networkAt{};
   std::unordered_map<ULONG64, std::pair<ULONG64, ULONG64>> networkPrevious;
   std::unordered_map<ULONG64, std::array<std::wstring, 3>> adapterAddresses;
   std::unordered_map<int, DiskInfo> diskHardware;
@@ -185,6 +186,7 @@ std::vector<Entry> readSessions();
 StartupInventory readStartup(const std::function<void(const StartupInventory&)>& progress = {});
 #ifdef TASKMGR_DIAGNOSTICS
 std::vector<std::pair<std::string, bool>> startupTests();
+std::vector<std::pair<std::string, bool>> networkSamplingTests();
 #endif
 std::wstring fullAccountName(const std::wstring& user);
 class Icons {

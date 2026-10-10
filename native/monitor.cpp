@@ -84,6 +84,84 @@ std::vector<std::pair<std::wstring, double>> Counter::values(const std::wstring&
   for (DWORD index = 0; index < count; ++index) if (items[index].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || items[index].FmtValue.CStatus == PDH_CSTATUS_NEW_DATA) result.emplace_back(items[index].szName, std::max(0.0, items[index].FmtValue.doubleValue));
   return result;
 }
+template <typename Read> static std::vector<std::byte> readAdapterAddressBuffer(Read read) {
+  ULONG size = 32768; std::vector<std::byte> addresses;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    addresses.resize(size);
+    const auto code = read(reinterpret_cast<IP_ADAPTER_ADDRESSES*>(addresses.data()), &size);
+    if (code == NO_ERROR) return addresses;
+    if (code != ERROR_BUFFER_OVERFLOW || size >= 4 * 1024 * 1024) break;
+  }
+  // Failed calls do not provide a valid linked list, including the final overflow.
+  return {};
+}
+template <typename Query, typename Release> static bool readNetworkInterfaces(Time sampledAt, Time& previousAt,
+    std::unordered_map<ULONG64, std::pair<ULONG64, ULONG64>>& previous, const std::unordered_map<ULONG64, std::array<std::wstring, 3>>& addresses,
+    std::vector<NetworkInfo>& networks, Query query, Release release) {
+  PMIB_IF_TABLE2 interfaces = nullptr;
+  if (query(&interfaces) != NO_ERROR) return false;
+  const double elapsed = previousAt == Time{} ? 0 : std::chrono::duration<double>(sampledAt - previousAt).count();
+  for (ULONG index = 0; index < interfaces->NumEntries; ++index) {
+    const auto& adapter = interfaces->Table[index];
+    if (adapter.OperStatus != IfOperStatusUp || adapter.Type == IF_TYPE_SOFTWARE_LOOPBACK || !adapter.InterfaceAndOperStatusFlags.HardwareInterface) continue;
+    NetworkInfo network; network.luid = adapter.InterfaceLuid.Value; network.alias = adapter.Alias; network.description = adapter.Description; network.speed = std::max(adapter.ReceiveLinkSpeed, adapter.TransmitLinkSpeed);
+    network.type = adapter.Type == IF_TYPE_IEEE80211 ? L"Wi-Fi" : adapter.Type == IF_TYPE_ETHERNET_CSMACD ? L"Ethernet" : adapter.Type == IF_TYPE_WWANPP || adapter.Type == IF_TYPE_WWANPP2 ? L"Cellular" : L"Network";
+    if (const auto found = addresses.find(network.luid); found != addresses.end()) { if (!found->second[0].empty()) network.description = found->second[0]; network.ipv4 = found->second[1]; network.ipv6 = found->second[2]; }
+    auto found = previous.find(network.luid);
+    if (found != previous.end() && elapsed > 0) { network.receive = adapter.InOctets >= found->second.first ? double(adapter.InOctets - found->second.first) / elapsed : 0; network.send = adapter.OutOctets >= found->second.second ? double(adapter.OutOctets - found->second.second) / elapsed : 0; }
+    previous[network.luid] = {adapter.InOctets, adapter.OutOctets};
+    networks.push_back(std::move(network));
+  }
+  release(interfaces);
+  std::erase_if(previous, [&](const auto& item) { return std::none_of(networks.begin(), networks.end(), [&](const auto& network) { return network.luid == item.first; }); });
+  // Keep the timestamp with the successful byte baseline, not unrelated resource samples.
+  previousAt = sampledAt;
+  return true;
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> networkSamplingTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  {
+    int calls = 0;
+    const auto addresses = readAdapterAddressBuffer([&](IP_ADAPTER_ADDRESSES*, ULONG* size) { ++calls; *size += 32768; return ULONG(ERROR_BUFFER_OVERFLOW); });
+    checks.emplace_back("network_address_retry_exhaustion_discards_failed_buffer", calls == 3 && addresses.empty());
+    calls = 0;
+    const auto recovered = readAdapterAddressBuffer([&](IP_ADAPTER_ADDRESSES* buffer, ULONG* size) { if (++calls < 3) { *size += 32768; return ULONG(ERROR_BUFFER_OVERFLOW); } buffer->Luid.Value = 7; buffer->Next = nullptr; return ULONG(NO_ERROR); });
+    checks.emplace_back("network_address_retry_recovers_before_limit", calls == 3 && !recovered.empty() && reinterpret_cast<const IP_ADAPTER_ADDRESSES*>(recovered.data())->Luid.Value == 7);
+    calls = 0;
+    const auto excessive = readAdapterAddressBuffer([&](IP_ADAPTER_ADDRESSES*, ULONG* size) { ++calls; *size = 4 * 1024 * 1024; return ULONG(ERROR_BUFFER_OVERFLOW); });
+    checks.emplace_back("network_address_retry_bounds_allocation", calls == 1 && excessive.empty());
+  }
+  {
+    MIB_IF_TABLE2 table{}; table.NumEntries = 1; auto& adapter = table.Table[0];
+    adapter.InterfaceLuid.Value = 7; adapter.OperStatus = IfOperStatusUp; adapter.Type = IF_TYPE_ETHERNET_CSMACD; adapter.InterfaceAndOperStatusFlags.HardwareInterface = true;
+    adapter.InOctets = 100; adapter.OutOctets = 50;
+    std::unordered_map<ULONG64, std::pair<ULONG64, ULONG64>> previous;
+    const std::unordered_map<ULONG64, std::array<std::wstring, 3>> addresses;
+    Time previousAt{}; const Time initial = Time{} + std::chrono::seconds(1); bool fail = false; int released = 0;
+    const auto query = [&](PMIB_IF_TABLE2* output) { if (fail) return ULONG(ERROR_NOT_ENOUGH_MEMORY); *output = &table; return ULONG(NO_ERROR); };
+    const auto release = [&](PMIB_IF_TABLE2 output) { if (output == &table) ++released; };
+    std::vector<NetworkInfo> networks;
+    readNetworkInterfaces(initial, previousAt, previous, addresses, networks, query, release);
+    checks.emplace_back("network_first_sample_establishes_baseline", networks.size() == 1 && networks.front().receive == 0 && networks.front().send == 0 && previousAt == initial);
+    networks.clear(); fail = true;
+    const bool failed = !readNetworkInterfaces(initial + std::chrono::seconds(1), previousAt, previous, addresses, networks, query, release);
+    checks.emplace_back("network_failed_sample_preserves_baseline_and_time", failed && networks.empty() && released == 1 && previousAt == initial && previous.at(7) == std::pair<ULONG64, ULONG64>{100, 50});
+    fail = false; adapter.InOctets = 300; adapter.OutOctets = 150;
+    readNetworkInterfaces(initial + std::chrono::seconds(2), previousAt, previous, addresses, networks, query, release);
+    checks.emplace_back("network_recovery_uses_elapsed_since_success", networks.size() == 1 && networks.front().receive == 100 && networks.front().send == 50 && released == 2);
+    networks.clear(); adapter.InOctets = 1; adapter.OutOctets = 2;
+    readNetworkInterfaces(initial + std::chrono::seconds(3), previousAt, previous, addresses, networks, query, release);
+    checks.emplace_back("network_counter_reset_does_not_underflow", networks.size() == 1 && networks.front().receive == 0 && networks.front().send == 0);
+    networks.clear(); table.NumEntries = 0;
+    readNetworkInterfaces(initial + std::chrono::seconds(4), previousAt, previous, addresses, networks, query, release);
+    table.NumEntries = 1; adapter.InOctets = 500; adapter.OutOctets = 250;
+    readNetworkInterfaces(initial + std::chrono::seconds(5), previousAt, previous, addresses, networks, query, release);
+    checks.emplace_back("network_reappearing_interface_starts_new_baseline", networks.size() == 1 && networks.front().receive == 0 && networks.front().send == 0);
+  }
+  return checks;
+}
+#endif
 struct UnicodeString { USHORT length, maximum; wchar_t* buffer; };
 struct NativeProcess {
   ULONG next, threads;
@@ -145,7 +223,6 @@ Sample Sampler::sample(bool startupVisible) {
 #endif
   Sample result; result.cpuInfo = cpuInfo;
   const bool refreshResources = resourcesAt == Time{} || started - resourcesAt >= std::chrono::seconds(1);
-  const double resourceElapsed = cachedResources.resourcesSampledAt == Time{} ? 0 : std::chrono::duration<double>(started - cachedResources.resourcesSampledAt).count();
   if (!refreshResources) {
     result.cpuSpeed = cachedResources.cpuSpeed; result.interrupts = cachedResources.interrupts;
     result.memory = cachedResources.memory; result.cores = cachedResources.cores;
@@ -275,9 +352,9 @@ Sample Sampler::sample(bool startupVisible) {
 #endif
   const bool refreshInventory = inventoryAt == Time{} || milliseconds(inventoryAt) >= 5000;
   if (refreshInventory) {
-    adapterAddresses.clear(); ULONG size = 32768; std::vector<std::byte> addresses;
-    for (int attempt = 0; attempt < 3; ++attempt) { addresses.resize(size); const auto code = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, reinterpret_cast<IP_ADAPTER_ADDRESSES*>(addresses.data()), &size); if (code == ERROR_BUFFER_OVERFLOW && size < 4 * 1024 * 1024) continue; if (code != NO_ERROR) addresses.clear(); break; }
-    for (auto adapter = addresses.empty() ? nullptr : reinterpret_cast<IP_ADAPTER_ADDRESSES*>(addresses.data()); adapter; adapter = adapter->Next) {
+    adapterAddresses.clear();
+    const auto addresses = readAdapterAddressBuffer([](IP_ADAPTER_ADDRESSES* buffer, ULONG* size) { return GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, buffer, size); });
+    for (auto adapter = addresses.empty() ? nullptr : reinterpret_cast<const IP_ADAPTER_ADDRESSES*>(addresses.data()); adapter; adapter = adapter->Next) {
       std::array<std::wstring, 3> entry{adapter->Description ? adapter->Description : L"", L"", L""};
       for (auto unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
         wchar_t text[64]{}; DWORD length = 64; const auto family = unicast->Address.lpSockaddr->sa_family;
@@ -289,22 +366,7 @@ Sample Sampler::sample(bool startupVisible) {
     }
   }
   if (refreshResources) {
-  PMIB_IF_TABLE2 interfaces = nullptr;
-  if (GetIfTable2(&interfaces) == NO_ERROR) {
-    for (ULONG index = 0; index < interfaces->NumEntries; ++index) {
-      const auto& adapter = interfaces->Table[index];
-      if (adapter.OperStatus != IfOperStatusUp || adapter.Type == IF_TYPE_SOFTWARE_LOOPBACK || !adapter.InterfaceAndOperStatusFlags.HardwareInterface) continue;
-      NetworkInfo network; network.luid = adapter.InterfaceLuid.Value; network.alias = adapter.Alias; network.description = adapter.Description; network.speed = std::max(adapter.ReceiveLinkSpeed, adapter.TransmitLinkSpeed);
-      network.type = adapter.Type == IF_TYPE_IEEE80211 ? L"Wi-Fi" : adapter.Type == IF_TYPE_ETHERNET_CSMACD ? L"Ethernet" : adapter.Type == IF_TYPE_WWANPP || adapter.Type == IF_TYPE_WWANPP2 ? L"Cellular" : L"Network";
-      if (const auto found = adapterAddresses.find(network.luid); found != adapterAddresses.end()) { if (!found->second[0].empty()) network.description = found->second[0]; network.ipv4 = found->second[1]; network.ipv6 = found->second[2]; }
-      auto found = networkPrevious.find(network.luid);
-      if (found != networkPrevious.end() && resourceElapsed > 0) { network.receive = adapter.InOctets >= found->second.first ? double(adapter.InOctets - found->second.first) / resourceElapsed : 0; network.send = adapter.OutOctets >= found->second.second ? double(adapter.OutOctets - found->second.second) / resourceElapsed : 0; }
-      networkPrevious[network.luid] = {adapter.InOctets, adapter.OutOctets};
-      result.networks.push_back(std::move(network));
-    }
-    FreeMibTable(interfaces);
-    std::erase_if(networkPrevious, [&](const auto& item) { return std::none_of(result.networks.begin(), result.networks.end(), [&](const auto& network) { return network.luid == item.first; }); });
-  }
+  readNetworkInterfaces(started, networkAt, networkPrevious, adapterAddresses, result.networks, GetIfTable2, FreeMibTable);
   }
   if (trace && trace->active()) { result.networkAttribution = true; const auto rates = trace->rates(result.elapsed); for (auto& process : result.processes) { const auto found = rates.find(process.id); process.network = found == rates.end() ? 0 : found->second; } }
 #ifdef TASKMGR_DIAGNOSTICS
