@@ -75,6 +75,9 @@ void Application::paintSidebar(HDC dc, RECT bounds, const std::vector<PerfItem>&
     if (!RectVisible(dc, &box)) continue;
     const bool hot = int(index) == hotResource;
     if (item.key == selectedResource || hot) { SetDCBrushColor(dc, themeColor(item.key == selectedResource ? RGB(205, 232, 255) : RGB(229, 243, 255))); FillRect(dc, &box, GetStockBrush(DC_BRUSH)); }
+    const bool highlighted = highContrast && (item.key == selectedResource || hot);
+    const COLORREF foreground = highlighted ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0));
+    const COLORREF secondary = highlighted ? foreground : themeColor(SecondaryText);
     int textLeft = bounds.left + scale(16);
     if (!hideGraphs) {
       double maximum = 100; auto& history = histories[item.key];
@@ -82,9 +85,9 @@ void Application::paintSidebar(HDC dc, RECT bounds, const std::vector<PerfItem>&
       drawGraph(dc, {bounds.left + scale(15), top + scale(12), bounds.left + scale(105), top + scale(64)}, history, graphTime, maximum, {themeColor(item.color), false, false, item.key.starts_with(L"net/")});
       textLeft = bounds.left + scale(116);
     }
-    text(dc, item.title, sidebarFont, themeColor(RGB(0, 0, 0)), {textLeft, top + scale(hideGraphs ? 6 : 10), box.right, top + scale(hideGraphs ? 28 : 33)});
-    if (!item.subtitle.empty()) { text(dc, item.subtitle, labelFont, themeColor(SecondaryText), {textLeft, top + scale(hideGraphs ? 27 : 33), box.right, top + scale(hideGraphs ? 43 : 49)}); text(dc, item.value, labelFont, themeColor(SecondaryText), {textLeft, top + scale(hideGraphs ? 41 : 49), box.right, top + scale(hideGraphs ? 57 : 65)}); }
-    else { RECT value{textLeft, top + scale(hideGraphs ? 27 : 35), box.right - scale(2), top + scale(hideGraphs ? 57 : 67)}; SelectObject(dc, labelFont); SetTextColor(dc, themeColor(SecondaryText)); DrawTextW(dc, item.value.c_str(), -1, &value, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS); }
+    text(dc, item.title, sidebarFont, foreground, {textLeft, top + scale(hideGraphs ? 6 : 10), box.right, top + scale(hideGraphs ? 28 : 33)});
+    if (!item.subtitle.empty()) { text(dc, item.subtitle, labelFont, secondary, {textLeft, top + scale(hideGraphs ? 27 : 33), box.right, top + scale(hideGraphs ? 43 : 49)}); text(dc, item.value, labelFont, secondary, {textLeft, top + scale(hideGraphs ? 41 : 49), box.right, top + scale(hideGraphs ? 57 : 65)}); }
+    else { RECT value{textLeft, top + scale(hideGraphs ? 27 : 35), box.right - scale(2), top + scale(hideGraphs ? 57 : 67)}; SelectObject(dc, labelFont); SetTextColor(dc, secondary); DrawTextW(dc, item.value.c_str(), -1, &value, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS); }
   }
   RestoreDC(dc, save);
 }

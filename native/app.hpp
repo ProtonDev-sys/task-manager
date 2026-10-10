@@ -235,6 +235,7 @@ private:
   bool verifySorting();
   bool verifyPerformanceHover();
   bool verifyTabSwitching();
+  bool verifyHighContrast();
   void writeBenchmark();
   void screenshotTick();
 #endif

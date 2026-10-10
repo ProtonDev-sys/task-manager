@@ -45,6 +45,7 @@ bool Application::verifySorting() {
   if (fallbackIcon) DestroyIcon(fallbackIcon);
   check(verifyPerformanceHover(), "performance-hover");
   check(verifyTabSwitching(), "tab-switching");
+  check(verifyHighContrast(), "high-contrast");
   for (const auto& process : current->processes) { const auto found = activity.find({process.id, process.created}); check(found != activity.end() && found->second.ticks == process.cpuTicks && found->second.seen == activityGeneration && std::isfinite(found->second.trend), "activity-live-identity"); }
   for (const int tab : {ProcessesTab, UsersTab, DetailsTab, HistoryTab, StartupTab, ServicesTab}) {
     selectTab(tab);
@@ -371,6 +372,74 @@ bool Application::verifyTabSwitching() {
     if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive, sizeof(immersive)))) check((immersive != FALSE) == dark, "caption-immediate-theme");
   }
   theme = savedTheme; applyTheme(); selectTab(savedTab);
+  return passed;
+}
+bool Application::verifyHighContrast() {
+  const int savedTab = selectedTab, savedHeader = hotHeader, savedResourceHover = hotResource, savedScroll = sidebarScroll;
+  const bool savedContrast = highContrast, savedDark = dark, savedGraphs = hideGraphs;
+  const auto savedResource = selectedResource; const auto snapshot = current;
+  const auto savedBrush = backgroundBrush;
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  selectTab(ProcessesTab);
+  // Exercise High Contrast without changing the desktop's accessibility settings.
+  highContrast = true; dark = false; backgroundBrush = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
+  RECT headerBounds{}, tabBounds{}; GetClientRect(header, &headerBounds); GetClientRect(tabs, &tabBounds);
+  const int width = std::max({int(headerBounds.right), int(tabBounds.right), scale(222)});
+  const int height = std::max({int(headerBounds.bottom), int(tabBounds.bottom), scale(210)});
+  HDC screen = GetDC(window), memory = CreateCompatibleDC(screen);
+  HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
+  check(screen && memory && bitmap && backgroundBrush, "high-contrast-render-buffer");
+  if (screen && memory && bitmap && backgroundBrush) {
+    const auto previous = SelectObject(memory, bitmap); SetBkMode(memory, TRANSPARENT);
+    current = std::make_shared<Sample>(*snapshot); current->cpu = 95;
+    const auto cpu = std::find(shown[ProcessesTab].begin(), shown[ProcessesTab].end(), 7);
+    check(cpu != shown[ProcessesTab].end(), "high-contrast-cpu-column");
+    if (cpu != shown[ProcessesTab].end()) {
+      const int column = int(cpu - shown[ProcessesTab].begin()); RECT box{}; Header_GetItemRect(header, column, &box);
+      for (const bool hovered : {false, true}) {
+        const int saved = SaveDC(memory); IntersectClipRect(memory, box.left, box.top, box.right, box.bottom);
+        hotHeader = hovered ? column : -1; paintHeader(memory, headerBounds);
+        check(GetPixel(memory, box.left + 1, (box.top + box.bottom) / 2) == GetSysColor(hovered ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-busy-header-background");
+        check(GetTextColor(memory) == GetSysColor(hovered ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), "high-contrast-header-text-pair");
+        RestoreDC(memory, saved);
+      }
+    }
+    current = snapshot;
+    // Native selection can move before a coalesced tab switch is committed.
+    for (const int selection : {ProcessesTab, ServicesTab}) {
+      TabCtrl_SetCurSel(tabs, selection); SendMessageW(tabs, WM_PRINTCLIENT, WPARAM(memory), PRF_CLIENT);
+      for (int index = 0; index < TabCount; ++index) {
+        RECT box{}; TabCtrl_GetItemRect(tabs, index, &box);
+        check(GetPixel(memory, box.left + 1, box.top + 1) == GetSysColor(index == selection ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-tab-background");
+      }
+      check(GetTextColor(memory) == GetSysColor(selection == ServicesTab ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), "high-contrast-tab-text-pair");
+    }
+    TabCtrl_SetCurSel(tabs, selectedTab);
+    const auto savedSidebarFont = sidebarFont, savedLabelFont = labelFont;
+    // A stock bitmap font makes these bounded text-pixel checks independent of ClearType.
+    sidebarFont = labelFont = HFONT(GetStockObject(SYSTEM_FIXED_FONT));
+    hideGraphs = true; sidebarScroll = 0; selectedResource = L"cpu"; hotResource = 1;
+    const std::vector<PerfItem> fixtures{{L"cpu", L"CPU", L"", L"95%", L"", CpuColor}, {L"memory", L"Memory", L"Usage", L"30%", L"", MemoryColor}, {L"gpu", L"GPU", L"", L"10%", L"", GpuColor}};
+    const RECT sidebar{0, 0, scale(222), scale(210)}; FillRect(memory, &sidebar, backgroundBrush); paintSidebar(memory, sidebar, fixtures);
+    auto containsColor = [&](RECT bounds, COLORREF color) {
+      for (LONG y = bounds.top; y < bounds.bottom; ++y) for (LONG x = bounds.left; x < bounds.right; ++x) if (GetPixel(memory, x, y) == color) return true;
+      return false;
+    };
+    for (int index = 0; index < int(fixtures.size()); ++index) {
+      const int top = scale(12) + index * scale(60); const bool highlighted = index < 2;
+      const COLORREF foreground = GetSysColor(highlighted ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT);
+      check(GetPixel(memory, scale(3), top + 1) == GetSysColor(highlighted ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-sidebar-background");
+      check(containsColor({scale(16), top + scale(6), scale(150), top + scale(28)}, foreground), "high-contrast-sidebar-title-text");
+      check(containsColor({scale(16), top + scale(27), scale(150), top + scale(57)}, foreground), "high-contrast-sidebar-secondary-text");
+    }
+    sidebarFont = savedSidebarFont; labelFont = savedLabelFont;
+    SelectObject(memory, previous);
+  }
+  if (bitmap) DeleteObject(bitmap); if (memory) DeleteDC(memory); if (screen) ReleaseDC(window, screen);
+  if (backgroundBrush) DeleteObject(backgroundBrush); backgroundBrush = savedBrush;
+  highContrast = savedContrast; dark = savedDark; hideGraphs = savedGraphs; hotResource = savedResourceHover; sidebarScroll = savedScroll; selectedResource = savedResource; current = snapshot;
+  selectTab(savedTab); hotHeader = savedHeader;
   return passed;
 }
 bool Application::verifyPerformanceHover() {

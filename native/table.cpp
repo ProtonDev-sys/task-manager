@@ -415,8 +415,8 @@ void Application::copy() {
   CloseClipboard();
 }
 // GDI+ is scoped to the chevron itself: a Graphics object kept alive across GDI calls on the same DC corrupts their output.
-static void chevron(HDC dc, float x, float y, float unit, bool open) {
-  Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, 128, 128, 128), 1.0f);
+static void chevron(HDC dc, float x, float y, float unit, bool open, COLORREF color) {
+  Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), 1.0f);
   if (open) { const Gdiplus::PointF points[] = {{x - unit, y - 2 * unit}, {x + 3 * unit, y + 2 * unit}, {x + 7 * unit, y - 2 * unit}}; graphics.DrawLines(&pen, points, 3); }
   else { const Gdiplus::PointF points[] = {{x + unit, y - 4 * unit}, {x + 5 * unit, y}, {x + unit, y + 4 * unit}}; graphics.DrawLines(&pen, points, 3); }
 }
@@ -441,21 +441,22 @@ void Application::drawRow(HDC dc, int index, RECT bounds) {
     if (selected) background = heat ? blend(background, themeColor(Selection), 0.25) : themeColor(Selection); else if (hot) background = heat ? blend(background, themeColor(Hover), 0.25) : themeColor(Hover);
     SetDCBrushColor(dc, background); FillRect(dc, &box, GetStockBrush(DC_BRUSH));
     if (heat) { SetDCBrushColor(dc, blend(themeColor(RGB(190, 140, 130)), background, 0.25)); RECT edge{box.right - 1, box.top, box.right, box.bottom}; FillRect(dc, &edge, GetStockBrush(DC_BRUSH)); edge = {box.left - 1, box.top, box.left, box.bottom}; FillRect(dc, &edge, GetStockBrush(DC_BRUSH)); }
+    const COLORREF foreground = highContrast && (selected || hot) ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0));
     if (row.kind == RowKind::Heading) {
-      if (id == 0) { RECT text{box.left + scale(10), box.top + scale(4), client.right, box.bottom}; SelectObject(dc, headingFont); SetTextColor(dc, themeColor(HeadingText)); DrawTextW(dc, value.text.c_str(), -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX); SelectObject(dc, font); }
+      if (id == 0) { RECT text{box.left + scale(10), box.top + scale(4), client.right, box.bottom}; SelectObject(dc, headingFont); SetTextColor(dc, highContrast ? foreground : themeColor(HeadingText)); DrawTextW(dc, value.text.c_str(), -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX); SelectObject(dc, font); }
       continue;
     }
     RECT text{box.left + scale(6), box.top, box.right - scale(6), box.bottom};
     if (id == 0) {
       int iconLeft = box.left + scale(6);
       if (tree) {
-        if (row.expandable) chevron(dc, float(box.left + scale(11) + indent), float(box.top + (box.bottom - box.top) / 2), float(scale(100)) / 100, row.expanded);
+        if (row.expandable) chevron(dc, float(box.left + scale(11) + indent), float(box.top + (box.bottom - box.top) / 2), float(scale(100)) / 100, row.expanded, highContrast ? foreground : RGB(128, 128, 128));
         iconLeft = box.left + scale(28) + indent;
       } else if (compact) iconLeft = box.left + scale(8);
       if (!ImageList_Draw(icons->images, row.icon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT)) ImageList_Draw(icons->images, Icons::DefaultIcon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT);
       text.left = iconLeft + iconSize + scale(6);
     }
-    SetTextColor(dc, highContrast && (selected || hot) ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0)));
+    SetTextColor(dc, foreground);
     DrawTextW(dc, value.text.c_str(), -1, &text, (definition.right || definition.heat) && id != 0 && !(definition.heat && !definition.right) ? DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX : DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
   }
 }
@@ -484,16 +485,18 @@ void Application::paintHeader(HDC dc, RECT client) {
     if (id < 0 || size_t(id) >= defs.size()) continue;
     const auto& definition = defs[size_t(id)]; const bool right = (definition.right || definition.heat) && id != 0 && !(definition.heat && !definition.right);
     const auto value = twoLine && definition.heat ? headerValue(id) : L"";
+    const COLORREF foreground = highContrast && index == hotHeader ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0));
     COLORREF background = index == hotHeader ? themeColor(Hover) : themeColor(RGB(255, 255, 255));
-    if (!value.empty()) { const double amount = _wtof(value.c_str()); if (amount >= 90) background = themeColor(Heat[6]); else if (amount >= 80) background = themeColor(Heat[5]); }
+    if (!highContrast && !value.empty()) { const double amount = _wtof(value.c_str()); if (amount >= 90) background = themeColor(Heat[6]); else if (amount >= 80) background = themeColor(Heat[5]); }
     SetDCBrushColor(dc, background); RECT fill{box.left, box.top, box.right - 1, box.bottom - 1}; FillRect(dc, &fill, GetStockBrush(DC_BRUSH));
     if (dark) { RECT separator{box.right - 1, box.top + 1, box.right, box.bottom - 1}; SetDCBrushColor(dc, themeColor(RGB(64, 64, 64))); FillRect(dc, &separator, GetStockBrush(DC_BRUSH)); }
     else for (int y = box.top + 1; y < box.bottom - 1; ++y) { const double fraction = double(y - box.top) / std::max(1L, box.bottom - box.top); const int shade = int(232 - 46 * fraction); SetPixelV(dc, box.right - 1, y, themeColor(RGB(shade, shade, shade))); }
-    if (!value.empty()) { RECT top{box.left + scale(4), box.top + scale(4), box.right - scale(7), box.top + scale(25)}; SelectObject(dc, percentFont); SetTextColor(dc, themeColor(RGB(0, 0, 0))); DrawTextW(dc, value.c_str(), -1, &top, DT_RIGHT | DT_TOP | DT_SINGLELINE); }
+    if (!value.empty()) { RECT top{box.left + scale(4), box.top + scale(4), box.right - scale(7), box.top + scale(25)}; SelectObject(dc, percentFont); SetTextColor(dc, foreground); DrawTextW(dc, value.c_str(), -1, &top, DT_RIGHT | DT_TOP | DT_SINGLELINE); }
     RECT label{box.left + scale(6), twoLine ? box.bottom - scale(23) : box.top, box.right - scale(7), twoLine ? box.bottom - scale(4) : box.bottom - 1};
-    SelectObject(dc, font); SetTextColor(dc, themeColor(HeaderText)); DrawTextW(dc, definition.title, -1, &label, (right ? DT_RIGHT : DT_LEFT) | (twoLine ? DT_BOTTOM : DT_VCENTER) | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dc, font); SetTextColor(dc, highContrast ? foreground : themeColor(HeaderText)); DrawTextW(dc, definition.title, -1, &label, (right ? DT_RIGHT : DT_LEFT) | (twoLine ? DT_BOTTOM : DT_VCENTER) | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     if (id == sortColumn[size_t(selectedTab)] && !compact) {
-      Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, 118, 118, 118), 1.0f); const float unit = float(scale(100)) / 100;
+      const COLORREF arrow = highContrast ? foreground : RGB(118, 118, 118);
+      Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(arrow), GetGValue(arrow), GetBValue(arrow)), 1.0f); const float unit = float(scale(100)) / 100;
       const float left = float(twoLine && right ? box.left + scale(9) : (box.left + box.right) / 2 - scale(4)), top = float(box.top + scale(twoLine ? 6 : 1)), width = 8 * unit, height = 4 * unit;
       const bool descending = !ascending[size_t(selectedTab)];
       const Gdiplus::PointF points[] = {{left, descending ? top : top + height}, {left + width / 2, descending ? top + height : top}, {left + width, descending ? top : top + height}}; graphics.DrawLines(&pen, points, 3);
