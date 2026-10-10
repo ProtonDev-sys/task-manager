@@ -338,7 +338,13 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
   orderedTab = selectedTab; orderedColumn = sortColumn[size_t(selectedTab)]; orderedAscending = ascending[size_t(selectedTab)];
   if (!partialUpdate) { SendMessageW(list, WM_SETREDRAW, FALSE, 0); if (!sortOnly) ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL); }
   int found = -1; if (!selected.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == selected) { found = int(index); break; }
-  if (found >= 0) { if (selectedIndex() != found) select(found); } else if (selectedIndex() >= 0) ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  if (found >= 0) {
+    if (selectedIndex() != found) {
+      // A refresh must retain the selection without scrolling after its new rank.
+      ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+      ListView_SetItemState(list, found, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+  } else if (selectedIndex() >= 0) ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
   if (manualSort) { const int offset = ListView_GetTopIndex(list); if (offset) ListView_Scroll(list, 0, -offset * rowHeight()); }
   else if (!partialUpdate && sortColumn[size_t(selectedTab)] == 0 && !topKey.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == topKey) { const int delta = int(index) - ListView_GetTopIndex(list); if (delta) ListView_Scroll(list, 0, delta * rowHeight()); break; }
   if (partialUpdate) {

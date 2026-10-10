@@ -232,6 +232,7 @@ private:
   // diagnostics
 #ifdef TASKMGR_DIAGNOSTICS
   void benchmarkTick();
+  bool verifyViewportRefresh();
   bool verifySorting();
   bool verifyPerformanceHover();
   bool verifyTabSwitching();

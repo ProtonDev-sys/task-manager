@@ -4,6 +4,51 @@
 #include <windowsx.h>
 
 namespace taskmgr {
+bool Application::verifyViewportRefresh() {
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  const auto savedSample = current; const int savedTab = selectedTab, savedColumnsTab = columnsTab, savedSort = sortColumn[DetailsTab];
+  const bool savedDirection = ascending[DetailsTab], savedCompact = compact, savedSortQueued = sortQueued;
+  const int savedTop = ListView_GetTopIndex(list), savedSelection = selectedIndex(), savedFocused = ListView_GetNextItem(list, -1, LVNI_FOCUSED);
+  const int savedOrderedTab = orderedTab, savedOrderedColumn = orderedColumn; const bool savedOrderedAscending = orderedAscending;
+  const HWND savedFocus = GetFocus();
+  auto savedRows = std::move(rows), savedSearchRows = std::move(searchRows); auto savedSearch = std::move(searchText);
+  rows.clear(); searchRows.clear(); searchText.clear(); compact = false; selectedTab = DetailsTab;
+  auto sample = std::make_shared<Sample>(); sample->processes.resize(256);
+  for (size_t index = 0; index < sample->processes.size(); ++index) {
+    // PID zero prevents metadata requests; distinct creation stamps give anonymous row identities.
+    auto& process = sample->processes[index]; process.created = uint64_t(index) + 1;
+    process.name = L"Viewport fixture " + std::to_wstring(index); process.cpu = double(index) / 3;
+  }
+  current = sample; sortColumn[DetailsTab] = 5; ascending[DetailsTab] = true; sortQueued = false; columns(); layout(); rebuild();
+  select(10); SendMessageW(list, WM_VSCROLL, SB_TOP, 0); ListView_Scroll(list, 0, rowHeight() * 80);
+  const int top = ListView_GetTopIndex(list); const auto selected = rowKey(selectedIndex());
+  check(top > 10 && !selected.empty(), "viewport-fixture-selection-outside-view");
+  sample->processes[10].cpu = 99; rebuild();
+  check(rowKey(selectedIndex()) == selected && selectedIndex() == 255, "numeric-refresh-retains-selected-identity-at-new-rank");
+  check(ListView_GetTopIndex(list) == top, "numeric-refresh-does-not-scroll-to-lower-rank");
+  sample->processes[10].cpu = 0; rebuild();
+  check(rowKey(selectedIndex()) == selected && selectedIndex() <= 1, "numeric-refresh-retains-selected-identity-at-top");
+  check(ListView_GetTopIndex(list) == top, "numeric-refresh-does-not-scroll-to-upper-rank");
+  select(200);
+  check(ListView_GetTopIndex(list) <= 200 && ListView_GetTopIndex(list) + ListView_GetCountPerPage(list) >= 200, "explicit-selection-still-scrolls-into-view");
+  const auto explicitSelection = rowKey(selectedIndex()); ascending[DetailsTab] = false; rebuild(true);
+  check(ListView_GetTopIndex(list) == 0 && rowKey(selectedIndex()) == explicitSelection, "manual-sort-still-starts-at-top");
+  current = savedSample; sortColumn[DetailsTab] = savedSort; ascending[DetailsTab] = savedDirection; compact = savedCompact;
+  // Restore the retained table even when the caller was displaying Performance.
+  selectedTab = savedColumnsTab >= 0 ? savedColumnsTab : savedTab; columns(); rebuilding = true;
+  rows = std::move(savedRows); searchRows = std::move(savedSearchRows); searchText = std::move(savedSearch);
+  orderedTab = savedOrderedTab; orderedColumn = savedOrderedColumn; orderedAscending = savedOrderedAscending;
+  ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+  ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  if (savedSelection >= 0) ListView_SetItemState(list, savedSelection, LVIS_SELECTED, LVIS_SELECTED);
+  if (savedFocused >= 0) ListView_SetItemState(list, savedFocused, LVIS_FOCUSED, LVIS_FOCUSED);
+  ListView_Scroll(list, 0, (savedTop - ListView_GetTopIndex(list)) * rowHeight());
+  selectedTab = savedTab; rebuilding = false; layout(); updateFooter();
+  if (GetFocus() != savedFocus) SetFocus(savedFocus);
+  sortQueued = savedSortQueued; if (sortQueued) SetTimer(window, 3, 32, nullptr);
+  return passed;
+}
 bool Application::verifySorting() {
   verifyingSorting = true;
   const int savedTab = selectedTab; const bool savedGrouping = groupByType; const auto savedExpanded = expanded;
@@ -12,6 +57,7 @@ bool Application::verifySorting() {
   auto check = [&](bool result, const std::string& name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   const bool priorMeasured = measured; const unsigned priorTests = tests;
   benchmarkTick(); check(measured == priorMeasured && tests == priorTests, "benchmark-nested-tick-skipped");
+  check(verifyViewportRefresh(), "viewport-refresh");
   {
     Row previous; previous.key = L"identity"; previous.cells = {{L"1.0%", 1.01, 0}};
     auto next = previous; next.cells[0].value = 1.04; next.process = 5;
