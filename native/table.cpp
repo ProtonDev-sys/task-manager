@@ -375,6 +375,20 @@ void Application::select(int index) {
   if (index < 0 || size_t(index) >= rows.size() || rows[size_t(index)].kind == RowKind::Heading) return;
   ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED); ListView_SetItemState(list, index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); ListView_EnsureVisible(list, index, FALSE);
 }
+void Application::skipHeading(int direction) {
+  const int focused = ListView_GetNextItem(list, -1, LVNI_FOCUSED);
+  const auto valid = [&](int index) { return index >= 0 && size_t(index) < rows.size(); };
+  if (!valid(focused) || rows[size_t(focused)].kind != RowKind::Heading) return;
+  const int step = direction < 0 ? -1 : 1;
+  auto seek = [&](int increment) { int index = focused; while (valid(index) && rows[size_t(index)].kind == RowKind::Heading) index += increment; return index; };
+  int next = seek(step); if (!valid(next)) next = seek(-step);
+  // Native Ctrl navigation moves focus without changing the selected process.
+  const bool selected = (ListView_GetItemState(list, focused, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+  ListView_SetItemState(list, focused, 0, LVIS_FOCUSED | (selected ? LVIS_SELECTED : 0));
+  if (!valid(next)) return;
+  if (selected) select(next);
+  else { ListView_SetItemState(list, next, LVIS_FOCUSED, LVIS_FOCUSED); ListView_EnsureVisible(list, next, FALSE); }
+}
 void Application::toggle(int index) {
   if (index < 0 || size_t(index) >= rows.size() || !rows[size_t(index)].expandable) return;
   const auto key = rows[size_t(index)].key; if (!expanded.erase(key)) expanded.insert(key);
@@ -628,6 +642,9 @@ LRESULT CALLBACK Application::listProcedure(HWND target, UINT message, WPARAM wo
   const auto result = DefSubclassProc(target, message, word, data);
   if (batch) DefSubclassProc(target, WM_SETREDRAW, TRUE, 0);
   --app->columnMutationDepth;
+  // Keep native arrow/page movement, correcting only destinations that are headings.
+  if (message == WM_KEYDOWN && (word == VK_UP || word == VK_DOWN || word == VK_HOME || word == VK_END || word == VK_PRIOR || word == VK_NEXT))
+    app->skipHeading(word == VK_UP || word == VK_PRIOR || word == VK_END ? -1 : 1);
   if (app->geometryQueued && !app->columnMutationDepth && !app->rebuilding) SendMessageW(app->window, WM_APP + 10, 0, 0);
   if (horizontal && GetScrollPos(target, SB_HORZ) != previousScroll) RedrawWindow(target, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
   if (app->dark && (message == WM_PRINT || (!app->rebuilding && !(app->geometryQueued && app->columnMutationDepth))) && (message == WM_PAINT || message == WM_HSCROLL || message == WM_VSCROLL || message == WM_MOUSEWHEEL || message == WM_SIZE || message == WM_NCMOUSEMOVE || message == WM_NCMOUSELEAVE || message == WM_THEMECHANGED || message == WM_PRINT)) app->paintScrollbars(message == WM_PRINT ? HDC(word) : nullptr);

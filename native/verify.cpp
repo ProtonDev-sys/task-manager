@@ -45,6 +45,7 @@ bool Application::verifySorting() {
   if (fallbackIcon) DestroyIcon(fallbackIcon);
   check(verifyPerformanceHover(), "performance-hover");
   check(verifyTabSwitching(), "tab-switching");
+  check(verifyHeadingNavigation(), "heading-navigation");
   for (const auto& process : current->processes) { const auto found = activity.find({process.id, process.created}); check(found != activity.end() && found->second.ticks == process.cpuTicks && found->second.seen == activityGeneration && std::isfinite(found->second.trend), "activity-live-identity"); }
   for (const int tab : {ProcessesTab, UsersTab, DetailsTab, HistoryTab, StartupTab, ServicesTab}) {
     selectTab(tab);
@@ -271,6 +272,76 @@ bool Application::verifySorting() {
   check(!GetUpdateRect(list, nullptr, FALSE), "unchanged-process-snapshot-no-table-repaint");
   selectTab(savedTab); rebuild();
   verifyingSorting = false;
+  return passed;
+}
+bool Application::verifyHeadingNavigation() {
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  std::array<BYTE, 256> savedKeys{};
+  if (!GetKeyboardState(savedKeys.data())) { check(false, "heading-keyboard-state-readable"); return false; }
+  struct KeyboardRestore { std::array<BYTE, 256> keys; ~KeyboardRestore() { SetKeyboardState(keys.data()); } } keyboardRestore{savedKeys};
+  auto keys = savedKeys;
+  for (const int key : {VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_MENU, VK_LMENU, VK_RMENU}) keys[size_t(key)] = 0;
+  // SetKeyboardState affects this diagnostic thread only; no input is sent to other windows.
+  if (!SetKeyboardState(keys.data())) { check(false, "heading-keyboard-state-isolated"); return false; }
+  const HWND savedFocus = GetFocus();
+  const HWND fixture = CreateWindowExW(0, WC_LISTVIEWW, L"Heading navigation fixture", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL,
+    0, 0, scale(640), scale(360), window, nullptr, GetModuleHandleW(nullptr), nullptr);
+  if (!fixture) { check(false, "heading-list-fixture-created"); return false; }
+  const HWND savedList = list, savedHeader = header; const bool savedRebuilding = rebuilding;
+  auto savedRows = std::move(rows);
+  struct Restore { std::function<void()> run; ~Restore() { run(); } } restore{[&] {
+    RemoveWindowSubclass(fixture, listProcedure, 1);
+    list = savedList; header = savedHeader; rows = std::move(savedRows); rebuilding = savedRebuilding; columnGeometryDirty = true;
+    DestroyWindow(fixture); if (GetFocus() != savedFocus) SetFocus(savedFocus); updateFooter(); InvalidateRect(list, nullptr, FALSE); InvalidateRect(header, nullptr, FALSE);
+  }};
+  list = fixture; header = ListView_GetHeader(fixture); rebuilding = true; columnGeometryDirty = true;
+  LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH; column.pszText = const_cast<wchar_t*>(L"Fixture"); column.cx = scale(400);
+  ListView_InsertColumn(fixture, 0, &column);
+  const auto populate = [&](size_t count, bool headings) {
+    rows.assign(count, Row{});
+    for (size_t index = 0; index < rows.size(); ++index) { rows[index].key = L"heading-fixture:" + std::to_wstring(index); rows[index].cells.resize(24); rows[index].cells[0].text = L"Anonymous row " + std::to_wstring(index); }
+    if (headings) for (const size_t index : {size_t(0), size_t(2), size_t(3), size_t(6)}) rows[index].kind = RowKind::Heading;
+    ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL);
+    ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED); SendMessageW(list, WM_VSCROLL, SB_TOP, 0);
+  };
+  const auto press = [&](int from, WPARAM key) { select(from); SendMessageW(list, WM_KEYDOWN, key, 1); };
+  populate(7, true); SetFocus(list);
+  check(GetFocus() == list, "heading-fixture-has-thread-focus");
+  // Before installing our subclass, reproduce the old native key fall-through.
+  press(1, VK_HOME);
+  check(selectedIndex() == 0 && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == 0, "heading-native-home-selects-heading");
+  auto controlKeys = keys; controlKeys[VK_CONTROL] = controlKeys[VK_LCONTROL] = 0x80;
+  check(SetKeyboardState(controlKeys.data()) != FALSE, "heading-control-state-isolated");
+  press(1, VK_DOWN); const int nativeControlSelection = selectedIndex(), nativeControlFocus = ListView_GetNextItem(list, -1, LVNI_FOCUSED);
+  SetKeyboardState(keys.data());
+  populate(120, false); press(1, VK_NEXT);
+  const int nativePageSelection = selectedIndex(), nativePageTop = ListView_GetTopIndex(list);
+  check(nativePageSelection > 1 && nativePageSelection + 1 < int(rows.size()), "heading-native-page-fixture-range");
+  if (!SetWindowSubclass(fixture, listProcedure, 1, reinterpret_cast<DWORD_PTR>(this))) { check(false, "heading-list-subclass-installed"); return false; }
+  populate(7, true);
+  press(5, VK_HOME); check(selectedIndex() == 1, "heading-home-skips-first-heading");
+  press(1, VK_UP); check(selectedIndex() == 1, "heading-up-stops-at-first-process");
+  press(1, VK_DOWN); check(selectedIndex() == 4, "heading-down-skips-consecutive-headings");
+  press(4, VK_UP); check(selectedIndex() == 1, "heading-up-skips-consecutive-headings");
+  press(1, VK_END); check(selectedIndex() == 5, "heading-end-skips-last-heading");
+  press(1, VK_NEXT); check(selectedIndex() == 5, "heading-page-down-skips-last-heading");
+  press(5, VK_PRIOR); check(selectedIndex() == 1, "heading-page-up-skips-first-heading");
+  press(4, VK_DOWN); check(selectedIndex() == 5, "heading-navigation-keeps-ordinary-rows");
+  SetKeyboardState(controlKeys.data()); press(1, VK_DOWN);
+  check(selectedIndex() == (nativeControlSelection == 2 ? 4 : nativeControlSelection) && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == (nativeControlFocus == 2 ? 4 : nativeControlFocus), "heading-control-navigation-keeps-native-selection");
+  SetKeyboardState(keys.data());
+  select(1); ListView_SetItemState(list, 1, 0, LVIS_FOCUSED); ListView_SetItemState(list, 2, LVIS_FOCUSED, LVIS_FOCUSED); skipHeading(1);
+  check(selectedIndex() == 1 && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == 4, "heading-focus-only-correction-preserves-selected-process");
+  populate(120, false); press(1, VK_NEXT);
+  check(selectedIndex() == nativePageSelection && ListView_GetTopIndex(list) == nativePageTop, "heading-navigation-preserves-native-paging");
+  if (nativePageSelection > 1 && nativePageSelection + 1 < int(rows.size())) {
+    populate(120, false); rows[size_t(nativePageSelection)].kind = RowKind::Heading; press(1, VK_NEXT);
+    check(selectedIndex() == nativePageSelection + 1, "heading-native-page-destination-skips-heading");
+  }
+  populate(7, true); for (auto& row : rows) row.kind = RowKind::Heading;
+  ListView_SetItemState(list, 3, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); skipHeading(1);
+  check(selectedIndex() == -1 && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == -1, "heading-only-list-has-no-action-selection");
   return passed;
 }
 bool Application::verifyTabSwitching() {

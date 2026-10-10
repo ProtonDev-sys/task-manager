@@ -202,6 +202,7 @@ private:
   const Process* selectedProcess() const;
   std::vector<const Process*> selectedMembers() const;
   void select(int index);
+  void skipHeading(int direction);
   void toggle(int index);
   void letter(wchar_t character);
   void copy();
@@ -233,6 +234,7 @@ private:
 #ifdef TASKMGR_DIAGNOSTICS
   void benchmarkTick();
   bool verifySorting();
+  bool verifyHeadingNavigation();
   bool verifyPerformanceHover();
   bool verifyTabSwitching();
   void writeBenchmark();
