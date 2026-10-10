@@ -107,9 +107,128 @@ struct NativeProcessor { int64_t idle, kernel, user, dpc, interrupt; ULONG inter
 static_assert(sizeof(NativeProcessor) == 48);
 using QuerySystem = LONG (WINAPI*)(ULONG, void*, ULONG, ULONG*);
 static QuerySystem querySystem() { static auto query = reinterpret_cast<QuerySystem>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation")); return query; }
+using QuerySystemEx = LONG (WINAPI*)(ULONG, void*, ULONG, void*, ULONG, ULONG*);
+static QuerySystemEx querySystemEx() { static auto query = reinterpret_cast<QuerySystemEx>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformationEx")); return query; }
+static std::optional<unsigned> processorCount(std::span<const unsigned> groups) {
+  if (groups.empty() || groups.size() > UINT16_MAX) return std::nullopt;
+  constexpr unsigned limit = 64 * 1024 * 1024 / sizeof(NativeProcessor);
+  unsigned total = 0;
+  for (const auto count : groups) { if (count == 0 || count > 64 || total > limit - count) return std::nullopt; total += count; }
+  return total;
+}
+static std::vector<unsigned> readProcessorTopology() {
+  const WORD count = GetActiveProcessorGroupCount();
+  std::vector<unsigned> groups; groups.reserve(count);
+  for (WORD group = 0; group < count; ++group) groups.push_back(GetActiveProcessorCount(group));
+  if (GetActiveProcessorGroupCount() != count || !processorCount(groups)) return {};
+  return groups;
+}
+template <typename Query, typename Topology> static std::optional<std::vector<NativeProcessor>> readProcessorGroups(std::span<const unsigned> groups, Query query, Topology topology) {
+  const auto count = processorCount(groups); if (!count) return std::nullopt;
+  std::vector<NativeProcessor> processors(*count); size_t offset = 0;
+  for (size_t index = 0; index < groups.size(); ++index) {
+    const ULONG size = ULONG(groups[index] * sizeof(NativeProcessor)); ULONG returned = 0;
+    if (query(WORD(index), processors.data() + offset, size, &returned) < 0 || returned != size) return std::nullopt;
+    offset += groups[index];
+  }
+  const auto current = topology();
+  if (current.size() != groups.size() || !std::equal(current.begin(), current.end(), groups.begin())) return std::nullopt;
+  return processors;
+}
+static std::optional<std::vector<NativeProcessor>> readGroupProcessorData(std::span<const unsigned> groups) {
+  const auto query = querySystemEx(); if (!query) return std::nullopt;
+  // The Ex query selects a group with a USHORT input; a legacy query only reads the calling thread's group.
+  return readProcessorGroups(groups, [&](WORD group, NativeProcessor* data, ULONG size, ULONG* returned) { return query(8, &group, sizeof(group), data, size, returned); }, readProcessorTopology);
+}
+static std::optional<std::array<uint64_t, 2>> processorTotals(std::span<const NativeProcessor> processors) {
+  if (processors.empty()) return std::nullopt;
+  uint64_t idle = 0, total = 0;
+  for (const auto& processor : processors) {
+    if (processor.idle < 0 || processor.kernel < 0 || processor.user < 0 || processor.dpc < 0 || processor.interrupt < 0) return std::nullopt;
+    const uint64_t currentIdle = uint64_t(processor.idle), currentTotal = uint64_t(processor.kernel) + uint64_t(processor.user);
+    if (currentIdle > currentTotal || idle > UINT64_MAX - currentIdle || total > UINT64_MAX - currentTotal) return std::nullopt;
+    idle += currentIdle; total += currentTotal;
+  }
+  return std::array<uint64_t, 2>{idle, total};
+}
+static double processorUsage(uint64_t currentIdle, uint64_t currentTotal, uint64_t& previousIdle, uint64_t& previousTotal) {
+  double usage = 0;
+  if (previousTotal && currentTotal > previousTotal && currentIdle >= previousIdle) usage = std::clamp(100.0 * (1.0 - double(currentIdle - previousIdle) / double(currentTotal - previousTotal)), 0.0, 100.0);
+  previousIdle = currentIdle; previousTotal = currentTotal;
+  return usage;
+}
+static bool applyProcessorSample(std::optional<std::vector<NativeProcessor>> data, uint64_t& idle, uint64_t& total, double& usage, std::vector<NativeProcessor>& processors) {
+  if (!data) return false;
+  const auto times = processorTotals(*data); if (!times) return false;
+  usage = processorUsage((*times)[0], (*times)[1], idle, total);
+  processors = std::move(*data);
+  return true;
+}
+static bool updateProcessorTopology(const std::vector<unsigned>& groups, std::vector<unsigned>& previous, uint64_t& idle, uint64_t& total, double& usage, std::vector<std::array<uint64_t, 3>>& cores) {
+  if (groups.empty() || groups == previous) return false;
+  previous = groups; idle = total = 0; usage = 0; cores.clear();
+  return true;
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> processorGroupTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  const std::vector<unsigned> groups{64, 64};
+  checks.emplace_back("cpu_counts_all_processor_groups", processorCount(groups) == 128 && 640000000.0 / (100000 * *processorCount(groups)) == 50);
+  checks.emplace_back("cpu_rejects_invalid_group_counts", !processorCount({}) && !processorCount(std::vector<unsigned>{64, 0}) && !processorCount(std::vector<unsigned>{UINT32_MAX}) && !processorCount(std::vector<unsigned>(UINT16_MAX + 1u, 1)));
+  unsigned epoch = 1; bool fail = false; int extent = 0; std::vector<WORD> visited;
+  const auto query = [&](WORD group, NativeProcessor* processors, ULONG size, ULONG* returned) {
+    visited.push_back(group);
+    if (fail && group == 1) return LONG(-1);
+    for (size_t index = 0; index < size / sizeof(NativeProcessor); ++index) processors[index] = {group == 0 ? int64_t(epoch * 1000) : 0, int64_t(epoch * 1000), 0, 0, 0, 0};
+    *returned = extent == 1 ? size - 1 : extent == 2 ? size + ULONG(sizeof(NativeProcessor)) : size;
+    return LONG(0);
+  };
+  const auto topology = [&] { return groups; };
+  uint64_t idle = 0, total = 0; double usage = 0; std::vector<NativeProcessor> processors;
+  const bool initial = applyProcessorSample(readProcessorGroups(groups, query, topology), idle, total, usage, processors);
+  checks.emplace_back("cpu_queries_every_group_once", initial && processors.size() == 128 && visited == std::vector<WORD>{0, 1} && processors.front().idle == 1000 && processors.back().idle == 0);
+  const auto firstIdle = idle, firstTotal = total;
+  fail = true; epoch = 2;
+  const bool failed = !applyProcessorSample(readProcessorGroups(groups, query, topology), idle, total, usage, processors);
+  checks.emplace_back("cpu_group_failure_preserves_complete_baseline", failed && idle == firstIdle && total == firstTotal && processors.size() == 128);
+  fail = false; epoch = 3;
+  const bool recovered = applyProcessorSample(readProcessorGroups(groups, query, topology), idle, total, usage, processors);
+  checks.emplace_back("cpu_group_recovery_uses_matching_counter_interval", recovered && usage == 50 && idle == 192000 && total == 384000);
+  extent = 1; const bool partial = !readProcessorGroups(groups, query, topology); extent = 2;
+  checks.emplace_back("cpu_rejects_partial_and_oversized_group_results", partial && !readProcessorGroups(groups, query, topology));
+  extent = 0;
+  checks.emplace_back("cpu_rejects_topology_change_during_query", !readProcessorGroups(groups, query, [] { return std::vector<unsigned>{64, 32}; }));
+  const std::vector<unsigned> changed{64, 32};
+  const auto resized = readProcessorGroups(changed, query, [&] { return changed; });
+  checks.emplace_back("cpu_hot_added_or_removed_processors_resize_sample", processorCount(changed) == 96 && resized && resized->size() == 96);
+  {
+    auto previousGroups = groups; auto changedIdle = idle, changedTotal = total; double changedUsage = usage;
+    std::vector<std::array<uint64_t, 3>> coreBaseline(128, {100, 50, 10}); std::vector<NativeProcessor> changedProcessors;
+    const bool reset = updateProcessorTopology(changed, previousGroups, changedIdle, changedTotal, changedUsage, coreBaseline);
+    checks.emplace_back("cpu_topology_change_resets_all_cpu_baselines", reset && previousGroups == changed && changedIdle == 0 && changedTotal == 0 && changedUsage == 0 && coreBaseline.empty());
+    const bool established = applyProcessorSample(resized, changedIdle, changedTotal, changedUsage, changedProcessors);
+    checks.emplace_back("cpu_new_topology_starts_with_fresh_counter_interval", established && changedUsage == 0 && changedProcessors.size() == 96 && changedTotal == 288000);
+    const auto retainedTotal = changedTotal;
+    checks.emplace_back("cpu_stable_or_failed_topology_keeps_baseline", !updateProcessorTopology(changed, previousGroups, changedIdle, changedTotal, changedUsage, coreBaseline) && !updateProcessorTopology({}, previousGroups, changedIdle, changedTotal, changedUsage, coreBaseline) && changedTotal == retainedTotal);
+  }
+  auto invalid = processors; invalid.front().kernel = -1;
+  const auto beforeIdle = idle, beforeTotal = total; const auto beforeUsage = usage;
+  const bool negative = !applyProcessorSample(invalid, idle, total, usage, processors);
+  const std::vector<NativeProcessor> overflow(2, NativeProcessor{0, INT64_MAX, INT64_MAX, 0, 0, 0});
+  checks.emplace_back("cpu_rejects_invalid_and_overflowing_totals", negative && !processorTotals(overflow) && idle == beforeIdle && total == beforeTotal && usage == beforeUsage);
+  checks.emplace_back("cpu_counter_reset_starts_new_baseline", processorUsage(100, 200, idle, total) == 0 && idle == 100 && total == 200);
+  const auto nativeTopology = readProcessorTopology();
+  if (querySystemEx() && !nativeTopology.empty()) {
+    const auto native = readGroupProcessorData(nativeTopology);
+    checks.emplace_back("cpu_native_group_query_contract", native && native->size() == *processorCount(nativeTopology) && processorTotals(*native).has_value());
+  }
+  return checks;
+}
+#endif
 Sampler::Sampler(bool attribution, std::function<void()> startupNotification) : buffer(64 * 1024) {
   startupNotify = std::move(startupNotification);
   cpuInfo = readCpu(); memoryHardware = readMemoryHardware(); gpuDescriptors = readGpus();
+  processorGroups = readProcessorTopology();
   counters.add(L"idle", L"\\PhysicalDisk(*)\\% Idle Time");
   counters.add(L"diskRead", L"\\PhysicalDisk(*)\\Disk Read Bytes/sec");
   counters.add(L"diskWrite", L"\\PhysicalDisk(*)\\Disk Write Bytes/sec");
@@ -143,8 +262,12 @@ Sample Sampler::sample(bool startupVisible) {
 #ifdef TASKMGR_DIAGNOSTICS
   auto phase = started;
 #endif
+  const auto topology = readProcessorTopology();
+  const bool topologyChanged = updateProcessorTopology(topology, processorGroups, idle, total, cpuUsage, corePrevious);
+  if (topologyChanged) { cpuInfo = readCpu(); cachedResources.cores.clear(); cachedResources.interrupts = 0; }
+  if (const auto count = processorCount(topology)) cpuInfo.logical = *count;
   Sample result; result.cpuInfo = cpuInfo;
-  const bool refreshResources = resourcesAt == Time{} || started - resourcesAt >= std::chrono::seconds(1);
+  const bool refreshResources = topologyChanged || resourcesAt == Time{} || started - resourcesAt >= std::chrono::seconds(1);
   const double resourceElapsed = cachedResources.resourcesSampledAt == Time{} ? 0 : std::chrono::duration<double>(started - cachedResources.resourcesSampledAt).count();
   if (!refreshResources) {
     result.cpuSpeed = cachedResources.cpuSpeed; result.interrupts = cachedResources.interrupts;
@@ -185,7 +308,7 @@ Sample Sampler::sample(bool startupVisible) {
     auto [found, inserted] = previous.try_emplace(process.id);
     if (!inserted && found->second.created == process.created && result.elapsed > 0) {
       const auto& old = found->second;
-      process.cpu = process.cpuTicks >= old.cpuTicks ? std::clamp(double(process.cpuTicks - old.cpuTicks) / (result.elapsed * 100000 * logical), 0.0, 100.0) : 0;
+      process.cpu = !topologyChanged && process.cpuTicks >= old.cpuTicks ? std::clamp(double(process.cpuTicks - old.cpuTicks) / (result.elapsed * 100000 * logical), 0.0, 100.0) : 0;
       const double readRate = process.readBytes >= old.readBytes ? double(process.readBytes - old.readBytes) / result.elapsed : 0;
       const double writeRate = process.writeBytes >= old.writeBytes ? double(process.writeBytes - old.writeBytes) / result.elapsed : 0;
       process.ioRate = readRate + writeRate;
@@ -211,20 +334,28 @@ Sample Sampler::sample(bool startupVisible) {
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[0] = milliseconds(phase); phase = Clock::now();
 #endif
-  FILETIME currentIdle{}, kernel{}, user{};
-  if (GetSystemTimes(&currentIdle, &kernel, &user)) {
-    const uint64_t currentTotal = ticks(kernel) + ticks(user), idleTicks = ticks(currentIdle);
-    if (total && currentTotal > total && idleTicks >= idle) result.cpu = std::clamp(100.0 * (1.0 - double(idleTicks - idle) / double(currentTotal - total)), 0.0, 100.0);
-    total = currentTotal; idle = idleTicks;
+  std::vector<NativeProcessor> processors;
+  if (topology.size() > 1) {
+    applyProcessorSample(readGroupProcessorData(topology), idle, total, cpuUsage, processors);
+    // Keep the last complete sample if an Ex query is unavailable or a group fails;
+    // primary-group totals must never stand in for whole-machine activity.
+  } else if (topology.size() == 1) {
+    FILETIME currentIdle{}, kernel{}, user{};
+    if (GetSystemTimes(&currentIdle, &kernel, &user)) cpuUsage = processorUsage(ticks(currentIdle), ticks(kernel) + ticks(user), idle, total);
   }
+  result.cpu = cpuUsage;
   if (refreshResources) {
-  std::vector<NativeProcessor> processors(logical); ULONG returned = 0;
-  if (query(8, processors.data(), ULONG(processors.size() * sizeof(NativeProcessor)), &returned) >= 0) {
-    processors.resize(returned / sizeof(NativeProcessor)); corePrevious.resize(processors.size()); result.cores.resize(processors.size());
+  if (topology.size() == 1) {
+    processors.resize(logical); ULONG returned = 0; const ULONG size = ULONG(processors.size() * sizeof(NativeProcessor));
+    if (query(8, processors.data(), size, &returned) < 0 || returned != size || !processorTotals(processors)) processors.clear();
+  }
+  result.cores = cachedResources.cores; result.interrupts = cachedResources.interrupts;
+  if (!processors.empty()) {
+    corePrevious.resize(processors.size()); result.cores.assign(processors.size(), 0); result.interrupts = 0;
     double interruptTicks = 0, totalTicks = 0;
     for (size_t index = 0; index < processors.size(); ++index) {
       const auto& core = processors[index]; auto& old = corePrevious[index];
-      const uint64_t busy = uint64_t(core.kernel + core.user), idleTime = uint64_t(core.idle), extra = uint64_t(core.dpc + core.interrupt);
+      const uint64_t busy = uint64_t(core.kernel) + uint64_t(core.user), idleTime = uint64_t(core.idle), extra = uint64_t(core.dpc) + uint64_t(core.interrupt);
       if (old[0] && busy > old[0] && idleTime >= old[1]) { result.cores[index] = std::clamp(100.0 * (1.0 - double(idleTime - old[1]) / double(busy - old[0])), 0.0, 100.0); interruptTicks += double(extra - std::min(extra, old[2])); totalTicks += double(busy - old[0]); }
       old = {busy, idleTime, extra};
     }

@@ -143,6 +143,8 @@ class Sampler {
   std::unordered_map<Identity, std::pair<double, std::wstring>, IdentityHash> cachedProcessGpu;
   Time resourcesAt{};
   uint64_t idle = 0, total = 0;
+  double cpuUsage = 0;
+  std::vector<unsigned> processorGroups;
   std::vector<std::array<uint64_t, 3>> corePrevious;
   CpuInfo cpuInfo;
   MemoryInfo memoryHardware;
@@ -185,6 +187,7 @@ std::vector<Entry> readSessions();
 StartupInventory readStartup(const std::function<void(const StartupInventory&)>& progress = {});
 #ifdef TASKMGR_DIAGNOSTICS
 std::vector<std::pair<std::string, bool>> startupTests();
+std::vector<std::pair<std::string, bool>> processorGroupTests();
 #endif
 std::wstring fullAccountName(const std::wstring& user);
 class Icons {
