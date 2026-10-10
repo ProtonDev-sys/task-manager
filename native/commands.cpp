@@ -4,6 +4,43 @@
 #include <windowsx.h>
 
 namespace taskmgr {
+static std::wstring expandRunFile(const std::wstring& file) {
+  const DWORD needed = ExpandEnvironmentStringsW(file.c_str(), nullptr, 0);
+  if (!needed) throw std::runtime_error(utf8(winerror()));
+  if (needed > 32768) throw std::runtime_error("The expanded program path is too long.");
+  std::wstring expanded(needed, L'\0');
+  const DWORD written = ExpandEnvironmentStringsW(file.c_str(), expanded.data(), needed);
+  if (!written) throw std::runtime_error(utf8(winerror()));
+  if (written > needed) throw std::runtime_error("The environment changed while preparing the command. Try again.");
+  expanded.resize(written - 1); return expanded;
+}
+RunCommand parseRunCommand(const std::wstring& command) {
+  size_t start = 0; while (start < command.size() && iswspace(command[start])) ++start;
+  if (start == command.size()) return {};
+  const auto text = std::wstring_view(command).substr(start);
+  auto result = [&](std::wstring file, size_t end) {
+    while (end < text.size() && iswspace(text[end])) ++end;
+    return RunCommand{std::move(file), std::wstring(text.substr(end))};
+  };
+  if (text.front() == L'"') {
+    const auto close = text.find(L'"', 1);
+    if (close == text.npos) throw std::runtime_error("Add a closing quotation mark after the program path.");
+    return result(expandRunFile(std::wstring(text.substr(1, close - 1))), close + 1);
+  }
+  auto regularFile = [](const std::wstring& file) { const DWORD flags = GetFileAttributesW(file.c_str()); return flags != INVALID_FILE_ATTRIBUTES && !(flags & FILE_ATTRIBUTE_DIRECTORY); };
+  size_t first = text.size();
+  // Keep the boundary in the original input: expansion and an inferred .exe
+  // extension can change the file length without changing its arguments.
+  for (size_t end = 0; end <= text.size(); ++end) {
+    if (end < text.size() && !iswspace(text[end])) continue;
+    if (first == text.size()) first = end;
+    auto candidate = expandRunFile(std::wstring(text.substr(0, end)));
+    if (regularFile(candidate)) return result(std::move(candidate), end);
+    if (regularFile(candidate + L".exe")) return result(candidate + L".exe", end);
+    if (end == text.size() && GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) return result(std::move(candidate), end);
+  }
+  return result(expandRunFile(std::wstring(text.substr(0, first))), first);
+}
 struct RunInput { std::wstring text; bool elevated = false; };
 static INT_PTR CALLBACK runProcedure(HWND dialog, UINT message, WPARAM word, LPARAM data) {
   auto input = reinterpret_cast<RunInput*>(GetWindowLongPtrW(dialog, DWLP_USER));
@@ -54,7 +91,7 @@ void Application::asynchronous(std::function<std::wstring()> operation) {
   if (actionWorker.joinable()) actionWorker.join();
   actionWorker = std::thread([this, operation = std::move(operation)] {
     ActionResult result; const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    try { result.report = operation(); } catch (const std::exception& error) { const auto text = error.what(); const int needed = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0); if (needed > 0) { result.error.resize(size_t(needed)); MultiByteToWideChar(CP_UTF8, 0, text, -1, result.error.data(), needed); result.error.resize(size_t(needed - 1)); } }
+    try { result.report = operation(); } catch (const std::exception& error) { result.error = fromUtf8(error.what()); }
     if (SUCCEEDED(initialized)) CoUninitialize();
     { std::lock_guard lock(actionMutex); actionResults.push_back(std::move(result)); } actionBusy = false; if (!stopping) PostMessageW(window, ActionMessage, 0, 0);
   });
@@ -67,33 +104,29 @@ HWND Application::appWindow(const Process& process) const {
 void Application::runTask() {
   RunInput input;
   if (DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101), window, runProcedure, LPARAM(&input)) != IDOK || input.text.empty()) return;
-  std::wstring file, parameters;
-  if (input.text.front() == L'"') { const auto close = input.text.find(L'"', 1); file = input.text.substr(1, close == input.text.npos ? input.text.npos : close - 1); if (close != input.text.npos) parameters = input.text.substr(close + 1); }
-  else { const auto executable = commandExecutable(input.text); file = executable.empty() ? input.text : executable; parameters = input.text.size() > file.size() && lower(input.text).starts_with(lower(file)) ? input.text.substr(file.size()) : input.text.substr(std::min(input.text.size(), input.text.find(L' ') == input.text.npos ? input.text.size() : input.text.find(L' '))); }
-  while (!parameters.empty() && parameters.front() == L' ') parameters.erase(parameters.begin());
-  SHELLEXECUTEINFOW execute{sizeof(execute)}; execute.fMask = SEE_MASK_FLAG_NO_UI; execute.hwnd = window; execute.lpVerb = input.elevated ? L"runas" : nullptr; execute.lpFile = file.c_str(); execute.lpParameters = parameters.empty() ? nullptr : parameters.c_str(); execute.nShow = SW_SHOWNORMAL;
-  if (!ShellExecuteExW(&execute)) { const DWORD error = GetLastError(); if (error != ERROR_CANCELLED) MessageBoxW(window, (L"Windows cannot find '" + file + L"'. Make sure you typed the name correctly, and then try again.\n\n" + winerror(error)).c_str(), L"Create new task", MB_OK | MB_ICONERROR); }
+  RunCommand launch;
+  try { launch = parseRunCommand(input.text); }
+  catch (const std::exception& error) {
+    MessageBoxW(window, fromUtf8(error.what()).c_str(), L"Create new task", MB_OK | MB_ICONERROR); return;
+  }
+  if (launch.file.empty()) return;
+  SHELLEXECUTEINFOW execute{sizeof(execute)}; execute.fMask = SEE_MASK_FLAG_NO_UI; execute.hwnd = window; execute.lpVerb = input.elevated ? L"runas" : nullptr; execute.lpFile = launch.file.c_str(); execute.lpParameters = launch.parameters.empty() ? nullptr : launch.parameters.c_str(); execute.nShow = SW_SHOWNORMAL;
+  if (!ShellExecuteExW(&execute)) { const DWORD error = GetLastError(); if (error != ERROR_CANCELLED) MessageBoxW(window, (L"Windows cannot find '" + launch.file + L"'. Make sure you typed the name correctly, and then try again.\n\n" + winerror(error)).c_str(), L"Create new task", MB_OK | MB_ICONERROR); }
 }
 void Application::endSelected(bool tree) {
   const auto row = selectedRow(); if (!row || !current) return;
-  const auto members = selectedMembers(); if (members.empty()) return;
+  const auto targets = selectedMembers(tree); if (targets.empty()) return;
   const auto name = cell(*row, 0);
   if (selectedTab == DetailsTab) {
     if (tree ? !confirm(L"Do you want to end the process tree of “" + name + L"”?", L"If open programs or processes are associated with this process tree, they will close and you will lose any unsaved data. If you end a system process, it might result in system instability. Are you sure you want to continue?", L"End process tree")
              : !confirm(L"Do you want to end “" + name + L"”?", L"If an open program is associated with this process, it will close and you will lose any unsaved data. If you end a system process, it might result in system instability. Are you sure you want to continue?", L"End process")) return;
   } else if (row->category == 2 && !confirm(L"Do you want to end the system process “" + name + L"”?", L"Ending this process will cause Windows to become unusable or shut down, causing you to lose any unsaved data. Are you sure you want to continue?", L"Shut down")) return;
-  std::vector<Process> targets;
-  for (const auto member : members) {
-    if (!tree) { targets.push_back(*member); continue; }
-    for (const auto& identity : processTree(current->processes, *member)) for (const auto& process : current->processes) if (process.id == identity.pid && process.created == identity.created) targets.push_back(process);
-  }
-  asynchronous([targets] { std::wstring failures; for (const auto& process : targets) { try { processAction(process, Action::End); } catch (const std::exception& error) { if (failures.empty() || targets.size() == 1) failures = std::wstring(error.what(), error.what() + strlen(error.what())); } } if (!failures.empty()) throw std::runtime_error(utf8(L"Unable to terminate process.\n\n" + failures)); return std::wstring{}; });
+  asynchronous([targets] { std::wstring failures; for (const auto& process : targets) { try { processAction(process, Action::End); } catch (const std::exception& error) { if (failures.empty() || targets.size() == 1) failures = fromUtf8(error.what()); } } if (!failures.empty()) throw std::runtime_error(utf8(L"Unable to terminate process.\n\n" + failures)); return std::wstring{}; });
 }
 void Application::command(int id) {
   if (tabQueued && pendingTab >= 0) { const int tab = pendingTab; pendingTab = -1; SendMessageW(tabs, WM_SETREDRAW, TRUE, 0); selectTab(tab); InvalidateRect(tabs, nullptr, FALSE); }
   const auto row = selectedRow(); const auto process = selectedProcess();
-  const Entry* entry = nullptr;
-  if (row && current && row->entry >= 0) { const auto& entries = selectedTab == StartupTab ? current->startup->entries : selectedTab == UsersTab ? current->sessions : current->services; if (size_t(row->entry) < entries.size()) entry = &entries[size_t(row->entry)]; }
+  const auto entry = selectedEntry();
   if (id >= ColumnId && id < ColumnId + 64) {
     const int column = id - ColumnId; const auto defs = definitions(selectedTab);
     if (column == 0 || size_t(column) >= defs.size() || compact || selectedTab == PerformanceTab) return;
@@ -154,9 +187,7 @@ void Application::command(int id) {
       if (enabled && !confirm(L"Turn on Efficiency mode?", L"This lowers the selected process priority and requests power-efficient scheduling. It can make that application less responsive. It does not limit CPU usage. Child processes are not changed.", L"Turn on Efficiency mode")) return;
       const auto target = *process; asynchronous([target, enabled] { efficiencyAction(target, enabled); return std::wstring{}; });
     } catch (const std::exception& error) {
-      const auto message = error.what(); const int length = MultiByteToWideChar(CP_UTF8, 0, message, -1, nullptr, 0); std::wstring text(size_t(std::max(1, length)), L'\0');
-      if (length > 0) MultiByteToWideChar(CP_UTF8, 0, message, -1, text.data(), length);
-      MessageBoxW(window, text.c_str(), L"Efficiency mode unavailable", MB_OK | MB_ICONERROR);
+      MessageBoxW(window, fromUtf8(error.what()).c_str(), L"Efficiency mode unavailable", MB_OK | MB_ICONERROR);
     }
     return;
   }
@@ -168,7 +199,7 @@ void Application::command(int id) {
   }
   case SwitchTo: case BringToFront: case MinimizeWindow: case MaximizeWindow: {
     HWND target = row && row->kind == RowKind::Window && IsWindow(row->window) ? row->window : nullptr;
-    if (!target) for (const auto member : selectedMembers()) if ((target = appWindow(*member)) != nullptr) break;
+    if (!target) for (const auto& member : selectedMembers()) if ((target = appWindow(member)) != nullptr) break;
     if (!target) return;
     if (id == MinimizeWindow) { ShowWindow(target, SW_MINIMIZE); return; }
     if (id == MaximizeWindow) { ShowWindow(target, SW_MAXIMIZE); return; }
@@ -227,7 +258,7 @@ void Application::command(int id) {
     const auto target = *process; const auto action = choices[id - PriorityRealtime]; asynchronous([target, action] { processAction(target, action); return std::wstring{}; }); return;
   }
   case ServiceStart: case ServiceStop: case ServiceRestart: {
-    const Entry* service = entry; if (!service && row && row->kind == RowKind::Service && current) { const auto key = row->key.substr(2); for (const auto& item : current->services) if (item.key == key) service = &item; }
+    const Entry* service = entry ? &*entry : nullptr; if (!service && row && row->kind == RowKind::Service && current) { const auto key = row->key.substr(2); for (const auto& item : current->services) if (item.key == key) service = &item; }
     if (!service) return; const auto target = *service; const int action = id - ServiceStart; asynchronous([target, action] { serviceAction(target, action); return std::wstring{}; }); return;
   }
   case OpenServices: ShellExecuteW(window, nullptr, L"services.msc", nullptr, nullptr, SW_SHOWNORMAL); return;
@@ -241,7 +272,8 @@ void Application::command(int id) {
   }
   case Disconnect: case SignOff: {
     if (!entry || selectedTab != UsersTab) return;
-    if (!confirm(id == SignOff ? L"Are you sure you want to sign off " + entry->cells[0] + L"?" : L"Are you sure you want to disconnect " + entry->cells[0] + L"?", id == SignOff ? L"Any unsaved data from this user's open programs might be lost." : L"The user's session will remain signed in, and their programs will keep running.", id == SignOff ? L"Sign off user" : L"Disconnect user")) return;
+    const auto user = accountName(entry->cells[0], entry->accountDomain);
+    if (!confirm(id == SignOff ? L"Are you sure you want to sign off " + user + L"?" : L"Are you sure you want to disconnect " + user + L"?", id == SignOff ? L"Any unsaved data from this user's open programs might be lost." : L"The user's session will remain signed in, and their programs will keep running.", id == SignOff ? L"Sign off user" : L"Disconnect user")) return;
     const auto target = *entry; const bool logoff = id == SignOff; asynchronous([target, logoff] { sessionAction(target, logoff); return std::wstring{}; }); return;
   }
   case ManageAccounts: ShellExecuteW(window, nullptr, L"control.exe", L"/name Microsoft.UserAccounts", nullptr, SW_SHOWNORMAL); return;
@@ -256,7 +288,7 @@ void Application::menu(POINT point) {
   auto separator = [&](HMENU target) { AppendMenuW(target, MF_SEPARATOR, 0, nullptr); };
   auto submenu = [&](HMENU target, const std::wstring& text) { HMENU child = CreatePopupMenu(); children.push_back(child); AppendMenuW(target, MF_POPUP, reinterpret_cast<UINT_PTR>(child), text.c_str()); return child; };
   const auto process = selectedProcess(); const auto members = selectedMembers();
-  HWND appTarget = row->kind == RowKind::Window ? row->window : nullptr; if (!appTarget) for (const auto member : members) if (member->app && (appTarget = appWindow(*member)) != nullptr) break;
+  HWND appTarget = row->kind == RowKind::Window ? row->window : nullptr; if (!appTarget) for (const auto& member : members) if (member.app && (appTarget = appWindow(member)) != nullptr) break;
   const bool path = process && !icons->get(*process).path.empty();
   if ((selectedTab == ProcessesTab || selectedTab == DetailsTab) && row->kind == RowKind::Process && process && process->id > 4 && process->id != GetCurrentProcessId()) {
     try { const auto policy = powerPolicy(*process); add(popup, EfficiencyId, L"&Efficiency mode", true, (policy.control & policy.state & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0); }
@@ -280,7 +312,7 @@ void Application::menu(POINT point) {
       add(networkMenu, NetworkValues, L"&Values"); add(networkMenu, NetworkPercents, L"&Percents"); CheckMenuRadioItem(networkMenu, NetworkValues, NetworkPercents, networkPercent ? NetworkPercents : NetworkValues, MF_BYCOMMAND);
     }
     separator(popup); add(popup, CreateDump, L"Create &dump file", process && row->kind != RowKind::Interrupts); separator(popup);
-    add(popup, GoToDetails, L"&Go to details", process != nullptr); add(popup, OpenLocation, L"&Open file location", path); add(popup, SearchOnline, L"S&earch online"); add(popup, Properties, L"Propert&ies", path);
+    add(popup, GoToDetails, L"&Go to details", process.has_value()); add(popup, OpenLocation, L"&Open file location", path); add(popup, SearchOnline, L"S&earch online"); add(popup, Properties, L"Propert&ies", path);
   } else if (selectedTab == UsersTab) {
     add(popup, Toggle, row->expanded ? L"Colla&pse" : L"Ex&pand"); add(popup, Disconnect, L"&Disconnect"); add(popup, SignOff, L"Sign o&ff"); separator(popup); add(popup, ManageAccounts, L"&Manage user accounts"); defaultItem = Toggle;
   } else if (selectedTab == DetailsTab) {

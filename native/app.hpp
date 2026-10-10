@@ -19,7 +19,7 @@ inline bool sameRowPaint(const Row& previous, const Row& next) {
   for (size_t index = 0; index < next.cells.size(); ++index) if (previous.cells[index].text != next.cells[index].text || previous.cells[index].heat != next.cells[index].heat) return false;
   return true;
 }
-struct ColumnDef { const wchar_t* title; int width; bool right, visible, heat; };
+struct ColumnDef { const wchar_t* title; int width; bool right, visible, heat; bool numeric = false; };
 struct PerfItem { std::wstring key, title, subtitle, value, description; COLORREF color; };
 struct ActionResult { std::wstring error, report; };
 constexpr int FewerId = 15, EndId = 14, LinkId = 18, HistoryLinkId = 19, ListId = 12, TabsId = 11, PerformanceId = 13;
@@ -106,6 +106,7 @@ private:
   std::mutex actionMutex;
   std::deque<ActionResult> actionResults;
   NOTIFYICONDATAW tray{sizeof(tray)};
+  UINT taskbarCreatedMessage = 0;
   bool sortQueued = false;
 #ifdef TASKMGR_DIAGNOSTICS
   Time published{}, firstSample{};
@@ -126,6 +127,7 @@ private:
   mutable unsigned performanceItemBuilds = 0;
   unsigned performancePaints = 0, performanceDetailPaints = 0;
   unsigned headerPaints = 0, columnGeometryCommits = 0, scrollbarPaints = 0;
+  std::function<bool(DWORD)> trayNotification;
   unsigned tabRequests = 0, tabCommits = 0;
   FILETIME cpuStartKernel{}, cpuStartUser{};
 #else
@@ -161,7 +163,9 @@ private:
   void setSummary(int value);
   void updateMenu(HMENU menu);
   void updateFooter();
-  void updateTray();
+  bool notifyTray(DWORD message);
+  void publishTray();
+  void updateTray(const Sample& sample);
   void paintWindow(HDC dc);
   void loadSettings();
   void saveSettings();
@@ -169,6 +173,8 @@ private:
   void captureColumns();
   void saveHistory();
   void loadHistory();
+  bool writeHistoryFile(const std::wstring& path) const;
+  void readHistoryFile(const std::wstring& path);
   void worker();
   void consume();
   void refresh(bool inventory = true) { { std::lock_guard lock(workerMutex); const auto now = Clock::now(); if (stopping || force || (refreshAt != Time{} && now - refreshAt < std::chrono::milliseconds(250))) return; refreshAt = now; force = true; forceInventory = inventory; } wake.notify_one(); }
@@ -199,9 +205,11 @@ private:
   std::wstring rowKey(int index) const { return index >= 0 && size_t(index) < rows.size() ? rows[size_t(index)].key : L""; }
   int selectedIndex() const { return ListView_GetNextItem(list, -1, LVNI_SELECTED); }
   const Row* selectedRow() const { const int index = selectedIndex(); return index >= 0 && size_t(index) < rows.size() ? &rows[size_t(index)] : nullptr; }
-  const Process* selectedProcess() const;
-  std::vector<const Process*> selectedMembers() const;
+  std::optional<Process> selectedProcess() const;
+  std::optional<Entry> selectedEntry() const;
+  std::vector<Process> selectedMembers(bool tree = false) const;
   void select(int index);
+  void skipHeading(int direction);
   void toggle(int index);
   void letter(wchar_t character);
   void copy();
@@ -232,9 +240,16 @@ private:
   // diagnostics
 #ifdef TASKMGR_DIAGNOSTICS
   void benchmarkTick();
+  bool verifyHistoryPersistence();
+  bool verifyTrayLifecycle();
+  bool verifyViewportRefresh();
   bool verifySorting();
+  bool verifyActionSnapshots();
+  bool verifyHeadingNavigation();
   bool verifyPerformanceHover();
+  bool verifyGraphPanels();
   bool verifyTabSwitching();
+  bool verifyHighContrast();
   void writeBenchmark();
   void screenshotTick();
 #endif

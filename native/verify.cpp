@@ -2,8 +2,217 @@
 #include "report.hpp"
 #include <dwmapi.h>
 #include <windowsx.h>
+#include <iterator>
 
 namespace taskmgr {
+bool Application::verifyActionSnapshots() {
+  const auto savedSample = current; const int savedTab = selectedTab, savedSelection = selectedIndex(), savedTop = ListView_GetTopIndex(list);
+  const bool savedRebuilding = rebuilding, wasVisible = (GetWindowLongPtrW(list, GWL_STYLE) & WS_VISIBLE) != 0;
+  rebuilding = true;
+  auto savedRows = std::move(rows);
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  SendMessageW(list, WM_SETREDRAW, FALSE, 0);
+  auto sample = std::make_shared<Sample>(); sample->processes.resize(3);
+  sample->processes[0].id = 900001; sample->processes[0].created = 100; sample->processes[0].name = L"Original process";
+  sample->processes[1].id = 900002; sample->processes[1].parent = 900001; sample->processes[1].created = 101;
+  sample->processes[2].id = 900003; sample->processes[2].parent = 900001; sample->processes[2].created = 99;
+  current = sample; selectedTab = DetailsTab;
+  Row row; row.key = L"action-fixture"; row.process = 0; row.members = {0}; rows = {row};
+  ListView_SetItemCountEx(list, 1, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL); select(0);
+  const auto process = selectedProcess(); const auto members = selectedMembers(); const auto tree = selectedMembers(true);
+  rows[0].kind = RowKind::Window; rows[0].members.clear();
+  const auto windowMembers = selectedMembers();
+  rows[0].process = -1; check(selectedMembers().empty(), "action-window-without-owner-has-no-target"); rows[0].process = 0;
+  auto inventory = std::make_shared<ServiceInventory>(); Entry user; user.key = L"original-session"; user.session = 123; user.cells = {L"Original user"}; inventory->sessions = {user};
+  sample->inventory = inventory; sample->sessions = inventory->sessions;
+  selectedTab = UsersTab; rows[0].kind = RowKind::User; rows[0].entry = 0;
+  const auto session = selectedEntry();
+  auto startup = std::make_shared<StartupInventory>(); Entry item; item.key = L"original-startup"; item.enabled = true; item.path = L"C:\\Fixture\\original.exe"; startup->entries = {item}; sample->startup = startup;
+  selectedTab = StartupTab; const auto startupEntry = selectedEntry();
+  item.key = L"original-service"; inventory->services = {item}; sample->services = inventory->services;
+  selectedTab = ServicesTab; const auto service = selectedEntry();
+
+  // Simulate a refresh and selection change while a confirmation dialog is open.
+  // Reuse the old fixture storage as well, so borrowed references fail deterministically.
+  current = std::make_shared<Sample>(); rows[0].key = L"replacement-selection";
+  sample->processes[0].created = 200; sample->processes[0].name = L"Reused PID";
+  sample->processes[1].id = 900004; inventory->sessions[0].session = 456; inventory->sessions[0].cells[0] = L"Replacement user";
+  startup->entries[0].enabled = false; startup->entries[0].path = L"C:\\Fixture\\replacement.exe"; inventory->services[0].key = L"replacement-service";
+  check(process && process->id == 900001 && process->created == 100 && process->name == L"Original process", "action-process-keeps-confirmed-identity");
+  check(members.size() == 1 && members[0].id == 900001 && members[0].created == 100, "action-members-own-process-snapshots");
+  check(windowMembers.size() == 1 && windowMembers[0].id == 900001 && windowMembers[0].created == 100, "action-window-targets-owning-process-snapshot");
+  check(tree.size() == 2 && tree[0].id == 900002 && tree[1].id == 900001 && tree[1].created == 100, "action-tree-keeps-original-descendants");
+  check(session && session->session == 123 && session->cells[0] == L"Original user", "action-session-keeps-confirmed-target");
+  check(startupEntry && startupEntry->enabled && startupEntry->path == L"C:\\Fixture\\original.exe", "action-startup-entry-owns-snapshot");
+  check(service && service->key == L"original-service", "action-service-entry-owns-snapshot");
+  rows[0].kind = RowKind::Window;
+  check(!selectedProcess() && !selectedEntry() && selectedMembers().empty(), "action-stale-selection-has-no-target");
+
+  sample = std::make_shared<Sample>(); sample->processes.resize(5000);
+  Row group; group.kind = RowKind::Group; group.key = L"large-action-group";
+  for (size_t index = 0; index < sample->processes.size(); ++index) {
+    auto& member = sample->processes[index]; member.id = DWORD(900000 + index); member.parent = index ? member.id - 1 : 0; member.created = 1000 + index;
+    group.members.push_back(int(sample->processes.size() - index - 1));
+  }
+  current = sample; selectedTab = ProcessesTab; rows = {std::move(group)}; select(0);
+  const auto groupedTree = selectedMembers(true);
+  bool completeGroup = groupedTree.size() == sample->processes.size();
+  for (size_t index = 0; completeGroup && index < groupedTree.size(); ++index) completeGroup = groupedTree[index].id == sample->processes[groupedTree.size() - index - 1].id;
+  check(completeGroup, "action-group-tree-complete-unique-and-children-first");
+  sample->processes.clear();
+  check(groupedTree.size() == 5000 && groupedTree.front().created == 5999 && groupedTree.back().created == 1000, "action-group-tree-owns-large-snapshot");
+
+  current = savedSample; selectedTab = savedTab; rows = std::move(savedRows);
+  ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+  ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  if (savedSelection >= 0) select(savedSelection);
+  ListView_Scroll(list, 0, (savedTop - ListView_GetTopIndex(list)) * rowHeight());
+  SendMessageW(list, WM_SETREDRAW, TRUE, 0);
+  if (!wasVisible) ShowWindow(list, SW_HIDE);
+  rebuilding = savedRebuilding;
+  return passed;
+}
+bool Application::verifyHistoryPersistence() {
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  auto saved = std::move(usage);
+  struct Restore { decltype(usage)& target; decltype(usage)& original; ~Restore() { target = std::move(original); } } restore{usage, saved};
+  wchar_t temporary[MAX_PATH]{};
+  const DWORD length = GetTempPathW(MAX_PATH, temporary);
+  const auto directory = length > 0 && length < MAX_PATH ? std::wstring(temporary) + L"TaskManagerHistory-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) : L"";
+  const bool created = !directory.empty() && CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
+  check(created, "history-fixture-directory"); if (!created) return false;
+  const auto path = directory + L"\\history.tsv";
+  struct Cleanup { std::wstring directory, path; ~Cleanup() { DeleteFileW((path + L".tmp").c_str()); DeleteFileW(path.c_str()); RemoveDirectoryW(path.c_str()); RemoveDirectoryW(directory.c_str()); } } cleanup{directory, path};
+  const std::wstring key = L"\u5de5\u5177.exe", name = L"Caf\u00e9 \U0001f680\tTabbed\r\nsecond line\\literal", executablePath = L"C:\\\u7528\u6237\\M\u00fcnchen\\\u5de5\u5177.exe";
+  usage.clear(); usage[key] = {name, executablePath, 123456789, true}; usage[L"empty.exe"] = {L"", L"", 0, false};
+  check(writeHistoryFile(path), "history-unicode-write");
+  {
+    std::ifstream input{std::filesystem::path(path), std::ios::binary}; const std::string bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    check(bytes.find("\xe5\xb7\xa5\xe5\x85\xb7.exe") != std::string::npos && bytes.find("\xf0\x9f\x9a\x80") != std::string::npos, "history-explicit-utf8-bytes");
+    check(std::count(bytes.begin(), bytes.end(), '\n') == 3, "history-metadata-newlines-escaped");
+  }
+  usage.clear(); readHistoryFile(path);
+  const auto found = usage.find(key), empty = usage.find(L"empty.exe");
+  check(usage.size() == 2 && found != usage.end() && found->second.name == name && found->second.path == executablePath && found->second.ticks == 123456789 && found->second.app, "history-unicode-round-trip");
+  check(empty != usage.end() && empty->second.name.empty() && empty->second.path.empty() && empty->second.ticks == 0 && !empty->second.app, "history-empty-fields-round-trip");
+  {
+    std::ofstream legacy{std::filesystem::path(path), std::ios::binary};
+    legacy << "legacy.exe\t42\tLegacy app\tC:\\Program Files\\Legacy\\tool.exe\t1\r\nold.exe\t7\tOld app\r\n";
+  }
+  usage.clear(); readHistoryFile(path);
+  const auto legacy = usage.find(L"legacy.exe"), old = usage.find(L"old.exe");
+  check(usage.size() == 2 && legacy != usage.end() && legacy->second.path == L"C:\\Program Files\\Legacy\\tool.exe" && legacy->second.ticks == 42 && legacy->second.app && old != usage.end() && old->second.path.empty() && old->second.ticks == 7, "history-legacy-ascii-compatible");
+  usage.clear(); check(writeHistoryFile(path), "history-invalid-fixture-header");
+  {
+    std::ofstream malformed{std::filesystem::path(path), std::ios::binary | std::ios::app};
+    malformed << "\xff.exe\t1\tBad UTF-8\t\t0\nnegative.exe\t-1\tNegative\t\t0\npartial.exe\t12x\tPartial\t\t0\nescape.exe\t1\tBad\\q\t\t0\ngood.exe\t9\tGood\t\t1\n";
+  }
+  readHistoryFile(path);
+  check(usage.size() == 1 && usage.contains(L"good.exe") && usage.at(L"good.exe").ticks == 9, "history-malformed-records-skipped");
+  const bool blocked = DeleteFileW(path.c_str()) && CreateDirectoryW(path.c_str(), nullptr);
+  check(blocked, "history-rename-failure-fixture");
+  if (blocked) {
+    check(!writeHistoryFile(path), "history-rename-failure-reported");
+    std::error_code error;
+    check(!std::filesystem::exists(std::filesystem::path(path + L".tmp"), error) && !error && std::filesystem::is_directory(std::filesystem::path(path), error) && !error, "history-rename-failure-cleans-owned-temporary");
+  }
+  return passed;
+}
+bool Application::verifyTrayLifecycle() {
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  // This fixture has no window, sampler or persistent files. Intercept every
+  // notification so only its owned GDI objects are created, never shell icons.
+  Application fixture(RunOptions{});
+  std::vector<DWORD> messages; bool acceptModify = true, acceptAdd = true;
+  fixture.trayNotification = [&](DWORD message) { messages.push_back(message); return message == NIM_ADD ? acceptAdd : acceptModify; };
+  fixture.current = std::make_shared<Sample>(); fixture.current->cpu = 10;
+  fixture.pending = std::make_shared<Sample>(); fixture.pending->cpu = 75; fixture.pending->memory.total = 100; fixture.pending->memory.available = 40;
+  const auto displayed = fixture.current, newest = fixture.pending;
+  fixture.minimized = true; fixture.notification = true; fixture.consume();
+  check(fixture.trayAdded && fixture.trayLevel == 11 && std::wstring_view(fixture.tray.szTip).starts_with(L"CPU: 75%\nMemory: 60%"), "minimized-tray-uses-new-sample");
+  check(messages == std::vector<DWORD>{NIM_ADD} && !fixture.notification, "minimized-tray-acknowledges-notification");
+  check(fixture.current == displayed && fixture.pending == newest && fixture.fullRebuilds == 0 && fixture.updates == 0 && fixture.histories.empty() && fixture.usage.empty(), "minimized-tray-retains-display-snapshot-without-rebuilding");
+  messages.clear(); acceptModify = acceptAdd = false;
+  fixture.pending = std::make_shared<Sample>(); fixture.pending->cpu = 25;
+  const auto following = fixture.pending; fixture.notification = true; fixture.consume();
+  check(messages == std::vector<DWORD>{NIM_MODIFY, NIM_ADD} && !fixture.trayAdded && fixture.trayLevel == 4 && std::wstring_view(fixture.tray.szTip).starts_with(L"CPU: 25%"), "tray-notification-failure-keeps-new-meter");
+  check(fixture.current == displayed && fixture.pending == following && !fixture.notification, "minimized-tray-keeps-latest-pending-snapshot");
+  messages.clear(); acceptAdd = true; fixture.interval = 0; fixture.publishTray();
+  check(fixture.trayAdded && messages == std::vector<DWORD>{NIM_ADD} && fixture.pending == following && !fixture.force && fixture.interval == 0, "paused-tray-retry-does-not-refresh-sample");
+  messages.clear(); fixture.closing = true; fixture.publishTray();
+  check(messages.empty(), "closing-tray-does-not-register-again");
+
+  // Verify the actual registered-message and timer routes on this app's hidden
+  // test window. Its tray callback is intercepted for the entire scope.
+  auto savedCallback = std::move(trayNotification); const bool savedAdded = trayAdded; const int savedInterval = interval.load();
+  struct Restore {
+    std::function<bool(DWORD)>& callback; std::function<bool(DWORD)>& original;
+    bool& added; bool oldAdded; std::atomic<int>& interval; int oldInterval; std::condition_variable& wake;
+    ~Restore() { callback = std::move(original); added = oldAdded; interval = oldInterval; wake.notify_one(); }
+  } restore{trayNotification, savedCallback, trayAdded, savedAdded, interval, savedInterval, wake};
+  messages.clear(); bool available = false;
+  trayNotification = [&](DWORD message) { messages.push_back(message); return available; };
+  const auto sampleBefore = current; const unsigned rebuildsBefore = fullRebuilds;
+  const std::wstring tipBefore = tray.szTip; const HICON iconBefore = tray.hIcon;
+  trayAdded = true; interval = 0;
+  check(taskbarCreatedMessage != 0, "taskbar-created-message-registered");
+  if (taskbarCreatedMessage) {
+    SendMessageW(window, taskbarCreatedMessage, 0, 0);
+    check(messages == std::vector<DWORD>{NIM_ADD} && !trayAdded, "taskbar-created-readds-lost-icon");
+    messages.clear(); available = true; SendMessageW(window, WM_TIMER, 1, 0);
+    check(messages == std::vector<DWORD>{NIM_ADD} && trayAdded, "taskbar-created-retries-failed-registration");
+    check(current == sampleBefore && fullRebuilds == rebuildsBefore && interval == 0 && tray.szTip == tipBefore && tray.hIcon == iconBefore, "paused-taskbar-recovery-retains-meter-and-display");
+  }
+  return passed;
+}
+bool Application::verifyViewportRefresh() {
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  const auto savedSample = current; const int savedTab = selectedTab, savedColumnsTab = columnsTab, savedSort = sortColumn[DetailsTab];
+  const bool savedDirection = ascending[DetailsTab], savedCompact = compact, savedSortQueued = sortQueued;
+  const int savedTop = ListView_GetTopIndex(list), savedSelection = selectedIndex(), savedFocused = ListView_GetNextItem(list, -1, LVNI_FOCUSED);
+  const int savedOrderedTab = orderedTab, savedOrderedColumn = orderedColumn; const bool savedOrderedAscending = orderedAscending;
+  const HWND savedFocus = GetFocus();
+  auto savedRows = std::move(rows), savedSearchRows = std::move(searchRows); auto savedSearch = std::move(searchText);
+  rows.clear(); searchRows.clear(); searchText.clear(); compact = false; selectedTab = DetailsTab;
+  auto sample = std::make_shared<Sample>(); sample->processes.resize(256);
+  for (size_t index = 0; index < sample->processes.size(); ++index) {
+    // PID zero prevents metadata requests; distinct creation stamps give anonymous row identities.
+    auto& process = sample->processes[index]; process.created = uint64_t(index) + 1;
+    process.name = L"Viewport fixture " + std::to_wstring(index); process.cpu = double(index) / 3;
+  }
+  current = sample; sortColumn[DetailsTab] = 5; ascending[DetailsTab] = true; sortQueued = false; columns(); layout(); rebuild();
+  select(10); SendMessageW(list, WM_VSCROLL, SB_TOP, 0); ListView_Scroll(list, 0, rowHeight() * 80);
+  const int top = ListView_GetTopIndex(list); const auto selected = rowKey(selectedIndex());
+  check(top > 10 && !selected.empty(), "viewport-fixture-selection-outside-view");
+  sample->processes[10].cpu = 99; rebuild();
+  check(rowKey(selectedIndex()) == selected && selectedIndex() == 255, "numeric-refresh-retains-selected-identity-at-new-rank");
+  check(ListView_GetTopIndex(list) == top, "numeric-refresh-does-not-scroll-to-lower-rank");
+  sample->processes[10].cpu = 0; rebuild();
+  check(rowKey(selectedIndex()) == selected && selectedIndex() <= 1, "numeric-refresh-retains-selected-identity-at-top");
+  check(ListView_GetTopIndex(list) == top, "numeric-refresh-does-not-scroll-to-upper-rank");
+  select(200);
+  check(ListView_GetTopIndex(list) <= 200 && ListView_GetTopIndex(list) + ListView_GetCountPerPage(list) >= 200, "explicit-selection-still-scrolls-into-view");
+  const auto explicitSelection = rowKey(selectedIndex()); ascending[DetailsTab] = false; rebuild(true);
+  check(ListView_GetTopIndex(list) == 0 && rowKey(selectedIndex()) == explicitSelection, "manual-sort-still-starts-at-top");
+  current = savedSample; sortColumn[DetailsTab] = savedSort; ascending[DetailsTab] = savedDirection; compact = savedCompact;
+  // Restore the retained table even when the caller was displaying Performance.
+  selectedTab = savedColumnsTab >= 0 ? savedColumnsTab : savedTab; columns(); rebuilding = true;
+  rows = std::move(savedRows); searchRows = std::move(savedSearchRows); searchText = std::move(savedSearch);
+  orderedTab = savedOrderedTab; orderedColumn = savedOrderedColumn; orderedAscending = savedOrderedAscending;
+  ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+  ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  if (savedSelection >= 0) ListView_SetItemState(list, savedSelection, LVIS_SELECTED, LVIS_SELECTED);
+  if (savedFocused >= 0) ListView_SetItemState(list, savedFocused, LVIS_FOCUSED, LVIS_FOCUSED);
+  ListView_Scroll(list, 0, (savedTop - ListView_GetTopIndex(list)) * rowHeight());
+  selectedTab = savedTab; rebuilding = false; layout(); updateFooter();
+  if (GetFocus() != savedFocus) SetFocus(savedFocus);
+  sortQueued = savedSortQueued; if (sortQueued) SetTimer(window, 3, 32, nullptr);
+  return passed;
+}
 bool Application::verifySorting() {
   verifyingSorting = true;
   const int savedTab = selectedTab; const bool savedGrouping = groupByType; const auto savedExpanded = expanded;
@@ -12,6 +221,9 @@ bool Application::verifySorting() {
   auto check = [&](bool result, const std::string& name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   const bool priorMeasured = measured; const unsigned priorTests = tests;
   benchmarkTick(); check(measured == priorMeasured && tests == priorTests, "benchmark-nested-tick-skipped");
+  check(verifyHistoryPersistence(), "history-persistence");
+  check(verifyTrayLifecycle(), "tray-lifecycle");
+  check(verifyViewportRefresh(), "viewport-refresh");
   {
     Row previous; previous.key = L"identity"; previous.cells = {{L"1.0%", 1.01, 0}};
     auto next = previous; next.cells[0].value = 1.04; next.process = 5;
@@ -21,6 +233,32 @@ bool Application::verifySorting() {
     next = previous; ++next.icon; check(!sameRowPaint(previous, next), "row-paint-detects-icon");
     next = previous; next.expanded = true; check(!sameRowPaint(previous, next), "row-paint-detects-expansion");
     next = previous; next.key = L"replacement"; check(!sameRowPaint(previous, next), "row-paint-detects-identity");
+  }
+  {
+    // Priority labels must follow their scheduler values in full and cached sorts.
+    const auto savedSample = current; const int originalTab = selectedTab, originalColumn = sortColumn[DetailsTab];
+    const bool originalDirection = ascending[DetailsTab], originalRebuilding = rebuilding; rebuilding = true;
+    const int previousOrderedTab = orderedTab, previousOrderedColumn = orderedColumn; const bool previousOrderedAscending = orderedAscending;
+    auto savedRows = std::move(rows); auto sample = std::make_shared<Sample>();
+    for (const LONG priority : {8, 24, 1, 13, 6, 10, 0}) { Process process; process.id = DWORD(900501 + sample->processes.size() * 4); process.created = 1; process.name = L"Priority fixture"; process.priority = priority; sample->processes.push_back(std::move(process)); }
+    current = sample; selectedTab = DetailsTab; sortColumn[DetailsTab] = 13;
+    const std::array<double, 7> values{0, 1, 6, 8, 10, 13, 24};
+    const std::array<std::wstring_view, 7> labels{L"N/A", L"Low", L"Below normal", L"Normal", L"Above normal", L"High", L"Realtime"};
+    auto priorityOrder = [&](const std::vector<Row>& items, bool direction) {
+      if (items.size() != values.size()) return false;
+      for (size_t index = 0; index < items.size(); ++index) { const size_t expected = direction ? index : values.size() - index - 1; if (items[index].cells[13].value != values[expected] || items[index].cells[13].text != labels[expected]) return false; }
+      return true;
+    };
+    for (const bool direction : {false, true}) {
+      ascending[DetailsTab] = direction; std::vector<Row> fixture; buildDetails(fixture);
+      check(priorityOrder(fixture, direction), "priority-full-sort-follows-scheduler-order");
+      rows = fixture; std::reverse(rows.begin(), rows.end()); orderedTab = -1; sortVisibleRows();
+      check(priorityOrder(rows, direction), "priority-cached-sort-follows-scheduler-order");
+      orderedTab = DetailsTab; orderedColumn = 13; orderedAscending = direction; ascending[DetailsTab] = !direction; sortVisibleRows();
+      check(priorityOrder(rows, !direction), "priority-cached-direction-reversal");
+    }
+    current = savedSample; selectedTab = originalTab; sortColumn[DetailsTab] = originalColumn; ascending[DetailsTab] = originalDirection; rows = std::move(savedRows); rebuilding = originalRebuilding;
+    orderedTab = previousOrderedTab; orderedColumn = previousOrderedColumn; orderedAscending = previousOrderedAscending;
   }
   {
     const auto savedSample = current;
@@ -38,14 +276,61 @@ bool Application::verifySorting() {
     servicesByProcess(); check(indexedServices.size() == 1 && indexedServices.contains(43) && indexedInventory == replacement, "service-index-refresh");
     current = savedSample; indexedServices.clear(); indexedInventory.reset();
   }
+  check(verifyActionSnapshots(), "action-target-snapshots");
   check(activity.size() == current->processes.size(), "activity-live-count");
   check(ImageList_GetImageCount(icons->images) >= 4, "stock-icons-present");
   HICON fallbackIcon = ImageList_GetIcon(icons->images, Icons::DefaultIcon, ILD_NORMAL);
   check(fallbackIcon != nullptr, "generic-process-icon-available");
   if (fallbackIcon) DestroyIcon(fallbackIcon);
   check(verifyPerformanceHover(), "performance-hover");
+  check(verifyGraphPanels(), "performance-graph-panels");
   check(verifyTabSwitching(), "tab-switching");
+  check(verifyHighContrast(), "high-contrast");
+  check(verifyHeadingNavigation(), "heading-navigation");
   for (const auto& process : current->processes) { const auto found = activity.find({process.id, process.created}); check(found != activity.end() && found->second.ticks == process.cpuTicks && found->second.seen == activityGeneration && std::isfinite(found->second.trend), "activity-live-identity"); }
+  {
+    // Group labels follow the busiest engine; samples without engine detail retain the legacy fallback.
+    const auto savedSample = current; const int originalTab = selectedTab; const bool originalRebuilding = rebuilding; rebuilding = true;
+    auto sample = std::make_shared<Sample>(); sample->processes.resize(3);
+    sample->processes[0].gpu = 30; sample->processes[0].gpuEngine = L"GPU 0 - 3D";
+    sample->processes[1].gpu = 25; sample->processes[1].gpuEngine = L"GPU 0 - Copy";
+    sample->processes[2].gpu = 40; sample->processes[2].gpuEngine = L"GPU 0 - Compute";
+    current = sample; selectedTab = ProcessesTab;
+    std::array<int, 3> members{0, 1, 2};
+    do {
+      Row row; row.kind = RowKind::Group; processCells(row, members);
+      check(row.cells[12].text == L"GPU 0 - Compute" && row.cells[11].value == 95, "gpu-group-legacy-fallback-uses-busiest-member-label");
+    } while (std::next_permutation(members.begin(), members.end()));
+    const auto setEngines = [&](size_t index, std::initializer_list<GpuEngineUsage> engines) {
+      auto usage = std::make_shared<ProcessGpu>(); usage->engines = engines;
+      for (const auto& engine : engines) if (engine.value > usage->value) { usage->value = engine.value; usage->engine = engine.label; }
+      auto& process = sample->processes[index]; process.gpu = std::min(100.0, usage->value); process.gpuEngine = usage->engine; process.gpuUsage = std::move(usage);
+    };
+    const std::wstring first = L"luid_1|_phys_0_eng_0|3D", second = L"luid_1|_phys_0_eng_1|Copy", third = L"luid_1|_phys_0_eng_2|Compute";
+    setEngines(0, {{first, L"GPU 0 - 3D", 30}}); setEngines(1, {{second, L"GPU 0 - Copy", 25}}); setEngines(2, {{third, L"GPU 0 - Compute", 40}});
+    do {
+      Row row; row.kind = RowKind::Group; processCells(row, members);
+      check(row.cells[11].value == 40 && row.cells[12].text == L"GPU 0 - Compute", "gpu-group-uses-busiest-actual-engine");
+    } while (std::next_permutation(members.begin(), members.end()));
+    sample->processes[1].gpuUsage.reset();
+    Row mixed; processCells(mixed, members); check(mixed.cells[11].value == 95 && mixed.cells[12].text == L"GPU 0 - Compute", "gpu-group-mixed-samples-use-whole-row-fallback");
+    sample->processes[1].gpu = 0;
+    Row inactive; processCells(inactive, members); check(inactive.cells[11].value == 40 && inactive.cells[12].text == L"GPU 0 - Compute", "gpu-group-idle-member-needs-no-engine-detail");
+    setEngines(0, {{first, L"GPU 0 - 3D", 25}, {second, L"GPU 0 - Copy", 45}}); setEngines(1, {{first, L"GPU 0 - 3D", 35}}); setEngines(2, {});
+    Row shared; processCells(shared, members); check(shared.cells[11].value == 60 && shared.cells[12].text == L"GPU 0 - 3D", "gpu-group-sums-shared-engine-including-nonpeak-contributions");
+    Row single; processCells(single, std::span<const int>(members).first(1)); check(single.cells[11].value == 45 && single.cells[12].text == L"GPU 0 - Copy", "gpu-single-process-retains-summary");
+    setEngines(0, {{first, L"GPU 0 - 3D", 70}}); setEngines(1, {{first, L"GPU 0 - 3D", 55}});
+    Row capped; processCells(capped, members); check(capped.cells[11].value == 100 && capped.cells[12].text == L"GPU 0 - 3D", "gpu-group-shared-engine-capped-at-one-hundred");
+    setEngines(0, {{first, L"GPU 0 - 3D", 30}}); setEngines(1, {{L"luid_2|_phys_0_eng_0|3D", L"GPU 1 - 3D", 40}});
+    Row adapters; processCells(adapters, members); check(adapters.cells[11].value == 40 && adapters.cells[12].text == L"GPU 1 - 3D", "gpu-group-distinguishes-logical-adapters");
+    setEngines(1, {{L"luid_1|_phys_1_eng_0|3D", L"GPU 0 - 3D", 40}});
+    Row physical; processCells(physical, members); check(physical.cells[11].value == 40 && physical.cells[12].text == L"GPU 0 - 3D", "gpu-group-distinguishes-linked-physical-adapters");
+    setEngines(1, {{L"luid_1|_phys_0_eng_1|3D", L"GPU 0 - 3D", 40}});
+    Row independent; processCells(independent, members); check(independent.cells[11].value == 40, "gpu-group-distinguishes-engines-with-the-same-type");
+    for (size_t index = 0; index < sample->processes.size(); ++index) setEngines(index, {});
+    Row idle; processCells(idle, members); check(idle.cells[12].text.empty() && idle.cells[11].value == 0, "gpu-idle-group-clears-engine-label");
+    current = savedSample; selectedTab = originalTab; rebuilding = originalRebuilding;
+  }
   for (const int tab : {ProcessesTab, UsersTab, DetailsTab, HistoryTab, StartupTab, ServicesTab}) {
     selectTab(tab);
     for (size_t index = 0; index < rows.size(); ++index) if (rows[index].kind != RowKind::Heading) { select(int(index)); break; }
@@ -114,6 +399,38 @@ bool Application::verifySorting() {
       }
     }
   }
+  {
+    // Anonymous packaged and desktop applications in separate logon sessions.
+    const auto savedSample = current; const int originalTab = selectedTab, originalSort = sortColumn[ProcessesTab];
+    const bool originalCompact = compact, originalGrouping = groupByType, originalDirection = ascending[ProcessesTab];
+    auto originalExpanded = std::move(expanded);
+    auto sample = std::make_shared<Sample>(); sample->processes.resize(7);
+    for (size_t index = 0; index < sample->processes.size(); ++index) {
+      auto& process = sample->processes[index]; process.id = DWORD(900101 + index * 4); process.created = 100 + index; process.name = L"Fixture.exe";
+      process.session = index < 2 ? 11 : index < 4 ? 22 : index == 4 ? 33 : 44; process.app = index == 0 || index == 2 || index == 5;
+      if (index < 4) { Metadata metadata; metadata.package = L"Anonymous.Package"; icons->setTestMetadata(process, std::move(metadata)); }
+    }
+    sample->processes[1].parent = sample->processes[0].id; sample->processes[3].parent = sample->processes[2].id;
+    sample->processes[4].parent = sample->processes[0].id; sample->processes[6].parent = sample->processes[5].id;
+    current = sample; selectedTab = ProcessesTab; compact = false; sortColumn[ProcessesTab] = 0; ascending[ProcessesTab] = true; expanded.clear();
+    for (const bool grouped : {false, true}) {
+      groupByType = grouped; std::vector<Row> fixture; buildProcesses(fixture);
+      unsigned roots = 0;
+      for (const auto& row : fixture) if (row.depth == 0 && (row.kind == RowKind::Process || row.kind == RowKind::Group)) {
+        ++roots; const DWORD session = sample->processes[size_t(row.process)].session;
+        check(std::all_of(row.members.begin(), row.members.end(), [&](int member) { return sample->processes[size_t(member)].session == session; }), "process-group-stays-in-one-session");
+        const std::vector<int> expected = session == 11 ? std::vector<int>{0, 1} : session == 22 ? std::vector<int>{2, 3} : session == 33 ? std::vector<int>{4} : std::vector<int>{5, 6};
+        check(row.members == expected, "process-group-keeps-same-session-members");
+        if (row.expandable) expanded.insert(row.key);
+      }
+      check(roots == 4, "process-groups-separate-package-and-parent-sessions");
+      fixture.clear(); buildProcesses(fixture);
+      check(std::count_if(fixture.begin(), fixture.end(), [](const Row& row) { return row.depth == 1 && row.kind == RowKind::Process; }) == 6, "process-group-expansion-keeps-members");
+      expanded.clear();
+    }
+    current = savedSample; selectedTab = originalTab; compact = originalCompact; groupByType = originalGrouping; sortColumn[ProcessesTab] = originalSort; ascending[ProcessesTab] = originalDirection; expanded = std::move(originalExpanded);
+    indexedServices.clear(); indexedInventory.reset(); icons->prune(activity);
+  }
   selectTab(DetailsTab);
   const auto cpuColumn = std::find(shown[DetailsTab].begin(), shown[DetailsTab].end(), 5);
   if (cpuColumn != shown[DetailsTab].end()) {
@@ -150,6 +467,17 @@ bool Application::verifySorting() {
     const int columnCount = Header_GetItemCount(header);
     check(columnCount <= int(originalOrder.size()) && ListView_GetColumnOrderArray(list, columnCount, originalOrder.data()), "column-original-order");
     for (int position = 0; position < columnCount; ++position) reversedOrder[size_t(position)] = originalOrder[size_t(columnCount - position - 1)];
+    check(!ListView_SetColumnOrderArray(list, columnCount, reversedOrder.data()), "column-order-keeps-name-first");
+    check(!Header_SetOrderArray(header, columnCount, reversedOrder.data()), "header-order-keeps-name-first");
+    HDITEMW moveName{}; moveName.mask = HDI_ORDER; moveName.iOrder = columnCount - 1;
+    check(!Header_SetItem(header, 0, &moveName), "column-name-cannot-move-away");
+    moveName.iOrder = 0; check(!Header_SetItem(header, 1, &moveName), "column-cannot-move-before-name");
+    NMHEADERW drag{}; drag.hdr = {header, 0, HDN_BEGINDRAG}; drag.iItem = 0;
+    check(SendMessageW(list, WM_NOTIFY, 0, LPARAM(&drag)) != 0, "column-name-drag-rejected");
+    drag.hdr.code = HDN_ENDDRAG; drag.iItem = 1; drag.pitem = &moveName;
+    check(SendMessageW(list, WM_NOTIFY, 0, LPARAM(&drag)) != 0, "column-drop-before-name-rejected");
+    reversedOrder[0] = 0;
+    for (int position = 1; position < columnCount; ++position) reversedOrder[size_t(position)] = originalOrder[size_t(columnCount - position)];
     check(ListView_SetColumnOrderArray(list, columnCount, reversedOrder.data()), "column-reorder");
     check(!geometryQueued && !columnGeometryDirty && std::equal(reversedOrder.begin(), reversedOrder.begin() + columnCount, displayOrder.begin()), "column-reorder-synchronous-geometry");
     ListView_SetColumnOrderArray(list, columnCount, originalOrder.data());
@@ -215,6 +543,61 @@ bool Application::verifySorting() {
     check(fullRebuilds == unchanged && rows.data() == unchangedRows, "idempotent-actions");
   } else check(false, "cpu-column-present");
   {
+    selectTab(DetailsTab); captureColumns(); columns(true);
+    const UINT originalDpi = dpi; RECT originalBounds{}; GetWindowRect(window, &originalBounds);
+    const auto originalShown = shown[DetailsTab], originalWidths = widths[DetailsTab];
+    const int originalSelection = selectedIndex(), originalTop = ListView_GetTopIndex(list);
+    const int originalSort = sortColumn[DetailsTab]; const bool originalDirection = ascending[DetailsTab];
+    sortColumn[DetailsTab] = 0; ascending[DetailsTab] = true; rebuild();
+    const int count = Header_GetItemCount(header); std::vector<int> order(size_t(count), 0), expectedIds, logicalWidths;
+    std::iota(order.begin(), order.end(), 0); if (count > 2) std::swap(order[1], order[2]);
+    for (int index = 0; index < count; ++index) { const int width = minimumColumnWidth(DetailsTab, columnAt(index)) + 80 + index * 8; logicalWidths.push_back(width); ListView_SetColumnWidth(list, index, scale(width)); }
+    for (const int index : order) expectedIds.push_back(originalShown[size_t(index)]);
+    check(ListView_SetColumnOrderArray(list, count, order.data()), "dpi-fixture-native-column-order");
+    if (rows.size() > 5) select(5);
+    SendMessageW(list, WM_VSCROLL, SB_TOP, 0); ListView_Scroll(list, 0, rowHeight() * 2);
+    const auto selected = rowKey(selectedIndex()), top = rowKey(ListView_GetTopIndex(list));
+    for (const UINT targetDpi : {originalDpi * 2, originalDpi}) {
+      SendMessageW(window, WM_DPICHANGED, MAKEWPARAM(targetDpi, targetDpi), LPARAM(&originalBounds));
+      check(dpi == targetDpi && shown[DetailsTab] == expectedIds, "dpi-change-preserves-column-order");
+      for (int position = 0; position < count; ++position) check(ListView_GetColumnWidth(list, position) == scale(logicalWidths[size_t(order[size_t(position)])]), "dpi-change-scales-live-column-widths");
+      int spacerWidth = 0, spacerHeight = 0;
+      check(ImageList_GetIconSize(rowSpacer, &spacerWidth, &spacerHeight) && spacerHeight == rowHeight() - 1, "dpi-change-updates-row-height");
+      check(rowKey(selectedIndex()) == selected && rowKey(ListView_GetTopIndex(list)) == top, "dpi-change-preserves-selection-and-scroll");
+    }
+    shown[DetailsTab] = originalShown; widths[DetailsTab] = originalWidths; sortColumn[DetailsTab] = originalSort; ascending[DetailsTab] = originalDirection; columns(true); rebuild();
+    ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED); if (originalSelection >= 0) select(originalSelection);
+    ListView_Scroll(list, 0, (originalTop - ListView_GetTopIndex(list)) * rowHeight());
+    HDC screen = GetDC(list), canvas = screen ? CreateCompatibleDC(screen) : nullptr;
+    HBITMAP bitmap = canvas ? CreateCompatibleBitmap(screen, 64, 40) : nullptr;
+    const auto previousBitmap = bitmap ? SelectObject(canvas, bitmap) : nullptr;
+    BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth = 16; info.bmiHeader.biHeight = -16; info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+    void* pixels = nullptr; HBITMAP source = screen ? CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+    HIMAGELIST fixtureImages = ImageList_Create(16, 16, ILC_COLOR32, 1, 1);
+    check(bitmap && source && pixels && fixtureImages, "dpi-icon-fixture-resources");
+    if (bitmap && source && pixels && fixtureImages) {
+      std::fill_n(static_cast<DWORD*>(pixels), 256, DWORD(0xff336699));
+      check(ImageList_Add(fixtureImages, source, nullptr) == 0, "dpi-icon-fixture-image");
+      const auto originalImages = std::exchange(icons->images, fixtureImages);
+      for (const int size : {8, 16, 32}) for (const int index : {0, 9999}) {
+        PatBlt(canvas, 0, 0, 64, 40, WHITENESS);
+        check(icons->draw(canvas, index, 1, 1, size), "dpi-icon-draw-and-fallback");
+        check(GetPixel(canvas, size - 1, size - 1) == RGB(51, 102, 153) && GetPixel(canvas, size + 1, size + 1) == RGB(255, 255, 255), "dpi-icon-fills-only-requested-size");
+      }
+      icons->images = originalImages;
+      if (!options.output.empty()) {
+        PatBlt(canvas, 0, 0, 64, 40, WHITENESS); icons->draw(canvas, Icons::DefaultIcon, 4, 12, 16); icons->draw(canvas, Icons::DefaultIcon, 28, 4, 32);
+        const std::filesystem::path output(options.output), capturePath = output.parent_path() / (output.stem().wstring() + L"-dpi-icons-16px-32px.png");
+        std::error_code error; if (!capturePath.parent_path().empty()) std::filesystem::create_directories(capturePath.parent_path(), error);
+        SelectObject(canvas, previousBitmap);
+        { Gdiplus::Bitmap capture(bitmap, nullptr); const CLSID png{0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}}; check(capture.Save(capturePath.c_str(), &png, nullptr) == Gdiplus::Ok, "dpi-icon-review-capture"); }
+        SelectObject(canvas, bitmap);
+      }
+    }
+    if (fixtureImages) ImageList_Destroy(fixtureImages); if (source) DeleteObject(source);
+    if (bitmap) { SelectObject(canvas, previousBitmap); DeleteObject(bitmap); } if (canvas) DeleteDC(canvas); if (screen) ReleaseDC(list, screen);
+  }
+  {
     selectTab(DetailsTab); rebuild(); const auto snapshot = current; const unsigned builds = fullRebuilds; const size_t unfiltered = rows.size();
     const bool savedSearchVisible = searchVisible; searchVisible = true;
     SendMessageW(window, WM_COMMAND, MAKEWPARAM(SearchId, EN_SETFOCUS), LPARAM(searchBox));
@@ -273,8 +656,79 @@ bool Application::verifySorting() {
   verifyingSorting = false;
   return passed;
 }
+bool Application::verifyHeadingNavigation() {
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  std::array<BYTE, 256> savedKeys{};
+  if (!GetKeyboardState(savedKeys.data())) { check(false, "heading-keyboard-state-readable"); return false; }
+  struct KeyboardRestore { std::array<BYTE, 256> keys; ~KeyboardRestore() { SetKeyboardState(keys.data()); } } keyboardRestore{savedKeys};
+  auto keys = savedKeys;
+  for (const int key : {VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_MENU, VK_LMENU, VK_RMENU}) keys[size_t(key)] = 0;
+  // SetKeyboardState affects this diagnostic thread only; no input is sent to other windows.
+  if (!SetKeyboardState(keys.data())) { check(false, "heading-keyboard-state-isolated"); return false; }
+  const HWND savedFocus = GetFocus();
+  const HWND fixture = CreateWindowExW(0, WC_LISTVIEWW, L"Heading navigation fixture", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL,
+    0, 0, scale(640), scale(360), window, nullptr, GetModuleHandleW(nullptr), nullptr);
+  if (!fixture) { check(false, "heading-list-fixture-created"); return false; }
+  const HWND savedList = list, savedHeader = header; const bool savedRebuilding = rebuilding;
+  auto savedRows = std::move(rows);
+  struct Restore { std::function<void()> run; ~Restore() { run(); } } restore{[&] {
+    RemoveWindowSubclass(fixture, listProcedure, 1);
+    list = savedList; header = savedHeader; rows = std::move(savedRows); rebuilding = savedRebuilding; columnGeometryDirty = true;
+    DestroyWindow(fixture); if (GetFocus() != savedFocus) SetFocus(savedFocus); updateFooter(); InvalidateRect(list, nullptr, FALSE); InvalidateRect(header, nullptr, FALSE);
+  }};
+  list = fixture; header = ListView_GetHeader(fixture); rebuilding = true; columnGeometryDirty = true;
+  LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH; column.pszText = const_cast<wchar_t*>(L"Fixture"); column.cx = scale(400);
+  ListView_InsertColumn(fixture, 0, &column);
+  const auto populate = [&](size_t count, bool headings) {
+    rows.assign(count, Row{});
+    for (size_t index = 0; index < rows.size(); ++index) { rows[index].key = L"heading-fixture:" + std::to_wstring(index); rows[index].cells.resize(24); rows[index].cells[0].text = L"Anonymous row " + std::to_wstring(index); }
+    if (headings) for (const size_t index : {size_t(0), size_t(2), size_t(3), size_t(6)}) rows[index].kind = RowKind::Heading;
+    ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL);
+    ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED); SendMessageW(list, WM_VSCROLL, SB_TOP, 0);
+  };
+  const auto press = [&](int from, WPARAM key) { select(from); SendMessageW(list, WM_KEYDOWN, key, 1); };
+  populate(7, true); SetFocus(list);
+  check(GetFocus() == list, "heading-fixture-has-thread-focus");
+  // Before installing our subclass, reproduce the old native key fall-through.
+  press(1, VK_HOME);
+  check(selectedIndex() == 0 && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == 0, "heading-native-home-selects-heading");
+  auto controlKeys = keys; controlKeys[VK_CONTROL] = controlKeys[VK_LCONTROL] = 0x80;
+  check(SetKeyboardState(controlKeys.data()) != FALSE, "heading-control-state-isolated");
+  press(1, VK_DOWN); const int nativeControlSelection = selectedIndex(), nativeControlFocus = ListView_GetNextItem(list, -1, LVNI_FOCUSED);
+  SetKeyboardState(keys.data());
+  populate(120, false); press(1, VK_NEXT);
+  const int nativePageSelection = selectedIndex(), nativePageTop = ListView_GetTopIndex(list);
+  check(nativePageSelection > 1 && nativePageSelection + 1 < int(rows.size()), "heading-native-page-fixture-range");
+  if (!SetWindowSubclass(fixture, listProcedure, 1, reinterpret_cast<DWORD_PTR>(this))) { check(false, "heading-list-subclass-installed"); return false; }
+  populate(7, true);
+  press(5, VK_HOME); check(selectedIndex() == 1, "heading-home-skips-first-heading");
+  press(1, VK_UP); check(selectedIndex() == 1, "heading-up-stops-at-first-process");
+  press(1, VK_DOWN); check(selectedIndex() == 4, "heading-down-skips-consecutive-headings");
+  press(4, VK_UP); check(selectedIndex() == 1, "heading-up-skips-consecutive-headings");
+  press(1, VK_END); check(selectedIndex() == 5, "heading-end-skips-last-heading");
+  press(1, VK_NEXT); check(selectedIndex() == 5, "heading-page-down-skips-last-heading");
+  press(5, VK_PRIOR); check(selectedIndex() == 1, "heading-page-up-skips-first-heading");
+  press(4, VK_DOWN); check(selectedIndex() == 5, "heading-navigation-keeps-ordinary-rows");
+  SetKeyboardState(controlKeys.data()); press(1, VK_DOWN);
+  check(selectedIndex() == (nativeControlSelection == 2 ? 4 : nativeControlSelection) && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == (nativeControlFocus == 2 ? 4 : nativeControlFocus), "heading-control-navigation-keeps-native-selection");
+  SetKeyboardState(keys.data());
+  select(1); ListView_SetItemState(list, 1, 0, LVIS_FOCUSED); ListView_SetItemState(list, 2, LVIS_FOCUSED, LVIS_FOCUSED); skipHeading(1);
+  check(selectedIndex() == 1 && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == 4, "heading-focus-only-correction-preserves-selected-process");
+  populate(120, false); press(1, VK_NEXT);
+  check(selectedIndex() == nativePageSelection && ListView_GetTopIndex(list) == nativePageTop, "heading-navigation-preserves-native-paging");
+  if (nativePageSelection > 1 && nativePageSelection + 1 < int(rows.size())) {
+    populate(120, false); rows[size_t(nativePageSelection)].kind = RowKind::Heading; press(1, VK_NEXT);
+    check(selectedIndex() == nativePageSelection + 1, "heading-native-page-destination-skips-heading");
+  }
+  populate(7, true); for (auto& row : rows) row.kind = RowKind::Heading;
+  ListView_SetItemState(list, 3, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); skipHeading(1);
+  check(selectedIndex() == -1 && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == -1, "heading-only-list-has-no-action-selection");
+  return passed;
+}
 bool Application::verifyTabSwitching() {
   const int savedTab = selectedTab, savedTheme = theme;
+  const HWND savedFocus = GetFocus();
   bool passed = true;
   auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   const auto sample = current;
@@ -370,7 +824,101 @@ bool Application::verifyTabSwitching() {
     BOOL immersive = FALSE;
     if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive, sizeof(immersive)))) check((immersive != FALSE) == dark, "caption-immediate-theme");
   }
-  theme = savedTheme; applyTheme(); selectTab(savedTab);
+  // Exercise only this thread's owned diagnostic controls; do not request foreground activation.
+  selectTab(PerformanceTab); SetFocus(performance);
+  check(GetFocus() == performance, "tab-focus-fixture-owned-performance-child");
+  selectTab(DetailsTab);
+  check(GetFocus() == list, "tab-leaving-performance-focuses-visible-table");
+  SetFocus(tabs); selectTab(ProcessesTab);
+  check(GetFocus() == tabs, "tab-navigation-keeps-tab-strip-focus");
+  theme = savedTheme; applyTheme(); selectTab(savedTab); SetFocus(savedFocus);
+  return passed;
+}
+bool Application::verifyHighContrast() {
+  const int savedTab = selectedTab, savedHeader = hotHeader, savedResourceHover = hotResource, savedScroll = sidebarScroll;
+  const bool savedContrast = highContrast, savedDark = dark, savedGraphs = hideGraphs;
+  const auto savedResource = selectedResource; const auto snapshot = current;
+  const auto savedBrush = backgroundBrush;
+  bool passed = true;
+  auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  selectTab(ProcessesTab);
+  // Exercise High Contrast without changing the desktop's accessibility settings.
+  highContrast = true; dark = false; backgroundBrush = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
+  RECT headerBounds{}, tabBounds{}; GetClientRect(header, &headerBounds); GetClientRect(tabs, &tabBounds);
+  const int width = std::max({int(headerBounds.right), int(tabBounds.right), scale(222)});
+  const int height = std::max({int(headerBounds.bottom), int(tabBounds.bottom), scale(210)});
+  HDC screen = GetDC(window), memory = CreateCompatibleDC(screen);
+  HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
+  check(screen && memory && bitmap && backgroundBrush, "high-contrast-render-buffer");
+  if (screen && memory && bitmap && backgroundBrush) {
+    const auto previous = SelectObject(memory, bitmap); SetBkMode(memory, TRANSPARENT);
+    const RECT canvas{0, 0, width, height}; FillRect(memory, &canvas, backgroundBrush);
+    auto capture = [&](RECT bounds, const wchar_t* name) {
+      if (options.output.empty()) return;
+      const std::filesystem::path output(options.output);
+      const auto path = output.parent_path() / (output.stem().wstring() + L"-high-contrast-" + name + L".png");
+      std::error_code error; if (!output.parent_path().empty()) std::filesystem::create_directories(output.parent_path(), error);
+      if (error) { check(false, "high-contrast-capture-directory"); return; }
+      GdiFlush(); SelectObject(memory, previous);
+      {
+        Gdiplus::Bitmap image(bitmap, nullptr); const CLSID png{0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+        std::unique_ptr<Gdiplus::Bitmap> cropped(image.Clone(Gdiplus::Rect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top), PixelFormat32bppRGB));
+        check(cropped && cropped->Save(path.c_str(), &png, nullptr) == Gdiplus::Ok, "high-contrast-capture-save");
+      }
+      SelectObject(memory, bitmap);
+    };
+    current = std::make_shared<Sample>(); current->cpu = 95;
+    const auto cpu = std::find(shown[ProcessesTab].begin(), shown[ProcessesTab].end(), 7);
+    check(cpu != shown[ProcessesTab].end(), "high-contrast-cpu-column");
+    if (cpu != shown[ProcessesTab].end()) {
+      const int column = int(cpu - shown[ProcessesTab].begin()); RECT box{}; Header_GetItemRect(header, column, &box);
+      for (const bool hovered : {false, true}) {
+        const int saved = SaveDC(memory); IntersectClipRect(memory, box.left, box.top, box.right, box.bottom);
+        hotHeader = hovered ? column : -1; paintHeader(memory, headerBounds);
+        check(GetPixel(memory, box.left + 1, (box.top + box.bottom) / 2) == GetSysColor(hovered ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-busy-header-background");
+        check(GetTextColor(memory) == GetSysColor(hovered ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), "high-contrast-header-text-pair");
+        RestoreDC(memory, saved);
+        capture(box, hovered ? L"header-hover" : L"header-normal");
+      }
+    }
+    current = snapshot;
+    // Native selection can move before a coalesced tab switch is committed.
+    for (const int selection : {ProcessesTab, ServicesTab}) {
+      TabCtrl_SetCurSel(tabs, selection); SendMessageW(tabs, WM_PRINTCLIENT, WPARAM(memory), PRF_CLIENT);
+      for (int index = 0; index < TabCount; ++index) {
+        RECT box{}; TabCtrl_GetItemRect(tabs, index, &box);
+        check(GetPixel(memory, box.left + 1, box.top + 1) == GetSysColor(index == selection ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-tab-background");
+      }
+      check(GetTextColor(memory) == GetSysColor(selection == ServicesTab ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), "high-contrast-tab-text-pair");
+      RECT last{}; TabCtrl_GetItemRect(tabs, TabCount - 1, &last);
+      capture({0, 0, std::min(tabBounds.right, last.right + scale(2)), tabBounds.bottom}, selection == ServicesTab ? L"tabs-services" : L"tabs-processes");
+    }
+    TabCtrl_SetCurSel(tabs, selectedTab);
+    const auto savedSidebarFont = sidebarFont, savedLabelFont = labelFont;
+    // A stock bitmap font makes these bounded text-pixel checks independent of ClearType.
+    sidebarFont = labelFont = HFONT(GetStockObject(SYSTEM_FIXED_FONT));
+    hideGraphs = true; sidebarScroll = 0; selectedResource = L"cpu"; hotResource = 1;
+    const std::vector<PerfItem> fixtures{{L"cpu", L"CPU", L"", L"95%", L"", CpuColor}, {L"memory", L"Memory", L"Usage", L"30%", L"", MemoryColor}, {L"gpu", L"GPU", L"", L"10%", L"", GpuColor}};
+    const RECT sidebar{0, 0, scale(222), scale(210)}; FillRect(memory, &sidebar, backgroundBrush); paintSidebar(memory, sidebar, fixtures);
+    auto containsColor = [&](RECT bounds, COLORREF color) {
+      for (LONG y = bounds.top; y < bounds.bottom; ++y) for (LONG x = bounds.left; x < bounds.right; ++x) if (GetPixel(memory, x, y) == color) return true;
+      return false;
+    };
+    for (int index = 0; index < int(fixtures.size()); ++index) {
+      const int top = scale(12) + index * scale(60); const bool highlighted = index < 2;
+      const COLORREF foreground = GetSysColor(highlighted ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT);
+      check(GetPixel(memory, scale(3), top + 1) == GetSysColor(highlighted ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-sidebar-background");
+      check(containsColor({scale(16), top + scale(6), scale(150), top + scale(28)}, foreground), "high-contrast-sidebar-title-text");
+      check(containsColor({scale(16), top + scale(27), scale(150), top + scale(57)}, foreground), "high-contrast-sidebar-secondary-text");
+    }
+    sidebarFont = savedSidebarFont; labelFont = savedLabelFont;
+    FillRect(memory, &sidebar, backgroundBrush); paintSidebar(memory, sidebar, fixtures); capture(sidebar, L"sidebar");
+    SelectObject(memory, previous);
+  }
+  if (bitmap) DeleteObject(bitmap); if (memory) DeleteDC(memory); if (screen) ReleaseDC(window, screen);
+  if (backgroundBrush) DeleteObject(backgroundBrush); backgroundBrush = savedBrush;
+  highContrast = savedContrast; dark = savedDark; hideGraphs = savedGraphs; hotResource = savedResourceHover; sidebarScroll = savedScroll; selectedResource = savedResource; current = snapshot;
+  selectTab(savedTab); hotHeader = savedHeader;
   return passed;
 }
 bool Application::verifyPerformanceHover() {
@@ -538,7 +1086,7 @@ void Application::writeBenchmark() {
   stream << "{\"native\":true,\"passed\":" << (exitCode == 0 ? "true" : "false") << ",\"elapsedSeconds\":" << elapsed << ",\"firstSampleMilliseconds\":" << (firstSample == Time{} ? 0 : std::chrono::duration<double, std::milli>(firstSample - started).count()) << ",\"processCpuPercentOneCore\":" << cpu * 100 / elapsed << ",\"privateBytes\":" << memory.PrivateUsage << ",\"handles\":" << handles << ",\"updates\":" << updates << ",\"exercises\":" << tests << ",\"keyboardPassed\":" << (keyboardPassed ? "true" : "false") << ',';
   stream << "\"workingSetBytes\":" << memory.WorkingSetSize << ",\"peakWorkingSetBytes\":" << memory.PeakWorkingSetSize << ',';
   stream << "\"warmupSeconds\":" << options.warmup << ",\"handleDelta\":" << int64_t(handles) - baselineHandles << ",\"gdiDelta\":" << int64_t(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS)) - baselineGdi << ",\"userDelta\":" << int64_t(GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS)) - baselineUser << ',';
-  stream << "\"sortingFailure\":\"" << sortingFailure << "\",";
+  stream << "\"sortingFailure\":"; stream.jsonString(sortingFailure) << ',';
   stream << "\"sortingPassed\":" << (sortingPassed ? "true" : "false") << ",\"coalescingPassed\":" << (coalescingPassed ? "true" : "false") << ",\"sortRequests\":" << sortRequests << ",\"fullRebuilds\":" << fullRebuilds << ",\"sortPasses\":" << sortPasses << ','; writeMetric(stream, "cachedSort", sortTimes); stream << ',';
   writeMetric(stream, "performanceHover", hoverTimes); stream << ',';
   writeMetric(stream, "tabSwitch", tabTimes); stream << ',';

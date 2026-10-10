@@ -120,9 +120,10 @@ LRESULT CALLBACK Application::tabsProcedure(HWND target, UINT message, WPARAM wo
     SelectObject(dc, app->font); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, app->themeColor(RGB(0, 0, 0)));
     for (int index = 0; index < TabCount; ++index) {
       RECT box{}; TabCtrl_GetItemRect(target, index, &box);
-      SetDCBrushColor(dc, app->themeColor(index == TabCtrl_GetCurSel(target) ? RGB(205, 232, 255) : RGB(229, 243, 255)));
+      const bool selected = index == TabCtrl_GetCurSel(target);
+      SetDCBrushColor(dc, app->themeColor(selected ? RGB(205, 232, 255) : app->highContrast ? RGB(255, 255, 255) : RGB(229, 243, 255)));
       FillRect(dc, &box, GetStockBrush(DC_BRUSH));
-      SetTextColor(dc, app->highContrast && index == app->selectedTab ? GetSysColor(COLOR_HIGHLIGHTTEXT) : app->themeColor(RGB(0, 0, 0)));
+      SetTextColor(dc, app->highContrast && selected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : app->themeColor(RGB(0, 0, 0)));
       wchar_t label[64]{}; TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = label; item.cchTextMax = int(std::size(label)); TabCtrl_GetItem(target, index, &item);
       DrawTextW(dc, label, -1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }

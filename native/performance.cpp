@@ -12,6 +12,104 @@ static std::wstring sendReceive(const NetworkInfo& network) {
   const auto send = bits(network.send), receive = bits(network.receive); const auto unit = [](const std::wstring& value) { return value.substr(value.rfind(L' ') + 1); };
   return unit(send) == unit(receive) ? L"S: " + send.substr(0, send.rfind(L' ')) + L"  R: " + receive : L"S: " + send + L"  R: " + receive;
 }
+struct GraphPanelLayout {
+  int columns, rows, horizontalGap, verticalGap, width, height, labelHeight;
+  RECT plot(RECT area, int index) const {
+    const int x = area.left + index % columns * (width + horizontalGap), y = area.top + index / columns * (height + labelHeight + verticalGap);
+    return {x, y + labelHeight, x + width, y + labelHeight + height};
+  }
+};
+static std::optional<GraphPanelLayout> graphPanelLayout(size_t count, RECT area, int gap, int labelHeight) {
+  const int64_t wide = int64_t(area.right) - area.left, tall = int64_t(area.bottom) - area.top;
+  if (!count || count > size_t(INT_MAX) || wide < 2 || tall < 2 || wide > INT_MAX || tall > INT_MAX || labelHeight < 0 || labelHeight > tall - 2) return std::nullopt;
+  const int width = int(wide), height = int(tall), panels = int(count);
+  const int maximumColumns = std::min(panels, width / 2), maximumRows = height / (labelHeight + 2);
+  const int minimumColumns = 1 + (panels - 1) / maximumRows;
+  if (minimumColumns > maximumColumns) return std::nullopt;
+  const int preferredColumns = panels <= 4 ? std::min(panels, 2) : int(std::ceil(std::sqrt(double(panels) * width / height)));
+  const int columns = std::clamp(preferredColumns, minimumColumns, maximumColumns), rows = 1 + (panels - 1) / columns;
+  // Keep the normal spacing, but let dense plots use the pixels that fixed gaps would consume.
+  const int horizontalGap = columns > 1 ? std::min(std::max(0, gap), width / columns / 3) : 0;
+  const int verticalGap = rows > 1 ? std::min(std::max(0, gap), (height / rows - labelHeight) / 3) : 0;
+  return GraphPanelLayout{columns, rows, horizontalGap, verticalGap, (width - (columns - 1) * horizontalGap) / columns, (height - (rows - 1) * verticalGap) / rows - labelHeight, labelHeight};
+}
+#ifdef TASKMGR_DIAGNOSTICS
+static std::vector<std::pair<std::string, bool>> graphPanelLayoutTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  const auto valid = [](size_t count, RECT area, int gap, int labels) {
+    const auto layout = graphPanelLayout(count, area, gap, labels); if (!layout) return false;
+    for (int index = 0; index < int(count); ++index) {
+      const auto plot = layout->plot(area, index);
+      if (plot.right - plot.left < 2 || plot.bottom - plot.top < 2 || plot.left < area.left || plot.right > area.right || plot.top - labels < area.top || plot.bottom > area.bottom) return false;
+      if (index % layout->columns && plot.left < layout->plot(area, index - 1).right) return false;
+      if (index >= layout->columns && plot.top - labels < layout->plot(area, index - layout->columns).bottom) return false;
+    }
+    return true;
+  };
+  checks.emplace_back("graph-grid-128-cores-in-100-by-59", valid(128, {0, 0, 100, 59}, 8, 0));
+  checks.emplace_back("graph-grid-128-cores-in-100-by-80", valid(128, {0, 0, 100, 80}, 8, 0));
+  checks.emplace_back("graph-grid-dense-high-dpi", valid(128, {0, 0, 200, 118}, 16, 0));
+  checks.emplace_back("graph-grid-single-two-pixel-plot", valid(1, {3, 7, 5, 9}, 8, 0));
+  checks.emplace_back("graph-grid-narrow-tall", valid(4, {0, 0, 2, 8}, 8, 0));
+  checks.emplace_back("graph-grid-wide-flat", valid(4, {0, 0, 8, 2}, 8, 0));
+  checks.emplace_back("graph-grid-gpu-labels-fit", valid(4, {0, 0, 100, 39}, 8, 18));
+  checks.emplace_back("graph-grid-normal-gpu-panels", valid(4, {0, 0, 400, 280}, 8, 18));
+  const auto normal = graphPanelLayout(4, {0, 0, 400, 280}, 8, 18);
+  checks.emplace_back("graph-grid-preserves-normal-gpu-geometry", normal && normal->columns == 2 && normal->rows == 2 && normal->horizontalGap == 8 && normal->verticalGap == 8 && normal->width == 196 && normal->height == 118);
+  checks.emplace_back("graph-grid-rejects-empty", !graphPanelLayout(0, {0, 0, 100, 59}, 8, 0));
+  checks.emplace_back("graph-grid-rejects-invalid-area", !graphPanelLayout(1, {1, 0, 0, 59}, 8, 0) && !graphPanelLayout(1, {0, 0, 1, 59}, 8, 0));
+  checks.emplace_back("graph-grid-rejects-insufficient-height", !graphPanelLayout(1, {0, 0, 100, 1}, 8, 0) && !graphPanelLayout(1, {0, 0, 100, 19}, 8, 18));
+  checks.emplace_back("graph-grid-rejects-excessive-count", !graphPanelLayout(size_t(INT_MAX) + 1, {0, 0, 100, 59}, 8, 0));
+  checks.emplace_back("graph-grid-requests-overall-fallback", !graphPanelLayout(2048, {0, 0, 100, 59}, 8, 0));
+  return checks;
+}
+bool Application::verifyGraphPanels() {
+  bool passed = true; const auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  for (const auto& [name, result] : graphPanelLayoutTests()) check(result, name.c_str());
+  const auto savedSample = current; auto savedHistories = std::move(histories); histories.clear();
+  const auto originalDpi = dpi; const auto originalTime = graphTime; const auto originalPaints = performanceDetailPaints;
+  const int originalSummary = summary; const bool originalLogical = logical, originalDark = dark, originalContrast = highContrast, originalRebuilding = rebuilding;
+  rebuilding = true; dpi = 96; graphTime = 60; summary = 1; logical = true; dark = highContrast = false;
+  auto sample = std::make_shared<Sample>(); sample->cores.resize(128, 50); sample->cpu = 50; current = sample;
+  histories[L"cpu"].add(0, 25); histories[L"cpu"].add(60, 75);
+  for (size_t index = 0; index < sample->cores.size(); ++index) { auto& history = histories[L"core/" + std::to_wstring(index)]; history.add(0, 25); history.add(60, 75); }
+  const auto render = [&](const wchar_t* suffix, int width, int height, RECT detail, const PerfItem& item, const std::vector<RECT>& plots) {
+    HDC screen = GetDC(performance), memory = screen ? CreateCompatibleDC(screen) : nullptr; HBITMAP bitmap = memory ? CreateCompatibleBitmap(screen, width, height) : nullptr;
+    check(screen && memory && bitmap, "graph-grid-render-resources");
+    if (bitmap) {
+      const auto old = SelectObject(memory, bitmap); const RECT canvas{0, 0, width, height}; FillRect(memory, &canvas, GetStockBrush(WHITE_BRUSH)); SetBkMode(memory, TRANSPARENT);
+      paintDetail(memory, detail, item); GdiFlush();
+      for (const auto& plot : plots) {
+        bool painted = false;
+        for (int y = plot.top; !painted && y < plot.bottom; ++y) for (int x = plot.left; x < plot.right; ++x) { const auto pixel = GetPixel(memory, x, y); if (pixel != CLR_INVALID && pixel != RGB(255, 255, 255)) { painted = true; break; } }
+        check(painted, "graph-grid-every-plot-renders");
+      }
+      SelectObject(memory, old);
+      if (!options.output.empty()) {
+        const std::filesystem::path output(options.output), imagePath = output.parent_path() / (output.stem().wstring() + suffix + L".png"); std::error_code error;
+        if (!imagePath.parent_path().empty()) std::filesystem::create_directories(imagePath.parent_path(), error);
+        Gdiplus::Bitmap image(bitmap, nullptr); const CLSID png{0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+        check(!error && image.Save(imagePath.c_str(), &png, nullptr) == Gdiplus::Ok, "graph-grid-render-png");
+      }
+      DeleteObject(bitmap);
+    }
+    if (memory) DeleteDC(memory); if (screen) ReleaseDC(performance, screen);
+  };
+  const RECT cpuArea{0, 29, 100, 88}; const PerfItem cpuItem{L"cpu", L"CPU", L"", L"", L"", CpuColor};
+  std::vector<RECT> plots; const auto cpuLayout = graphPanelLayout(128, cpuArea, 8, 0); if (cpuLayout) for (int index = 0; index < 128; ++index) plots.push_back(cpuLayout->plot(cpuArea, index));
+  render(L"-graph-cpu-128", 100, 88, {0, 0, 100, 88}, cpuItem, plots);
+  sample->cores.resize(2048, 50); const auto historyCount = histories.size();
+  render(L"-graph-cpu-overall", 100, 88, {0, 0, 100, 88}, cpuItem, {cpuArea});
+  check(histories.size() == historyCount, "graph-grid-fallback-skips-unrenderable-core-panels");
+  GpuInfo gpu; gpu.key = L"fixture"; gpu.engines = {{L"3D", 25}, {L"Copy", 50}, {L"VideoEncode", 75}, {L"VideoDecode", 50}}; sample->gpus.push_back(gpu);
+  for (const auto& [type, value] : gpu.engines) { auto& history = histories[L"engine/fixture/" + type]; history.add(0, value); history.add(60, value); }
+  const RECT gpuArea{0, 8, 400, 288}; const auto gpuLayout = graphPanelLayout(4, gpuArea, 8, 18); plots.clear(); if (gpuLayout) for (int index = 0; index < 4; ++index) plots.push_back(gpuLayout->plot(gpuArea, index));
+  render(L"-graph-gpu-4", 400, 288, {0, 0, 400, 448}, {L"gpu/fixture", L"GPU 0", L"", L"", L"", GpuColor}, plots);
+  current = savedSample; histories = std::move(savedHistories); dpi = originalDpi; graphTime = originalTime; performanceDetailPaints = originalPaints;
+  summary = originalSummary; logical = originalLogical; dark = originalDark; highContrast = originalContrast; rebuilding = originalRebuilding;
+  return passed;
+}
+#endif
 const std::vector<PerfItem>& Application::perfItems() const {
   if (!performanceItemsDirty) return performanceItems;
   auto& result = performanceItems; result.clear(); performanceItemsDirty = false;
@@ -75,6 +173,9 @@ void Application::paintSidebar(HDC dc, RECT bounds, const std::vector<PerfItem>&
     if (!RectVisible(dc, &box)) continue;
     const bool hot = int(index) == hotResource;
     if (item.key == selectedResource || hot) { SetDCBrushColor(dc, themeColor(item.key == selectedResource ? RGB(205, 232, 255) : RGB(229, 243, 255))); FillRect(dc, &box, GetStockBrush(DC_BRUSH)); }
+    const bool highlighted = highContrast && (item.key == selectedResource || hot);
+    const COLORREF foreground = highlighted ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0));
+    const COLORREF secondary = highlighted ? foreground : themeColor(SecondaryText);
     int textLeft = bounds.left + scale(16);
     if (!hideGraphs) {
       double maximum = 100; auto& history = histories[item.key];
@@ -82,9 +183,9 @@ void Application::paintSidebar(HDC dc, RECT bounds, const std::vector<PerfItem>&
       drawGraph(dc, {bounds.left + scale(15), top + scale(12), bounds.left + scale(105), top + scale(64)}, history, graphTime, maximum, {themeColor(item.color), false, false, item.key.starts_with(L"net/")});
       textLeft = bounds.left + scale(116);
     }
-    text(dc, item.title, sidebarFont, themeColor(RGB(0, 0, 0)), {textLeft, top + scale(hideGraphs ? 6 : 10), box.right, top + scale(hideGraphs ? 28 : 33)});
-    if (!item.subtitle.empty()) { text(dc, item.subtitle, labelFont, themeColor(SecondaryText), {textLeft, top + scale(hideGraphs ? 27 : 33), box.right, top + scale(hideGraphs ? 43 : 49)}); text(dc, item.value, labelFont, themeColor(SecondaryText), {textLeft, top + scale(hideGraphs ? 41 : 49), box.right, top + scale(hideGraphs ? 57 : 65)}); }
-    else { RECT value{textLeft, top + scale(hideGraphs ? 27 : 35), box.right - scale(2), top + scale(hideGraphs ? 57 : 67)}; SelectObject(dc, labelFont); SetTextColor(dc, themeColor(SecondaryText)); DrawTextW(dc, item.value.c_str(), -1, &value, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS); }
+    text(dc, item.title, sidebarFont, foreground, {textLeft, top + scale(hideGraphs ? 6 : 10), box.right, top + scale(hideGraphs ? 28 : 33)});
+    if (!item.subtitle.empty()) { text(dc, item.subtitle, labelFont, secondary, {textLeft, top + scale(hideGraphs ? 27 : 33), box.right, top + scale(hideGraphs ? 43 : 49)}); text(dc, item.value, labelFont, secondary, {textLeft, top + scale(hideGraphs ? 41 : 49), box.right, top + scale(hideGraphs ? 57 : 65)}); }
+    else { RECT value{textLeft, top + scale(hideGraphs ? 27 : 35), box.right - scale(2), top + scale(hideGraphs ? 57 : 67)}; SelectObject(dc, labelFont); SetTextColor(dc, secondary); DrawTextW(dc, item.value.c_str(), -1, &value, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS); }
   }
   RestoreDC(dc, save);
 }
@@ -109,23 +210,24 @@ void Application::paintDetail(HDC dc, RECT bounds, const PerfItem& item) {
   if (!compactSummary) graphBottom = std::min(graphBottom, top + scale(21) + (gpu ? scale(260) : scale(360)));
   const RECT graph{left, top + scale(21), right, graphBottom};
   const auto& history = histories[key];
+  const bool logicalCpu = cpu && logical && current && !current->cores.empty();
+  const bool separateCores = logicalCpu && graphPanelLayout(current->cores.size(), graph, scale(8), 0).has_value();
   double maximum = 100; std::wstring leftLabel = cpu ? L"% Utilization" : memory ? L"Memory usage" : disk ? L"Active time" : network ? L"Throughput" : L"", rightLabel = L"100%";
+  if (logicalCpu && !separateCores) leftLabel = L"Overall CPU";
   if (memory && current) rightLabel = gigabytes(double(current->memory.total)) + L" GB";
   if (network) { maximum = niceScale(history.peak(graphTime) * 8, bitSteps) / 8; rightLabel = bits(maximum); }
   if (!gpu) { text(dc, leftLabel, labelFont, themeColor(LabelColor), {left, top, right, top + scale(18)}); text(dc, rightLabel, labelFont, themeColor(LabelColor), {left, top, right, top + scale(18)}, DT_RIGHT | DT_TOP); }
   auto panels = [&](const std::vector<std::tuple<std::wstring, std::wstring, std::wstring>>& items, RECT area, COLORREF color) {
-    if (items.empty()) return;
-    const int count = int(items.size()), columns = count <= 4 ? std::min(count, 2) : int(std::ceil(std::sqrt(double(count) * (area.right - area.left) / std::max(1L, area.bottom - area.top)))), lines = (count + columns - 1) / columns;
-    const int gap = scale(8), labelHeight = gpu ? scale(18) : 0, panelWidth = (area.right - area.left - (columns - 1) * gap) / columns, panelHeight = (area.bottom - area.top - (lines - 1) * gap) / lines - labelHeight;
-    for (int index = 0; index < count; ++index) {
-      const int x = area.left + index % columns * (panelWidth + gap), y = area.top + index / columns * (panelHeight + gap + labelHeight);
+    const auto layout = graphPanelLayout(items.size(), area, scale(8), gpu ? scale(18) : 0); if (!layout) return;
+    for (int index = 0; index < int(items.size()); ++index) {
+      const auto plot = layout->plot(area, index);
       const auto& [historyKey, title, value] = items[size_t(index)];
-      if (gpu) { text(dc, title, labelFont, themeColor(LabelColor), {x, y, x + panelWidth, y + scale(18)}); text(dc, value, labelFont, themeColor(LabelColor), {x, y, x + panelWidth, y + scale(18)}, DT_RIGHT | DT_TOP); }
-      drawGraph(dc, {x, y + labelHeight, x + panelWidth, y + labelHeight + panelHeight}, histories[historyKey], graphTime, 100, {color, true, true, false});
+      if (gpu) { const RECT label{plot.left, plot.top - layout->labelHeight, plot.right, plot.top}; text(dc, title, labelFont, themeColor(LabelColor), label); text(dc, value, labelFont, themeColor(LabelColor), label, DT_RIGHT | DT_TOP); }
+      drawGraph(dc, plot, histories[historyKey], graphTime, 100, {color, true, true, false});
     }
   };
   int bottom = graph.bottom;
-  if (cpu && logical && current && !current->cores.empty()) { std::vector<std::tuple<std::wstring, std::wstring, std::wstring>> items; for (size_t index = 0; index < current->cores.size(); ++index) items.emplace_back(L"core/" + std::to_wstring(index), L"", L""); panels(items, graph, themeColor(item.color)); }
+  if (separateCores) { std::vector<std::tuple<std::wstring, std::wstring, std::wstring>> items; for (size_t index = 0; index < current->cores.size(); ++index) items.emplace_back(L"core/" + std::to_wstring(index), L"", L""); panels(items, graph, themeColor(item.color)); }
   else if (gpu && current) {
     const auto found = std::find_if(current->gpus.begin(), current->gpus.end(), [&](const GpuInfo& value) { return L"gpu/" + value.key == key; });
     if (found != current->gpus.end()) {
@@ -176,7 +278,7 @@ void Application::paintDetail(HDC dc, RECT bounds, const PerfItem& item) {
     stat(L"Paged pool", bytes(double(value.paged)), left, stats + scale(104), false); stat(L"Non-paged pool", bytes(double(value.nonpaged)), left + scale(230), stats + scale(104), false);
     if (width >= scale(640)) {
       int y = stats + scale(4);
-      pair(L"Speed:", value.speed ? std::to_wstring(value.speed) + L" MHz" : L"—", pairs, y, pairWidth); y += scale(21);
+      pair(L"Speed:", value.speed ? std::to_wstring(value.speed) + L" MT/s" : L"—", pairs, y, pairWidth); y += scale(21);
       pair(L"Slots used:", value.slots ? std::to_wstring(value.usedSlots) + L" of " + std::to_wstring(value.slots) : L"—", pairs, y, pairWidth); y += scale(21);
       pair(L"Form factor:", value.formFactor.empty() ? L"—" : value.formFactor, pairs, y, pairWidth); y += scale(21);
       pair(L"Hardware reserved:", value.installed > value.total ? bytes(double(value.installed - value.total)) : L"—", pairs, y, pairWidth);

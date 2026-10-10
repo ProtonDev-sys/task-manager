@@ -3,6 +3,8 @@
 #include "report.hpp"
 #endif
 #include <commdlg.h>
+#include <charconv>
+#include <climits>
 #include <uxtheme.h>
 #include <shlobj.h>
 #include <windowsx.h>
@@ -108,7 +110,7 @@ void Application::create() {
   SetWindowSubclass(tabs, tabsProcedure, 4, reinterpret_cast<DWORD_PTR>(this));
   for (int index = 0; index < TabCount; ++index) { TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(tabNames[index]); TabCtrl_InsertItem(tabs, index, &item); }
   TabCtrl_SetCurSel(tabs, selectedTab);
-  list = control(WC_LISTVIEWW, L"", LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_TABSTOP, ListId);
+  list = control(WC_LISTVIEWW, L"", LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_SHAREIMAGELISTS | WS_TABSTOP, ListId);
   ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP);
   SetWindowSubclass(list, listProcedure, 1, reinterpret_cast<DWORD_PTR>(this));
   header = ListView_GetHeader(list); SetWindowSubclass(header, headerProcedure, 2, reinterpret_cast<DWORD_PTR>(this));
@@ -144,7 +146,9 @@ void Application::create() {
   AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File"); AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(options_), L"&Options"); AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&View");
   SetMenu(window, menuBar);
   tray.hWnd = window; tray.uID = 1; tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; tray.uCallbackMessage = TrayMessage; tray.hIcon = smallIcon; wcscpy_s(tray.szTip, L"Task Manager");
-  if (persistent()) trayAdded = Shell_NotifyIconW(NIM_ADD, &tray) != FALSE;
+  taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
+  if (taskbarCreatedMessage) ChangeWindowMessageFilterEx(window, taskbarCreatedMessage, MSGFLT_ALLOW, nullptr);
+  publishTray();
   applyTheme(); columns(); layout(); updateFooter();
 }
 void Application::layout() {
@@ -237,6 +241,7 @@ void Application::paintWindow(HDC dc) {
 }
 void Application::selectTab(int tab) {
   if (tab < 0 || tab >= TabCount || tab == selectedTab) return;
+  const bool focusInPerformance = selectedTab == PerformanceTab && GetFocus() == performance;
   captureColumns();
   KillTimer(window, 3); sortQueued = false;
   selectedTab = tab; startupVisible = tab == StartupTab && !compact; if (TabCtrl_GetCurSel(tabs) != tab) TabCtrl_SetCurSel(tabs, tab); hotRow = -1;
@@ -245,6 +250,7 @@ void Application::selectTab(int tab) {
   layout();
   if (tab == StartupTab && !startupRequested) { startupRequested = true; if (!current || current->startup->entries.empty()) refresh(false); }
   if (tab == PerformanceTab && !hidden()) SetFocus(performance);
+  else if (focusInPerformance) SetFocus(list);
 }
 void Application::requestTab(int tab) {
   if (tab < 0 || tab >= TabCount) return;
@@ -297,28 +303,46 @@ void Application::updateMenu(HMENU popup) {
   EnableMenuItem(popup, GroupId, MF_BYCOMMAND | (selectedTab == ProcessesTab ? MF_ENABLED : MF_GRAYED));
   EnableMenuItem(popup, ExpandAllId, MF_BYCOMMAND | (tree ? MF_ENABLED : MF_GRAYED)); EnableMenuItem(popup, CollapseAllId, MF_BYCOMMAND | (tree ? MF_ENABLED : MF_GRAYED));
 }
+bool Application::notifyTray(DWORD message) {
+#ifdef TASKMGR_DIAGNOSTICS
+  if (trayNotification) return trayNotification(message);
+#endif
+  return persistent() && Shell_NotifyIconW(message, &tray) != FALSE;
+}
+void Application::publishTray() {
+  if (closing) return;
+  if (trayAdded && notifyTray(NIM_MODIFY)) return;
+  trayAdded = notifyTray(NIM_ADD);
+}
 // The notification-area icon is a CPU meter, like Windows' own Task Manager.
-void Application::updateTray() {
-  if (!trayAdded || !current) return;
-  const int level = int(std::lround(current->cpu / 100 * 14));
-  const double memory = current->memory.total ? 100.0 * double(current->memory.total - current->memory.available) / double(current->memory.total) : 0;
-  double disk = 0; for (const auto& item : current->disks) disk = std::max(disk, item.active);
-  double network = 0; for (const auto& item : current->networks) if (item.speed) network = std::max(network, 800.0 * (item.send + item.receive) / double(item.speed));
-  swprintf_s(tray.szTip, L"CPU: %.0f%%\nMemory: %.0f%%\nDisk: %.0f%%\nNetwork: %.0f%%", current->cpu, memory, disk, std::min(100.0, network));
+void Application::updateTray(const Sample& sample) {
+  if (closing || (!persistent()
+#ifdef TASKMGR_DIAGNOSTICS
+      && !trayNotification
+#endif
+      )) return;
+  const int level = int(std::lround(sample.cpu / 100 * 14));
+  const double memory = sample.memory.total ? 100.0 * double(sample.memory.total - sample.memory.available) / double(sample.memory.total) : 0;
+  double disk = 0; for (const auto& item : sample.disks) disk = std::max(disk, item.active);
+  double network = 0; for (const auto& item : sample.networks) if (item.speed) network = std::max(network, 800.0 * (item.send + item.receive) / double(item.speed));
+  swprintf_s(tray.szTip, L"CPU: %.0f%%\nMemory: %.0f%%\nDisk: %.0f%%\nNetwork: %.0f%%", sample.cpu, memory, disk, std::min(100.0, network));
   if (level != trayLevel) {
-    trayLevel = level; const int size = GetSystemMetrics(SM_CXSMICON);
+    const int size = GetSystemMetrics(SM_CXSMICON);
     BITMAPINFO information{}; information.bmiHeader = {sizeof(BITMAPINFOHEADER), size, -size, 1, 32, BI_RGB}; void* bits = nullptr;
     HBITMAP color = CreateDIBSection(nullptr, &information, DIB_RGB_COLORS, &bits, nullptr, 0), mask = CreateBitmap(size, size, 1, 1, nullptr);
-    auto pixels = static_cast<DWORD*>(bits); const int fill = int(std::lround(double(level) / 14 * (size - 4)));
-    for (int y = 0; y < size; ++y) for (int x = 0; x < size; ++x) {
-      const bool frame = x >= 1 && x <= size - 2 && y >= 1 && y <= size - 2, edge = frame && (x == 1 || x == size - 2 || y == 1 || y == size - 2);
-      DWORD value = 0; if (edge) value = 0xff5a5a5a; else if (frame) value = y >= size - 2 - fill ? 0xff36b04a : 0xff1e1e1e;
-      pixels[y * size + x] = value;
+    if (color && mask && bits) {
+      auto pixels = static_cast<DWORD*>(bits); const int fill = int(std::lround(double(level) / 14 * (size - 4)));
+      for (int y = 0; y < size; ++y) for (int x = 0; x < size; ++x) {
+        const bool frame = x >= 1 && x <= size - 2 && y >= 1 && y <= size - 2, edge = frame && (x == 1 || x == size - 2 || y == 1 || y == size - 2);
+        DWORD value = 0; if (edge) value = 0xff5a5a5a; else if (frame) value = y >= size - 2 - fill ? 0xff36b04a : 0xff1e1e1e;
+        pixels[y * size + x] = value;
+      }
+      ICONINFO iconInfo{TRUE, 0, 0, mask, color}; HICON next = CreateIconIndirect(&iconInfo);
+      if (next) { trayLevel = level; tray.hIcon = next; if (trayIcon) DestroyIcon(trayIcon); trayIcon = next; }
     }
-    ICONINFO iconInfo{TRUE, 0, 0, mask, color}; HICON next = CreateIconIndirect(&iconInfo); DeleteObject(color); DeleteObject(mask);
-    if (next) { tray.hIcon = next; if (trayIcon) DestroyIcon(trayIcon); trayIcon = next; }
+    if (color) DeleteObject(color); if (mask) DeleteObject(mask);
   }
-  Shell_NotifyIconW(NIM_MODIFY, &tray);
+  publishTray();
 }
 void Application::loadSettings() {
   auto read = [&](const wchar_t* section, const wchar_t* key, int fallback) { return persistent() ? int(GetPrivateProfileIntW(section, key, fallback, preferences.c_str())) : fallback; };
@@ -345,7 +369,7 @@ void Application::captureColumns() {
   if (!list || rebuilding || compact || selectedTab != columnsTab) return;
   const int count = Header_GetItemCount(header); std::vector<int> order(size_t(std::max(0, count)));
   if (count <= 0 || size_t(count) != shown[size_t(selectedTab)].size() || !ListView_GetColumnOrderArray(list, count, order.data())) return;
-  std::vector<int> ids, sizes; for (const int index : order) { ids.push_back(shown[size_t(selectedTab)][size_t(index)]); sizes.push_back(MulDiv(ListView_GetColumnWidth(list, index), 96, int(GetDpiForWindow(window)))); }
+  std::vector<int> ids, sizes; for (const int index : order) { ids.push_back(shown[size_t(selectedTab)][size_t(index)]); sizes.push_back(MulDiv(ListView_GetColumnWidth(list, index), 96, int(dpi))); }
   if (!ids.empty() && ids.front() == 0) { shown[size_t(selectedTab)] = ids; widths[size_t(selectedTab)] = sizes; }
 }
 void Application::saveSettings() {
@@ -373,19 +397,75 @@ void Application::writeSettings() {
     WritePrivateProfileStringW(section.c_str(), L"Columns", text.c_str(), preferences.c_str()); write(section, L"Sort", sortColumn[size_t(tab)]); write(section, L"Ascending", ascending[size_t(tab)]);
   }
 }
-void Application::saveHistory() {
-  if (!persistent() || historyFile.empty()) return; const auto temporary = historyFile + L".tmp";
-  { std::wofstream stream{std::filesystem::path(temporary)}; for (const auto& [key, value] : usage) stream << key << L'\t' << value.ticks << L'\t' << value.name << L'\t' << value.path << L'\t' << (value.app ? 1 : 0) << L'\n'; if (!stream) return; }
-  MoveFileExW(temporary.c_str(), historyFile.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+static constexpr std::string_view historyFormat = "# TaskManagerNative history UTF-8 v1";
+static std::string historyField(const std::wstring& value) {
+  std::string result;
+  for (const char character : utf8(value)) {
+    switch (character) {
+    case '\\': result += "\\\\"; break;
+    case '\t': result += "\\t"; break;
+    case '\r': result += "\\r"; break;
+    case '\n': result += "\\n"; break;
+    default: result += character; break;
+    }
+  }
+  return result;
 }
-void Application::loadHistory() {
-  std::wifstream stream{std::filesystem::path(historyFile)}; std::wstring line;
+static std::optional<std::wstring> historyText(std::string_view value, bool escaped) {
+  std::string bytes;
+  for (size_t index = 0; index < value.size(); ++index) {
+    char character = value[index];
+    if (escaped && character == '\\') {
+      if (++index == value.size()) return {};
+      switch (value[index]) {
+      case '\\': character = '\\'; break;
+      case 't': character = '\t'; break;
+      case 'r': character = '\r'; break;
+      case 'n': character = '\n'; break;
+      default: return {};
+      }
+    }
+    bytes += character;
+  }
+  if (bytes.empty()) return std::wstring{};
+  if (bytes.size() > size_t(INT_MAX)) return {};
+  const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), int(bytes.size()), nullptr, 0);
+  if (!size) return {};
+  std::wstring result(size_t(size), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), int(bytes.size()), result.data(), size) != size) return {};
+  return result;
+}
+bool Application::writeHistoryFile(const std::wstring& path) const {
+  const auto temporary = path + L".tmp";
+  std::ofstream stream{std::filesystem::path(temporary), std::ios::binary};
+  if (!stream) return false;
+  stream << historyFormat << '\n';
+  for (const auto& [key, value] : usage) stream << historyField(key) << '\t' << value.ticks << '\t' << historyField(value.name) << '\t' << historyField(value.path) << '\t' << (value.app ? 1 : 0) << '\n';
+  stream.close();
+  if (stream && MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+  DeleteFileW(temporary.c_str());
+  return false;
+}
+void Application::readHistoryFile(const std::wstring& path) {
+  std::ifstream stream{std::filesystem::path(path), std::ios::binary}; std::string line;
+  bool first = true, escaped = false;
   while (std::getline(stream, line) && usage.size() < 8192) {
-    const auto fields = splitFields(line, L'\t');
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (first) { first = false; if (line == historyFormat) { escaped = true; continue; } }
+    // Split before unescaping, so tabs/newlines in metadata cannot create fields or records.
+    std::vector<std::string_view> fields; size_t begin = 0;
+    for (size_t position = 0; position <= line.size(); ++position) if (position == line.size() || line[position] == '\t') { fields.emplace_back(line.data() + begin, position - begin); begin = position + 1; }
     if (fields.size() < 3) continue;
-    try { usage[std::wstring(fields[0])] = {std::wstring(fields[2]), fields.size() > 3 ? std::wstring(fields[3]) : L"", std::stoull(std::wstring(fields[1])), fields.size() > 4 && fields[4] == L"1"}; } catch (...) {}
+    const auto key = historyText(fields[0], escaped), name = historyText(fields[2], escaped), executablePath = historyText(fields.size() > 3 ? fields[3] : std::string_view{}, escaped);
+    if (!key || !name || !executablePath || key->empty()) continue;
+    uint64_t cpuTicks = 0;
+    const auto parsed = std::from_chars(fields[1].data(), fields[1].data() + fields[1].size(), cpuTicks);
+    if (parsed.ec != std::errc{} || parsed.ptr != fields[1].data() + fields[1].size()) continue;
+    usage[*key] = {*name, *executablePath, cpuTicks, fields.size() > 4 && fields[4] == "1"};
   }
 }
+void Application::saveHistory() { if (persistent() && !historyFile.empty()) writeHistoryFile(historyFile); }
+void Application::loadHistory() { readHistoryFile(historyFile); }
 void Application::worker() {
   try {
     const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -415,21 +495,26 @@ void Application::worker() {
       if (forceInventory) source.invalidateInventory(); force = forceInventory = false;
     }
     if (SUCCEEDED(initialized)) CoUninitialize();
-  } catch (const std::exception& exception) { std::lock_guard lock(actionMutex); const auto text = exception.what(); actionResults.push_back({std::wstring(text, text + strlen(text)), L""}); PostMessageW(window, ActionMessage, 0, 0); }
+  } catch (const std::exception& exception) { std::lock_guard lock(actionMutex); actionResults.push_back({fromUtf8(exception.what()), L""}); PostMessageW(window, ActionMessage, 0, 0); }
 }
 void Application::consume() {
   if (rebuilding || verifyingSorting) return;
-  if (!hidden() && (minimized || (GetKeyState(VK_CONTROL) & 0x8000))) return;
+  if (!hidden() && (GetKeyState(VK_CONTROL) & 0x8000)) return;
+  const bool trayOnly = !hidden() && minimized;
   std::shared_ptr<Sample> sample;
 #ifdef TASKMGR_DIAGNOSTICS
   Time publish;
 #endif
-  { std::lock_guard lock(workerMutex); notification = false; sample.swap(pending);
+  { std::lock_guard lock(workerMutex); notification = false;
+    // Keep the newest display snapshot for restore, but acknowledge its tray
+    // update so the worker can notify us about the next minimized sample.
+    if (trayOnly) sample = pending; else sample.swap(pending);
 #ifdef TASKMGR_DIAGNOSTICS
     publish = published;
 #endif
   }
   if (!sample) return;
+  if (trayOnly) { updateTray(*sample); return; }
   const auto displayStarted = Clock::now();
 #ifdef TASKMGR_DIAGNOSTICS
   if (hidden() && measured && sample->elapsed > 0) sampleCadenceTimes.push_back(sample->elapsed * 1000);
@@ -468,7 +553,7 @@ void Application::consume() {
   else if (selectedTab != StartupTab || compact || startupChanged) rebuild();
   if (selectedTab == StartupTab && startupChanged) InvalidateRect(window, nullptr, FALSE);
   if (twoLineHeader()) InvalidateRect(header, nullptr, FALSE);
-  updateTray();
+  updateTray(*current);
   const double cost = milliseconds(displayStarted); displayCost = displayCost.load() * .8 + cost * .2;
 }
 LRESULT CALLBACK Application::linkProcedure(HWND target, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR) {
@@ -482,6 +567,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
   auto app = reinterpret_cast<Application*>(GetWindowLongPtrW(target, GWLP_USERDATA));
   if (message == WM_NCCREATE) { app = static_cast<Application*>(reinterpret_cast<CREATESTRUCTW*>(data)->lpCreateParams); app->window = target; app->dpi = GetDpiForWindow(target); SetWindowLongPtrW(target, GWLP_USERDATA, LONG_PTR(app)); }
   if (!app) return DefWindowProcW(target, message, word, data);
+  if (app->taskbarCreatedMessage && message == app->taskbarCreatedMessage) { app->trayAdded = false; app->publishTray(); return 0; }
   switch (message) {
   case WM_CREATE: app->create(); return 0;
   case WM_SETTINGCHANGE: case WM_THEMECHANGED: app->indexedServices.clear(); app->indexedInventory.reset(); app->applyTheme(); return 0;
@@ -497,7 +583,15 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     return 0;
   case WM_SIZE: { const bool wasMinimized = app->minimized; app->minimized = word == SIZE_MINIMIZED; if (app->minimized && app->hideMinimized && app->trayAdded) ShowWindow(target, SW_HIDE); if (!app->minimized) { app->layout(); if (wasMinimized) { app->consume(); if (app->interval != 0) app->refresh(false); } } return 0; }
   case WM_GETMINMAXINFO: reinterpret_cast<MINMAXINFO*>(data)->ptMinTrackSize = app->summary ? POINT{app->scale(200), app->scale(150)} : app->compact ? POINT{app->scale(250), app->scale(200)} : POINT{app->scale(420), app->scale(300)}; return 0;
-  case WM_DPICHANGED: { app->dpi = HIWORD(word); const auto rect = reinterpret_cast<RECT*>(data); SetWindowPos(target, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE); app->createFonts(); app->columns(); app->rebuild(); app->layout(); return 0; }
+  case WM_DPICHANGED: {
+    const int top = ListView_GetTopIndex(app->list);
+    // The controls still use the old scale; GetDpiForWindow already reports the new DPI.
+    app->captureColumns(); app->dpi = HIWORD(word);
+    const auto rect = reinterpret_cast<RECT*>(data); SetWindowPos(target, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+    app->createFonts(); app->columns(true); app->rebuild(); app->layout();
+    ListView_Scroll(app->list, 0, (top - ListView_GetTopIndex(app->list)) * app->rowHeight());
+    return 0;
+  }
   case SampleMessage: app->consume(); return 0;
   case IconMessage: app->icons->consume(); if (!app->iconRefreshQueued) app->iconRefreshQueued = SetTimer(target, 2, app->hidden() ? 10 : 120, nullptr) != 0; return 0;
   case ActionMessage: { std::deque<ActionResult> results; { std::lock_guard lock(app->actionMutex); results.swap(app->actionResults); } for (const auto& result : results) { if (!app->hidden() && !result.error.empty()) MessageBoxW(target, result.error.c_str(), L"Task Manager", MB_OK | MB_ICONERROR); if (!app->hidden() && !result.report.empty()) DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(103), target, [](HWND dialog, UINT code, WPARAM parameter, LPARAM value) -> INT_PTR { if (code == WM_INITDIALOG) { SetDlgItemTextW(dialog, 1001, reinterpret_cast<const wchar_t*>(value)); return TRUE; } if (code == WM_COMMAND && (LOWORD(parameter) == IDOK || LOWORD(parameter) == IDCANCEL)) { EndDialog(dialog, IDOK); return TRUE; } return FALSE; }, LPARAM(result.report.c_str())); } app->refresh(); return 0; }
@@ -513,6 +607,9 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     if (word == 4) { KillTimer(target, 4); app->writeSettings(); return 0; }
     if (word == 3) { if (app->sortQueued) { app->rebuild(true); InvalidateRect(app->header, nullptr, FALSE); } return 0; }
     if (word == 2) { if (app->verifyingSorting || app->rebuilding) return 0; KillTimer(target, 2); app->iconRefreshQueued = false; if (!app->minimized && !(app->selectedTab == PerformanceTab && !app->compact)) app->rebuild(); return 0; }
+    // Explorer may not yet accept icons when it broadcasts TaskbarCreated.
+    // Retry registration without taking another sample, including while paused.
+    if (!app->trayAdded) app->publishTray();
 #ifdef TASKMGR_DIAGNOSTICS
     if (app->hidden()) app->benchmarkTick(); else if (!app->options.screenshots.empty()) app->screenshotTick(); else
 #endif
@@ -677,9 +774,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     result = taskmgr::runApplication();
 #endif
   } catch (const std::exception& error) {
-    if (interactive) MessageBoxA(nullptr, error.what(), "Task Manager", MB_OK | MB_ICONERROR);
+    if (interactive) MessageBoxW(nullptr, taskmgr::fromUtf8(error.what()).c_str(), L"Task Manager", MB_OK | MB_ICONERROR);
 #ifdef TASKMGR_DIAGNOSTICS
-    else { auto report = std::find(values.begin(), values.end(), L"--output"); if (report != values.end() && report + 1 != values.end()) { taskmgr::Report stream{*(report + 1)}; stream << "{\"native\":true,\"passed\":false,\"error\":\"" << error.what() << "\"}"; } }
+    else { auto report = std::find(values.begin(), values.end(), L"--output"); if (report != values.end() && report + 1 != values.end()) taskmgr::writeDiagnosticError(*(report + 1), error.what()); }
 #endif
     result = 1;
   }

@@ -7,10 +7,11 @@ Keep changes focused on a reproducible bug, a usability problem or a measured pe
 Use Windows x64 with Visual Studio 2022 or Build Tools, the Desktop development with C++ workload, a Windows SDK, and CMake 3.24 or newer.
 
 ```powershell
+./tests/benchmark.ps1
 ./build.ps1
 ```
 
-This builds production and a separate Debug developer executable, runs all nine CTest cases, and verifies production packaging. The published binary is `artifacts/app/TaskManager.exe`. Build output stays in `artifacts/` and should not be committed.
+The benchmark script regression uses mocked process objects and owned temporary reports; it does not require a build or launch the application. The build script builds production and a separate Debug developer executable, runs all ten CTest cases, and verifies production packaging. The published binary is `artifacts/app/TaskManager.exe`. Build output stays in `artifacts/` and should not be committed.
 
 For optimized developer tests and benchmarks:
 
@@ -53,7 +54,13 @@ Use `./performance.ps1 -BaselineExecutable <before.exe> -Executable <after.exe> 
 - Windows integration: replacement must remain optional, reversible and unable to overwrite another application's registration. Normal tests must not change the default Task Manager.
 - Diagnostics: guard developer-only tooling with `TASKMGR_DIAGNOSTICS`. Production must remain a standalone executable without diagnostic commands or report generation.
 
-The code is under `native/`. `native/diagnostics.cpp` contains self-tests, and `native/verify.cpp` exercises the native UI headlessly. `tests/production.ps1` checks the release manifest and diagnostic exclusion. GitHub Actions runs the optimized build and benchmark suite.
+The code is under `native/`. `native/diagnostics.cpp` contains self-tests, and `native/verify.cpp` exercises the native UI headlessly. `tests/production.ps1` checks the release manifest and diagnostic exclusion. GitHub Actions runs `tests/benchmark.ps1` before the optimized build and benchmark suite.
+
+## Releases
+
+For a release, update the version in `CMakeLists.txt`, `native/app.rc`, and `app.manifest`, and add `docs/releases/v<version>.md` with the changes and verification limits. Use the next appropriate semantic version; do not move an existing release tag.
+
+After the versioned changes merge into `main`, Windows verification rebuilds that exact commit, runs all tests and benchmark scenarios, checks production packaging and matching executable/manifest versions, and prepares `TaskManager.exe` with `SHA256SUMS.txt`. A separate release job publishes those verified artifacts only after verification succeeds. Pull requests run the validation without publishing. An already-published version is left unchanged; a draft can resume only for the same commit. Release publication guards are tested with `python -m unittest discover -s .github/scripts -p test_release.py -v`.
 
 ## Reports and pull requests
 

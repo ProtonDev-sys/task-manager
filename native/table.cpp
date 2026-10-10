@@ -28,7 +28,7 @@ std::span<const ColumnDef> Application::definitions(int tab) {
   static const ColumnDef users[] = {{L"User", 250, false, true, false}, {L"ID", 50, true, false, false}, {L"Session", 90, false, false, false}, {L"Status", 110, false, true, false}, {L"CPU", 73, true, true, true}, {L"Memory", 90, true, true, true}, {L"Disk", 73, true, true, true}, {L"Network", 73, true, true, true}};
   static const ColumnDef details[] = {{L"Name", 200, false, true, false}, {L"PID", 60, true, true, false}, {L"Status", 80, false, true, false}, {L"User name", 100, false, true, false}, {L"Session ID", 70, true, false, false}, {L"CPU", 40, true, true, false},
     {L"CPU time", 80, true, false, false}, {L"Memory (active private working set)", 110, true, true, false}, {L"Memory (private working set)", 110, true, false, false}, {L"Memory (commit size)", 110, true, false, false}, {L"Memory (working set)", 110, true, false, false},
-    {L"Memory (peak working set)", 110, true, false, false}, {L"Page faults", 90, true, false, false}, {L"Base priority", 90, false, false, false}, {L"Handles", 70, true, false, false}, {L"Threads", 70, true, false, false}, {L"I/O read bytes", 110, true, false, false},
+    {L"Memory (peak working set)", 110, true, false, false}, {L"Page faults", 90, true, false, false}, {L"Base priority", 90, false, false, false, true}, {L"Handles", 70, true, false, false}, {L"Threads", 70, true, false, false}, {L"I/O read bytes", 110, true, false, false},
     {L"I/O write bytes", 110, true, false, false}, {L"Image path name", 300, false, false, false}, {L"Command line", 300, false, false, false}, {L"UAC virtualization", 100, false, true, false}, {L"Description", 280, false, true, false}, {L"GPU", 50, true, false, false}, {L"GPU engine", 110, false, false, false}};
   static const ColumnDef services[] = {{L"Name", 200, false, true, false}, {L"PID", 60, true, true, false}, {L"Description", 300, false, true, false}, {L"Status", 80, false, true, false}, {L"Group", 200, false, true, false}};
   switch (tab) { case ProcessesTab: return processes; case HistoryTab: return history; case StartupTab: return startup; case UsersTab: return users; case DetailsTab: return details; case ServicesTab: return services; default: return performance; }
@@ -50,13 +50,11 @@ void Application::columns(bool preserveRows) {
   const auto previousStyle = GetWindowLongPtrW(list, GWL_STYLE);
   const auto style = compact ? previousStyle | LVS_NOCOLUMNHEADER : previousStyle & ~LONG_PTR(LVS_NOCOLUMNHEADER);
   if (style != previousStyle) SetWindowLongPtrW(list, GWL_STYLE, style);
-  if (!preserveRows) {
-    int spacerWidth = 0, spacerHeight = 0;
-    if (!rowSpacer || !ImageList_GetIconSize(rowSpacer, &spacerWidth, &spacerHeight) || spacerHeight != rowHeight() - 1) {
-      const auto previous = rowSpacer;
-      rowSpacer = ImageList_Create(1, rowHeight() - 1, ILC_COLOR32, 1, 1); ListView_SetImageList(list, rowSpacer, LVSIL_SMALL);
-      if (previous) ImageList_Destroy(previous);
-    }
+  int spacerWidth = 0, spacerHeight = 0;
+  if (!rowSpacer || !ImageList_GetIconSize(rowSpacer, &spacerWidth, &spacerHeight) || spacerHeight != rowHeight() - 1) {
+    const auto previous = rowSpacer;
+    rowSpacer = ImageList_Create(1, rowHeight() - 1, ILC_COLOR32, 1, 1); ListView_SetImageList(list, rowSpacer, LVSIL_SMALL);
+    if (previous) ImageList_Destroy(previous);
   }
   const auto defs = definitions(selectedTab);
   if (compact) { RECT area{}; GetClientRect(window, &area); LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH; column.pszText = const_cast<wchar_t*>(L"Name"); column.cx = std::max(scale(100), int(area.right) - GetSystemMetrics(SM_CXVSCROLL) - scale(4)); ListView_InsertColumn(list, 0, &column); }
@@ -92,13 +90,22 @@ std::wstring Application::processName(int index, const std::unordered_map<DWORD,
   return metadata.description.empty() ? process.name : metadata.description;
 }
 void Application::processCells(Row& row, std::span<const int> members) const {
-  Aggregate total; bool suspended = !members.empty(), hung = false;
+  Aggregate total; double peakGpu = 0; bool suspended = !members.empty(), hung = false;
+  // A summary-only active member cannot be assigned to a real engine; retain the whole-row legacy fallback.
+  const bool detailedGpu = selectedTab != UsersTab && members.size() > 1 && std::all_of(members.begin(), members.end(), [&](int index) { const auto& process = current->processes[size_t(index)]; return process.gpu <= 0 || process.gpuUsage; });
+  std::map<std::wstring_view, std::pair<double, std::wstring_view>> gpuEngines;
   for (const int index : members) {
     const auto& process = current->processes[size_t(index)];
     total.cpu += process.cpu; total.memory += double(process.privateWorking); total.disk += process.ioRate; if (process.network >= 0) total.network += process.network;
-    if (process.gpu > total.gpu) total.engine = process.gpuEngine; total.gpu += process.gpu; suspended = suspended && process.suspended; hung = hung || process.hung;
+    if (detailedGpu && process.gpuUsage) {
+      for (const auto& engine : process.gpuUsage->engines) { auto& value = gpuEngines[engine.key]; value.first += engine.value; value.second = engine.label; }
+    } else {
+      if (process.gpu > peakGpu) { peakGpu = process.gpu; total.engine = process.gpuEngine; } total.gpu += process.gpu;
+    }
+    suspended = suspended && process.suspended; hung = hung || process.hung;
     const auto tracked = activity.find({process.id, process.created}); total.trend += tracked == activity.end() ? 0 : tracked->second.trend;
   }
+  for (const auto& [key, engine] : gpuEngines) if (engine.first > total.gpu) { total.gpu = engine.first; total.engine = engine.second; }
   if (row.kind == RowKind::Interrupts) total.cpu = current->interrupts;
   total.gpu = std::min(100.0, total.gpu); total.power = total.cpu + total.gpu * 0.5 + total.disk / 1048576 * 0.2 + total.network / 125000 * 0.1;
   total.status = hung ? L"Not responding" : suspended ? L"Suspended" : L"";
@@ -126,14 +133,14 @@ static bool rowLess(const Row& left, const Row& right, int column, bool directio
 }
 void Application::sortRows(std::vector<Row>& items) const {
   const int column = sortColumn[size_t(selectedTab)]; const bool direction = ascending[size_t(selectedTab)];
-  const auto defs = definitions(selectedTab); const bool numeric = column > 0 && size_t(column) < defs.size() && (defs[size_t(column)].right || defs[size_t(column)].heat);
+  const auto defs = definitions(selectedTab); const bool numeric = column > 0 && size_t(column) < defs.size() && (defs[size_t(column)].right || defs[size_t(column)].heat || defs[size_t(column)].numeric);
   std::sort(items.begin(), items.end(), [&](const Row& left, const Row& right) { return rowLess(left, right, column, direction, numeric); });
 }
 void Application::sortVisibleRows() {
   const bool reverse = orderedTab == selectedTab && orderedColumn == sortColumn[size_t(selectedTab)] && orderedAscending != ascending[size_t(selectedTab)];
   if (compact || (selectedTab != ProcessesTab && selectedTab != UsersTab)) { if (reverse) std::reverse(rows.begin(), rows.end()); else sortRows(rows); return; }
   const int column = sortColumn[size_t(selectedTab)]; const bool direction = ascending[size_t(selectedTab)];
-  const auto defs = definitions(selectedTab); const bool numeric = column > 0 && size_t(column) < defs.size() && (defs[size_t(column)].right || defs[size_t(column)].heat);
+  const auto defs = definitions(selectedTab); const bool numeric = column > 0 && size_t(column) < defs.size() && (defs[size_t(column)].right || defs[size_t(column)].heat || defs[size_t(column)].numeric);
   auto less = [&](const Row& left, const Row& right) { return rowLess(left, right, column, direction, numeric); };
   struct Block { size_t start, end; };
   std::vector<Block> blocks; blocks.reserve(rows.size());
@@ -176,8 +183,8 @@ void Application::buildProcesses(std::vector<Row>& next) {
     if (known[size_t(index)]) return owners[size_t(index)];
     const auto& process = processes[size_t(index)]; const auto& metadata = icons->get(process);
     std::pair<std::wstring, bool> result{L"pid:" + std::to_wstring(process.id), process.app};
-    if (!metadata.package.empty()) result = {L"package:" + metadata.package, process.app};
-    else if (const auto parent = byId.find(process.parent); depth < 64 && process.id > 4 && parent != byId.end() && process.parent != process.id && process.parent > 4 && processes[size_t(parent->second)].created <= process.created) {
+    if (!metadata.package.empty()) result = {L"package:" + std::to_wstring(process.session) + L":" + metadata.package, process.app};
+    else if (const auto parent = byId.find(process.parent); depth < 64 && process.id > 4 && parent != byId.end() && process.parent != process.id && process.parent > 4 && processes[size_t(parent->second)].session == process.session && processes[size_t(parent->second)].created <= process.created) {
       const auto& parentOwner = owner(parent->second, depth + 1); const auto& parentProcess = processes[size_t(parent->second)];
       const bool sameImage = lower(parentProcess.name) == lower(process.name), shell = lower(parentProcess.name) == L"explorer.exe" && !sameImage;
       if (parentOwner.second && (!process.app || sameImage) && (sameImage || !shell)) result = parentOwner;
@@ -252,7 +259,7 @@ void Application::buildUsers(std::vector<Row>& next) {
     const auto& session = current->sessions[entry]; Row row; row.kind = RowKind::User; row.entry = int(entry); row.key = session.key; row.icon = Icons::UserIcon; row.expandable = true;
     for (size_t index = 0; index < current->processes.size(); ++index) if (current->processes[index].session == session.session && current->processes[index].id > 4) row.members.push_back(int(index));
     processCells(row, row.members);
-    row.cells[0] = {(fullName ? fullAccountName(session.cells[0]) : session.cells[0]) + L" (" + std::to_wstring(row.members.size()) + L")"}; row.cells[1] = {session.cells[2], double(session.session)}; row.cells[2] = {session.cells[3]}; row.cells[3] = {session.cells[1]};
+    row.cells[0] = {(fullName && !session.description.empty() ? session.description : accountName(session.cells[0], session.accountDomain)) + L" (" + std::to_wstring(row.members.size()) + L")"}; row.cells[1] = {session.cells[2], double(session.session)}; row.cells[2] = {session.cells[3]}; row.cells[3] = {session.cells[1]};
     row.expanded = expanded.contains(row.key); users.push_back(std::move(row));
   }
   sortRows(users);
@@ -338,7 +345,13 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
   orderedTab = selectedTab; orderedColumn = sortColumn[size_t(selectedTab)]; orderedAscending = ascending[size_t(selectedTab)];
   if (!partialUpdate) { SendMessageW(list, WM_SETREDRAW, FALSE, 0); if (!sortOnly) ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL); }
   int found = -1; if (!selected.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == selected) { found = int(index); break; }
-  if (found >= 0) { if (selectedIndex() != found) select(found); } else if (selectedIndex() >= 0) ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  if (found >= 0) {
+    if (selectedIndex() != found) {
+      // A refresh must retain the selection without scrolling after its new rank.
+      ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+      ListView_SetItemState(list, found, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+  } else if (selectedIndex() >= 0) ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
   if (manualSort) { const int offset = ListView_GetTopIndex(list); if (offset) ListView_Scroll(list, 0, -offset * rowHeight()); }
   else if (!partialUpdate && sortColumn[size_t(selectedTab)] == 0 && !topKey.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == topKey) { const int delta = int(index) - ListView_GetTopIndex(list); if (delta) ListView_Scroll(list, 0, delta * rowHeight()); break; }
   if (partialUpdate) {
@@ -365,15 +378,57 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
   if (hidden()) (sortOnly ? sortTimes : updateTimes).push_back(milliseconds(begin));
 #endif
 }
-const Process* Application::selectedProcess() const { const auto row = selectedRow(); return current && row && row->process >= 0 && row->kind != RowKind::Heading ? &current->processes[size_t(row->process)] : nullptr; }
-std::vector<const Process*> Application::selectedMembers() const {
-  std::vector<const Process*> result; const auto row = selectedRow();
-  if (current && row && (row->kind == RowKind::Group || row->kind == RowKind::Process || row->kind == RowKind::Window)) for (const int member : row->members) result.push_back(&current->processes[size_t(member)]);
+// Commands can open modal dialogs, whose message loops keep installing new samples.
+// Copy action targets before opening a dialog so refreshes cannot change their identity.
+std::optional<Process> Application::selectedProcess() const {
+  const auto row = selectedRow();
+  if (!current || !row || row->kind == RowKind::Heading || row->process < 0 || size_t(row->process) >= current->processes.size()) return std::nullopt;
+  return current->processes[size_t(row->process)];
+}
+std::optional<Entry> Application::selectedEntry() const {
+  const auto row = selectedRow();
+  if (!current || !row || row->entry < 0) return std::nullopt;
+  const std::span<const Entry> entries = selectedTab == StartupTab ? (current->startup ? std::span<const Entry>(current->startup->entries) : std::span<const Entry>{}) : selectedTab == UsersTab ? current->sessions : current->services;
+  if (size_t(row->entry) >= entries.size()) return std::nullopt;
+  return entries[size_t(row->entry)];
+}
+std::vector<Process> Application::selectedMembers(bool tree) const {
+  std::vector<Process> result; const auto row = selectedRow();
+  if (!current || !row || (row->kind != RowKind::Group && row->kind != RowKind::Process && row->kind != RowKind::Window)) return result;
+  const std::span<const int> members = row->kind == RowKind::Window ? std::span<const int>(&row->process, 1) : std::span<const int>(row->members);
+  std::vector<Identity> roots;
+  for (const int member : members) {
+    if (member < 0 || size_t(member) >= current->processes.size()) continue;
+    const auto& process = current->processes[size_t(member)];
+    if (tree) roots.push_back({process.id, process.created}); else result.push_back(process);
+  }
+  if (!roots.empty()) {
+    std::unordered_map<Identity, const Process*, IdentityHash> identities; identities.reserve(current->processes.size());
+    for (const auto& process : current->processes) identities.emplace(Identity{process.id, process.created}, &process);
+    for (const auto& identity : processTree(current->processes, roots)) {
+      const auto found = identities.find(identity);
+      if (found != identities.end()) result.push_back(*found->second);
+    }
+  }
   return result;
 }
 void Application::select(int index) {
   if (index < 0 || size_t(index) >= rows.size() || rows[size_t(index)].kind == RowKind::Heading) return;
   ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED); ListView_SetItemState(list, index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); ListView_EnsureVisible(list, index, FALSE);
+}
+void Application::skipHeading(int direction) {
+  const int focused = ListView_GetNextItem(list, -1, LVNI_FOCUSED);
+  const auto valid = [&](int index) { return index >= 0 && size_t(index) < rows.size(); };
+  if (!valid(focused) || rows[size_t(focused)].kind != RowKind::Heading) return;
+  const int step = direction < 0 ? -1 : 1;
+  auto seek = [&](int increment) { int index = focused; while (valid(index) && rows[size_t(index)].kind == RowKind::Heading) index += increment; return index; };
+  int next = seek(step); if (!valid(next)) next = seek(-step);
+  // Native Ctrl navigation moves focus without changing the selected process.
+  const bool selected = (ListView_GetItemState(list, focused, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+  ListView_SetItemState(list, focused, 0, LVIS_FOCUSED | (selected ? LVIS_SELECTED : 0));
+  if (!valid(next)) return;
+  if (selected) select(next);
+  else { ListView_SetItemState(list, next, LVIS_FOCUSED, LVIS_FOCUSED); ListView_EnsureVisible(list, next, FALSE); }
 }
 void Application::toggle(int index) {
   if (index < 0 || size_t(index) >= rows.size() || !rows[size_t(index)].expandable) return;
@@ -415,8 +470,8 @@ void Application::copy() {
   CloseClipboard();
 }
 // GDI+ is scoped to the chevron itself: a Graphics object kept alive across GDI calls on the same DC corrupts their output.
-static void chevron(HDC dc, float x, float y, float unit, bool open) {
-  Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, 128, 128, 128), 1.0f);
+static void chevron(HDC dc, float x, float y, float unit, bool open, COLORREF color) {
+  Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)), 1.0f);
   if (open) { const Gdiplus::PointF points[] = {{x - unit, y - 2 * unit}, {x + 3 * unit, y + 2 * unit}, {x + 7 * unit, y - 2 * unit}}; graphics.DrawLines(&pen, points, 3); }
   else { const Gdiplus::PointF points[] = {{x + unit, y - 4 * unit}, {x + 5 * unit, y}, {x + unit, y + 4 * unit}}; graphics.DrawLines(&pen, points, 3); }
 }
@@ -441,21 +496,22 @@ void Application::drawRow(HDC dc, int index, RECT bounds) {
     if (selected) background = heat ? blend(background, themeColor(Selection), 0.25) : themeColor(Selection); else if (hot) background = heat ? blend(background, themeColor(Hover), 0.25) : themeColor(Hover);
     SetDCBrushColor(dc, background); FillRect(dc, &box, GetStockBrush(DC_BRUSH));
     if (heat) { SetDCBrushColor(dc, blend(themeColor(RGB(190, 140, 130)), background, 0.25)); RECT edge{box.right - 1, box.top, box.right, box.bottom}; FillRect(dc, &edge, GetStockBrush(DC_BRUSH)); edge = {box.left - 1, box.top, box.left, box.bottom}; FillRect(dc, &edge, GetStockBrush(DC_BRUSH)); }
+    const COLORREF foreground = highContrast && (selected || hot) ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0));
     if (row.kind == RowKind::Heading) {
-      if (id == 0) { RECT text{box.left + scale(10), box.top + scale(4), client.right, box.bottom}; SelectObject(dc, headingFont); SetTextColor(dc, themeColor(HeadingText)); DrawTextW(dc, value.text.c_str(), -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX); SelectObject(dc, font); }
+      if (id == 0) { RECT text{box.left + scale(10), box.top + scale(4), client.right, box.bottom}; SelectObject(dc, headingFont); SetTextColor(dc, highContrast ? foreground : themeColor(HeadingText)); DrawTextW(dc, value.text.c_str(), -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX); SelectObject(dc, font); }
       continue;
     }
     RECT text{box.left + scale(6), box.top, box.right - scale(6), box.bottom};
     if (id == 0) {
       int iconLeft = box.left + scale(6);
       if (tree) {
-        if (row.expandable) chevron(dc, float(box.left + scale(11) + indent), float(box.top + (box.bottom - box.top) / 2), float(scale(100)) / 100, row.expanded);
+        if (row.expandable) chevron(dc, float(box.left + scale(11) + indent), float(box.top + (box.bottom - box.top) / 2), float(scale(100)) / 100, row.expanded, highContrast ? foreground : RGB(128, 128, 128));
         iconLeft = box.left + scale(28) + indent;
       } else if (compact) iconLeft = box.left + scale(8);
-      if (!ImageList_Draw(icons->images, row.icon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT)) ImageList_Draw(icons->images, Icons::DefaultIcon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT);
+      icons->draw(dc, row.icon, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, iconSize);
       text.left = iconLeft + iconSize + scale(6);
     }
-    SetTextColor(dc, highContrast && (selected || hot) ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0)));
+    SetTextColor(dc, foreground);
     DrawTextW(dc, value.text.c_str(), -1, &text, (definition.right || definition.heat) && id != 0 && !(definition.heat && !definition.right) ? DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX : DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
   }
 }
@@ -484,16 +540,18 @@ void Application::paintHeader(HDC dc, RECT client) {
     if (id < 0 || size_t(id) >= defs.size()) continue;
     const auto& definition = defs[size_t(id)]; const bool right = (definition.right || definition.heat) && id != 0 && !(definition.heat && !definition.right);
     const auto value = twoLine && definition.heat ? headerValue(id) : L"";
+    const COLORREF foreground = highContrast && index == hotHeader ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0));
     COLORREF background = index == hotHeader ? themeColor(Hover) : themeColor(RGB(255, 255, 255));
-    if (!value.empty()) { const double amount = _wtof(value.c_str()); if (amount >= 90) background = themeColor(Heat[6]); else if (amount >= 80) background = themeColor(Heat[5]); }
+    if (!highContrast && !value.empty()) { const double amount = _wtof(value.c_str()); if (amount >= 90) background = themeColor(Heat[6]); else if (amount >= 80) background = themeColor(Heat[5]); }
     SetDCBrushColor(dc, background); RECT fill{box.left, box.top, box.right - 1, box.bottom - 1}; FillRect(dc, &fill, GetStockBrush(DC_BRUSH));
     if (dark) { RECT separator{box.right - 1, box.top + 1, box.right, box.bottom - 1}; SetDCBrushColor(dc, themeColor(RGB(64, 64, 64))); FillRect(dc, &separator, GetStockBrush(DC_BRUSH)); }
     else for (int y = box.top + 1; y < box.bottom - 1; ++y) { const double fraction = double(y - box.top) / std::max(1L, box.bottom - box.top); const int shade = int(232 - 46 * fraction); SetPixelV(dc, box.right - 1, y, themeColor(RGB(shade, shade, shade))); }
-    if (!value.empty()) { RECT top{box.left + scale(4), box.top + scale(4), box.right - scale(7), box.top + scale(25)}; SelectObject(dc, percentFont); SetTextColor(dc, themeColor(RGB(0, 0, 0))); DrawTextW(dc, value.c_str(), -1, &top, DT_RIGHT | DT_TOP | DT_SINGLELINE); }
+    if (!value.empty()) { RECT top{box.left + scale(4), box.top + scale(4), box.right - scale(7), box.top + scale(25)}; SelectObject(dc, percentFont); SetTextColor(dc, foreground); DrawTextW(dc, value.c_str(), -1, &top, DT_RIGHT | DT_TOP | DT_SINGLELINE); }
     RECT label{box.left + scale(6), twoLine ? box.bottom - scale(23) : box.top, box.right - scale(7), twoLine ? box.bottom - scale(4) : box.bottom - 1};
-    SelectObject(dc, font); SetTextColor(dc, themeColor(HeaderText)); DrawTextW(dc, definition.title, -1, &label, (right ? DT_RIGHT : DT_LEFT) | (twoLine ? DT_BOTTOM : DT_VCENTER) | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dc, font); SetTextColor(dc, highContrast ? foreground : themeColor(HeaderText)); DrawTextW(dc, definition.title, -1, &label, (right ? DT_RIGHT : DT_LEFT) | (twoLine ? DT_BOTTOM : DT_VCENTER) | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     if (id == sortColumn[size_t(selectedTab)] && !compact) {
-      Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, 118, 118, 118), 1.0f); const float unit = float(scale(100)) / 100;
+      const COLORREF arrow = highContrast ? foreground : RGB(118, 118, 118);
+      Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(arrow), GetGValue(arrow), GetBValue(arrow)), 1.0f); const float unit = float(scale(100)) / 100;
       const float left = float(twoLine && right ? box.left + scale(9) : (box.left + box.right) / 2 - scale(4)), top = float(box.top + scale(twoLine ? 6 : 1)), width = 8 * unit, height = 4 * unit;
       const bool descending = !ascending[size_t(selectedTab)];
       const Gdiplus::PointF points[] = {{left, descending ? top : top + height}, {left + width / 2, descending ? top + height : top}, {left + width, descending ? top : top + height}}; graphics.DrawLines(&pen, points, 3);
@@ -503,6 +561,11 @@ void Application::paintHeader(HDC dc, RECT client) {
 }
 LRESULT CALLBACK Application::headerProcedure(HWND target, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context) {
   auto app = reinterpret_cast<Application*>(context);
+  if (!app->rebuilding && message == HDM_SETORDERARRAY && word && data && reinterpret_cast<const int*>(data)[0] != 0) return FALSE;
+  if (!app->rebuilding && message == HDM_SETITEMW && data) {
+    const auto item = reinterpret_cast<const HDITEMW*>(data);
+    if ((item->mask & HDI_ORDER) && ((word == 0 && item->iOrder != 0) || (word != 0 && item->iOrder == 0))) return FALSE;
+  }
   HDITEMW widthItem{};
   const bool widthChange = message == HDM_SETITEMW && data && (reinterpret_cast<HDITEMW*>(data)->mask & HDI_WIDTH);
   if (widthChange && !app->compact) {
@@ -576,6 +639,7 @@ LRESULT CALLBACK Application::listProcedure(HWND target, UINT message, WPARAM wo
   const int previousScroll = horizontal ? GetScrollPos(target, SB_HORZ) : 0;
   const bool control = GetKeyState(VK_CONTROL) & 0x8000;
   switch (message) {
+  case LVM_SETCOLUMNORDERARRAY: if (!app->rebuilding && word && data && reinterpret_cast<const int*>(data)[0] != 0) return FALSE; break;
   case LVM_SETCOLUMNWIDTH:
     if (data >= 0 && !app->compact) {
       data = std::max(int(data), app->scale(app->minimumColumnWidth(app->columnsTab, app->columnAt(int(word)))));
@@ -584,6 +648,10 @@ LRESULT CALLBACK Application::listProcedure(HWND target, UINT message, WPARAM wo
     break;
   case WM_NOTIFY: {
     const auto notice = reinterpret_cast<NMHEADERW*>(data);
+    if (notice && notice->hdr.hwndFrom == app->header && !app->rebuilding) {
+      if (notice->hdr.code == HDN_BEGINDRAG && notice->iItem == 0) return TRUE;
+      if (notice->hdr.code == HDN_ENDDRAG && (notice->iItem == 0 || (notice->pitem && notice->pitem->iOrder == 0))) return TRUE;
+    }
     if (notice && notice->hdr.hwndFrom == app->header && (notice->hdr.code == HDN_ITEMCHANGINGW || notice->hdr.code == HDN_TRACKW) && notice->pitem && (notice->pitem->mask & HDI_WIDTH) && !app->compact) {
       notice->pitem->cxy = std::max(notice->pitem->cxy, app->scale(app->minimumColumnWidth(app->columnsTab, app->columnAt(notice->iItem))));
       if (notice->hdr.code == HDN_TRACKW && app->columnTracking) { app->trackingColumn = notice->iItem; app->trackingWidth = notice->pitem->cxy; }
@@ -628,6 +696,9 @@ LRESULT CALLBACK Application::listProcedure(HWND target, UINT message, WPARAM wo
   const auto result = DefSubclassProc(target, message, word, data);
   if (batch) DefSubclassProc(target, WM_SETREDRAW, TRUE, 0);
   --app->columnMutationDepth;
+  // Keep native arrow/page movement, correcting only destinations that are headings.
+  if (message == WM_KEYDOWN && (word == VK_UP || word == VK_DOWN || word == VK_HOME || word == VK_END || word == VK_PRIOR || word == VK_NEXT))
+    app->skipHeading(word == VK_UP || word == VK_PRIOR || word == VK_END ? -1 : 1);
   if (app->geometryQueued && !app->columnMutationDepth && !app->rebuilding) SendMessageW(app->window, WM_APP + 10, 0, 0);
   if (horizontal && GetScrollPos(target, SB_HORZ) != previousScroll) RedrawWindow(target, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
   if (app->dark && (message == WM_PRINT || (!app->rebuilding && !(app->geometryQueued && app->columnMutationDepth))) && (message == WM_PAINT || message == WM_HSCROLL || message == WM_VSCROLL || message == WM_MOUSEWHEEL || message == WM_SIZE || message == WM_NCMOUSEMOVE || message == WM_NCMOUSELEAVE || message == WM_THEMECHANGED || message == WM_PRINT)) app->paintScrollbars(message == WM_PRINT ? HDC(word) : nullptr);
