@@ -679,7 +679,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   } catch (const std::exception& error) {
     if (interactive) MessageBoxA(nullptr, error.what(), "Task Manager", MB_OK | MB_ICONERROR);
 #ifdef TASKMGR_DIAGNOSTICS
-    else { auto report = std::find(values.begin(), values.end(), L"--output"); if (report != values.end() && report + 1 != values.end()) { taskmgr::Report stream{*(report + 1)}; stream << "{\"native\":true,\"passed\":false,\"error\":\"" << error.what() << "\"}"; } }
+    else { auto report = std::find(values.begin(), values.end(), L"--output"); if (report != values.end() && report + 1 != values.end()) taskmgr::writeDiagnosticError(*(report + 1), error.what()); }
 #endif
     result = 1;
   }

@@ -1,5 +1,6 @@
 #include "core.hpp"
 #include "report.hpp"
+#include <iterator>
 
 namespace taskmgr {
 static int findNext(std::span<const std::wstring> names, std::wstring_view prefix, int start) {
@@ -15,13 +16,7 @@ static int findNext(std::span<const std::wstring> names, std::wstring_view prefi
 static std::wstring option(const std::vector<std::wstring>& arguments, const std::wstring& key, const std::wstring& fallback = L"") { const auto found = std::find(arguments.begin(), arguments.end(), key); return found != arguments.end() && found + 1 != arguments.end() ? *(found + 1) : fallback; }
 static bool flag(const std::vector<std::wstring>& arguments, const std::wstring& key) { return std::find(arguments.begin(), arguments.end(), key) != arguments.end(); }
 static void jsonString(Report& stream, const std::wstring& value) {
-  stream << '"';
-  for (const unsigned char character : utf8(value)) {
-    if (character == '"' || character == '\\') stream << '\\' << char(character);
-    else if (character < 32) { const char hex[] = "0123456789abcdef"; stream << "\\u00" << hex[character >> 4] << hex[character & 15]; }
-    else stream << char(character);
-  }
-  stream << '"';
+  stream.jsonString(utf8(value));
 }
 static int startupReport(const std::wstring& output) {
   const auto began = Clock::now(); double firstEntries = -1; size_t snapshots = 0, previousCount = 0; bool progressive = true, completed = false;
@@ -38,9 +33,27 @@ static int startupReport(const std::wstring& output) {
   stream << "]}"; return stream && progressive && completed && snapshots == 6 ? 0 : 1;
 }
 static void metric(Report& stream, const std::string& name, std::vector<double> times) { std::sort(times.begin(), times.end()); stream << '"' << name << "\":{\"count\":" << times.size() << ",\"meanMilliseconds\":" << (times.empty() ? 0 : std::accumulate(times.begin(), times.end(), 0.0) / double(times.size())) << ",\"p95Milliseconds\":" << (times.empty() ? 0 : times[size_t(std::ceil(double(times.size()) * .95)) - 1]) << '}'; }
+static std::vector<std::pair<std::string, bool>> reportEncodingTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  wchar_t directory[MAX_PATH]{}, path[MAX_PATH]{};
+  const DWORD length = GetTempPathW(MAX_PATH, directory);
+  const bool created = length > 0 && length < MAX_PATH && GetTempFileNameW(directory, L"tmr", 0, path) != 0;
+  checks.emplace_back("report_encoding_owned_fixture", created);
+  if (!created) return checks;
+  struct Cleanup { const wchar_t* path; ~Cleanup() { DeleteFileW(path); } } cleanup{path};
+  auto contents = [&] { std::ifstream input{std::filesystem::path(path), std::ios::binary}; return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()); };
+  const std::string message = "Cannot open \"C:\\Folder\\tool.exe\"\r\n\t" + std::string("\0\x01\x1f", 3) + " Caf\xc3\xa9 \xf0\x9f\x9a\x80";
+  const std::string expected = "{\"native\":true,\"passed\":false,\"error\":\"Cannot open \\\"C:\\\\Folder\\\\tool.exe\\\"\\u000d\\u000a\\u0009\\u0000\\u0001\\u001f Caf\xc3\xa9 \xf0\x9f\x9a\x80\"}";
+  checks.emplace_back("report_error_write_succeeds", writeDiagnosticError(path, message));
+  checks.emplace_back("report_error_escapes_controls_quotes_paths_and_keeps_utf8", contents() == expected);
+  checks.emplace_back("report_empty_error_write_succeeds", writeDiagnosticError(path, ""));
+  checks.emplace_back("report_empty_error_is_quoted", contents() == "{\"native\":true,\"passed\":false,\"error\":\"\"}");
+  return checks;
+}
 static int selfTest(const std::wstring& output) {
   std::vector<std::pair<std::string, bool>> checks; auto check = [&](std::string name, bool passed) { checks.emplace_back(std::move(name), passed); };
   for (auto& test : startupTests()) checks.push_back(std::move(test));
+  for (auto& test : reportEncodingTests()) checks.push_back(std::move(test));
   check("hexadecimal_bounds", hexadecimal(0) == L"0" && hexadecimal(UINT64_MAX) == L"ffffffffffffffff");
   check("counter_integer_decimal", counterInteger(L"0", 10) == 0u && counterInteger(L"0042", 10) == 42u && counterInteger(L"4294967295", 10) == UINT32_MAX);
   check("counter_integer_hexadecimal", counterInteger(L"0000002a", 16) == 42u && counterInteger(L"FFFFFFFF", 16) == UINT32_MAX);

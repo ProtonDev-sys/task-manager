@@ -538,7 +538,7 @@ void Application::writeBenchmark() {
   stream << "{\"native\":true,\"passed\":" << (exitCode == 0 ? "true" : "false") << ",\"elapsedSeconds\":" << elapsed << ",\"firstSampleMilliseconds\":" << (firstSample == Time{} ? 0 : std::chrono::duration<double, std::milli>(firstSample - started).count()) << ",\"processCpuPercentOneCore\":" << cpu * 100 / elapsed << ",\"privateBytes\":" << memory.PrivateUsage << ",\"handles\":" << handles << ",\"updates\":" << updates << ",\"exercises\":" << tests << ",\"keyboardPassed\":" << (keyboardPassed ? "true" : "false") << ',';
   stream << "\"workingSetBytes\":" << memory.WorkingSetSize << ",\"peakWorkingSetBytes\":" << memory.PeakWorkingSetSize << ',';
   stream << "\"warmupSeconds\":" << options.warmup << ",\"handleDelta\":" << int64_t(handles) - baselineHandles << ",\"gdiDelta\":" << int64_t(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS)) - baselineGdi << ",\"userDelta\":" << int64_t(GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS)) - baselineUser << ',';
-  stream << "\"sortingFailure\":\"" << sortingFailure << "\",";
+  stream << "\"sortingFailure\":"; stream.jsonString(sortingFailure) << ',';
   stream << "\"sortingPassed\":" << (sortingPassed ? "true" : "false") << ",\"coalescingPassed\":" << (coalescingPassed ? "true" : "false") << ",\"sortRequests\":" << sortRequests << ",\"fullRebuilds\":" << fullRebuilds << ",\"sortPasses\":" << sortPasses << ','; writeMetric(stream, "cachedSort", sortTimes); stream << ',';
   writeMetric(stream, "performanceHover", hoverTimes); stream << ',';
   writeMetric(stream, "tabSwitch", tabTimes); stream << ',';

@@ -14,6 +14,15 @@ public:
   Report& operator=(const Report&) = delete;
   Report& operator<<(std::string_view text) { if (healthy && (!file || fwrite(text.data(), 1, text.size(), file) != text.size())) healthy = false; return *this; }
   Report& operator<<(char value) { return *this << std::string_view(&value, 1); }
+  Report& jsonString(std::string_view value) {
+    *this << '"';
+    for (const unsigned char character : value) {
+      if (character == '"' || character == '\\') *this << '\\' << char(character);
+      else if (character < 32) { constexpr char hex[] = "0123456789abcdef"; *this << "\\u00" << hex[character >> 4] << hex[character & 15]; }
+      else *this << char(character);
+    }
+    return *this << '"';
+  }
   template<class Integer> requires std::is_integral_v<Integer>
   Report& operator<<(Integer value) {
     char buffer[32]{};
@@ -34,4 +43,10 @@ private:
   FILE* file = nullptr;
   bool healthy = true;
 };
+inline bool writeDiagnosticError(const std::wstring& path, std::string_view message) {
+  Report stream{path};
+  stream << "{\"native\":true,\"passed\":false,\"error\":";
+  stream.jsonString(message) << '}';
+  return bool(stream);
+}
 }
