@@ -103,6 +103,7 @@ struct Sample {
 #ifdef TASKMGR_DIAGNOSTICS
   double duration = 0;
   std::array<double, 6> stages{};
+  bool cpuTopologyChanged = false;
 #endif
   uint64_t uptime = 0;
   unsigned threads = 0, handles = 0;

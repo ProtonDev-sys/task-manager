@@ -267,6 +267,9 @@ Sample Sampler::sample(bool startupVisible) {
   if (topologyChanged) { cpuInfo = readCpu(); cachedResources.cores.clear(); cachedResources.interrupts = 0; }
   if (const auto count = processorCount(topology)) cpuInfo.logical = *count;
   Sample result; result.cpuInfo = cpuInfo;
+#ifdef TASKMGR_DIAGNOSTICS
+  result.cpuTopologyChanged = topologyChanged;
+#endif
   const bool refreshResources = topologyChanged || resourcesAt == Time{} || started - resourcesAt >= std::chrono::seconds(1);
   const double resourceElapsed = cachedResources.resourcesSampledAt == Time{} ? 0 : std::chrono::duration<double>(started - cachedResources.resourcesSampledAt).count();
   if (!refreshResources) {
