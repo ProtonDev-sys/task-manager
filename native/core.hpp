@@ -185,6 +185,7 @@ std::vector<Entry> readSessions();
 StartupInventory readStartup(const std::function<void(const StartupInventory&)>& progress = {});
 #ifdef TASKMGR_DIAGNOSTICS
 std::vector<std::pair<std::string, bool>> startupTests();
+std::vector<std::pair<std::string, bool>> gpuEngineTests();
 #endif
 std::wstring fullAccountName(const std::wstring& user);
 class Icons {

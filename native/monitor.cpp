@@ -23,6 +23,70 @@ std::vector<std::wstring_view> splitFields(std::wstring_view text, wchar_t delim
   while (!text.empty()) { const size_t end = text.find(delimiter); fields.push_back(text.substr(0, end)); if (end == text.npos) break; text.remove_prefix(end + 1); }
   return fields;
 }
+struct ProcessGpu { double value = 0; std::wstring engine; };
+static void aggregateGpuEngines(GpuInfo& gpu, std::span<const std::pair<std::wstring, double>> engines, std::unordered_map<DWORD, ProcessGpu>& processGpu) {
+  std::map<std::wstring, double> engineTotals;
+  std::unordered_map<DWORD, std::map<std::wstring, double>> perProcess;
+  for (const auto& [name, value] : engines) {
+    if (name.find(gpu.key) == std::wstring::npos) continue;
+    const auto engine = name.find(L"_engtype_"); if (engine == std::wstring::npos) continue;
+    const auto engineNumber = name.find(L"_eng_"); const auto type = name.substr(engine + 9);
+    const auto instance = (engineNumber == std::wstring::npos ? L"" : name.substr(engineNumber + 5, engine - engineNumber - 5)) + L"|" + type;
+    engineTotals[instance] += value;
+    if (name.starts_with(L"pid_")) {
+      const auto end = name.find(L'_', 4);
+      if (end != name.npos) if (const auto pid = counterInteger(std::wstring_view(name).substr(4, end - 4), 10)) perProcess[*pid][instance] += value;
+    }
+  }
+  std::map<std::wstring, double> byType;
+  for (const auto& [instance, value] : engineTotals) { const auto type = instance.substr(instance.find(L'|') + 1); auto& slot = byType[type]; slot = std::max(slot, std::min(100.0, value)); gpu.usage = std::max(gpu.usage, std::min(100.0, value)); }
+  for (const auto& [type, value] : byType) gpu.engines.emplace_back(type, value);
+  // Independent engines can share a type. A process's utilization is its busiest engine,
+  // across all GPUs; summing engines of the same type overstates simultaneous activity.
+  for (const auto& [pid, instances] : perProcess) for (const auto& [instance, value] : instances) {
+    auto& slot = processGpu[pid];
+    if (value > slot.value) { slot.value = std::min(100.0, value); slot.engine = L"GPU " + std::to_wstring(gpu.index) + L" - " + instance.substr(instance.find(L'|') + 1); }
+  }
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> gpuEngineTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  const std::wstring firstKey = L"luid_0x00000000_0x00000001", secondKey = L"luid_0x00000000_0x00000002";
+  const auto name = [](DWORD pid, const std::wstring& key, unsigned engine, const wchar_t* type) { return L"pid_" + std::to_wstring(pid) + L"_" + key + L"_phys_0_eng_" + std::to_wstring(engine) + L"_engtype_" + type; };
+  {
+    GpuInfo gpu; gpu.key = firstKey;
+    std::unordered_map<DWORD, ProcessGpu> processes;
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 40}, {name(10, firstKey, 1, L"3D"), 50}};
+    aggregateGpuEngines(gpu, engines, processes);
+    checks.emplace_back("gpu_process_uses_busiest_engine_of_same_type", processes.at(10).value == 50 && processes.at(10).engine == L"GPU 0 - 3D");
+    checks.emplace_back("gpu_adapter_uses_busiest_engine_of_same_type", gpu.usage == 50 && gpu.engines == std::vector<std::pair<std::wstring, double>>{{L"3D", 50}});
+  }
+  {
+    GpuInfo gpu; gpu.key = firstKey;
+    std::unordered_map<DWORD, ProcessGpu> processes;
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 25}, {name(20, firstKey, 0, L"3D"), 35}, {name(10, firstKey, 1, L"Copy"), 45}};
+    aggregateGpuEngines(gpu, engines, processes);
+    checks.emplace_back("gpu_shared_engine_adds_process_contributions", gpu.usage == 60 && gpu.engines == std::vector<std::pair<std::wstring, double>>{{L"3D", 60}, {L"Copy", 45}});
+    checks.emplace_back("gpu_processes_keep_individual_busiest_engine", processes.at(10).value == 45 && processes.at(10).engine == L"GPU 0 - Copy" && processes.at(20).value == 35 && processes.at(20).engine == L"GPU 0 - 3D");
+  }
+  {
+    GpuInfo first; first.key = firstKey; GpuInfo second; second.key = secondKey; second.index = 1;
+    std::unordered_map<DWORD, ProcessGpu> processes;
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 40}, {name(10, firstKey, 1, L"3D"), 50}, {name(10, secondKey, 0, L"Copy"), 80}};
+    aggregateGpuEngines(first, engines, processes); aggregateGpuEngines(second, engines, processes);
+    checks.emplace_back("gpu_process_selects_busiest_engine_across_adapters", processes.at(10).value == 80 && processes.at(10).engine == L"GPU 1 - Copy" && first.usage == 50 && second.usage == 80);
+  }
+  {
+    GpuInfo gpu; gpu.key = firstKey;
+    std::unordered_map<DWORD, ProcessGpu> processes;
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 120}, {name(20, firstKey, 0, L"3D"), 10}, {name(30, firstKey, 1, L"Copy"), 0}};
+    aggregateGpuEngines(gpu, engines, processes);
+    checks.emplace_back("gpu_usage_capped_at_one_hundred", processes.at(10).value == 100 && gpu.usage == 100 && gpu.engines.front().second == 100);
+    checks.emplace_back("gpu_idle_process_has_no_busy_engine", processes.at(30).value == 0 && processes.at(30).engine.empty());
+  }
+  return checks;
+}
+#endif
 std::wstring number(double value, int precision) { wchar_t text[384]{}; swprintf_s(text, L"%.*f", std::clamp(precision, 0, 9), value); return text; }
 std::wstring grouped(double value, int precision) {
   auto text = number(value, precision); const auto point = text.find(L'.'); auto end = point == text.npos ? text.size() : point; const size_t start = text[0] == L'-' ? 1 : 0;
@@ -312,24 +376,9 @@ Sample Sampler::sample(bool startupVisible) {
 #endif
   if (refreshResources) {
   const auto engines = counters.values(L"gpu"), dedicated = counters.values(L"gpuDedicated"), shared = counters.values(L"gpuShared");
-  struct ProcessGpu { double value = 0; std::wstring engine; };
   std::unordered_map<DWORD, ProcessGpu> processGpu;
   for (auto gpu : gpuDescriptors) {
-    std::map<std::wstring, double> engineTotals; std::unordered_map<DWORD, std::map<std::wstring, double>> perProcess;
-    for (const auto& [name, value] : engines) {
-      if (name.find(gpu.key) == std::wstring::npos) continue;
-      const auto engine = name.find(L"_engtype_"); if (engine == std::wstring::npos) continue;
-      const auto engineNumber = name.find(L"_eng_"); const auto type = name.substr(engine + 9); const auto instance = (engineNumber == std::wstring::npos ? L"" : name.substr(engineNumber + 5, engine - engineNumber - 5)) + L"|" + type;
-      engineTotals[instance] += value;
-      if (name.starts_with(L"pid_")) {
-        const auto end = name.find(L'_', 4);
-        if (end != name.npos) if (const auto pid = counterInteger(std::wstring_view(name).substr(4, end - 4), 10)) perProcess[*pid][type] += value;
-      }
-    }
-    std::map<std::wstring, double> byType;
-    for (const auto& [instance, value] : engineTotals) { const auto type = instance.substr(instance.find(L'|') + 1); auto& slot = byType[type]; slot = std::max(slot, std::min(100.0, value)); gpu.usage = std::max(gpu.usage, std::min(100.0, value)); }
-    for (const auto& [type, value] : byType) gpu.engines.emplace_back(type, value);
-    for (const auto& [pid, types] : perProcess) for (const auto& [type, value] : types) { auto& slot = processGpu[pid]; if (value > slot.value) { slot.value = std::min(100.0, value); slot.engine = L"GPU " + std::to_wstring(gpu.index) + L" - " + type; } }
+    aggregateGpuEngines(gpu, engines, processGpu);
     for (const auto& [name, value] : dedicated) if (name.find(gpu.key) != std::wstring::npos) gpu.dedicated += uint64_t(value);
     for (const auto& [name, value] : shared) if (name.find(gpu.key) != std::wstring::npos) gpu.shared += uint64_t(value);
     gpu.temperature = gpuTemperature(gpu.key);
