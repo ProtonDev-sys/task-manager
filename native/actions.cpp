@@ -85,10 +85,14 @@ void processAction(const Process& process, Action action, const std::wstring& ar
   case Action::Dump: {
     static std::mutex gate; std::lock_guard lock(gate);
     const auto temporary = argument + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
+    bool created = false;
     try {
-      { Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)); if (file.value == INVALID_HANDLE_VALUE || !MiniDumpWriteDump(handle.value, process.id, file.value, MiniDumpWithFullMemory, nullptr, nullptr, nullptr)) throw std::runtime_error(utf8(winerror())); }
+      { Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (file.value == INVALID_HANDLE_VALUE) throw std::runtime_error(utf8(winerror()));
+        created = true;
+        if (!MiniDumpWriteDump(handle.value, process.id, file.value, MiniDumpWithFullMemory, nullptr, nullptr, nullptr)) throw std::runtime_error(utf8(winerror())); }
       if (!MoveFileExW(temporary.c_str(), argument.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) throw std::runtime_error(utf8(winerror()));
-    } catch (...) { DeleteFileW(temporary.c_str()); throw; }
+    } catch (...) { if (created) DeleteFileW(temporary.c_str()); throw; }
     success = TRUE; break;
   }
   default: throw std::runtime_error("Unsupported action");

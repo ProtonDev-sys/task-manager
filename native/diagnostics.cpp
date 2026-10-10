@@ -133,6 +133,33 @@ static int selfTest(const std::wstring& output) {
     Handle childHandle(child.hProcess), thread(child.hThread); FILETIME created{}, exited{}, kernel{}, user{}; GetProcessTimes(childHandle.value, &created, &exited, &kernel, &user); Process owned; owned.id = child.dwProcessId; owned.created = ticks(created); owned.name = L"Owned test child";
     const auto withChild = sampler.sample();
     check("fast_process_snapshot_detects_new_child", std::any_of(withChild.processes.begin(), withChild.processes.end(), [&](const Process& process) { return process.id == owned.id && process.created == owned.created; }));
+    {
+      wchar_t directory[MAX_PATH]{}, destination[MAX_PATH]{};
+      const DWORD length = GetTempPathW(MAX_PATH, directory);
+      const bool destinationCreated = length > 0 && length < MAX_PATH && GetTempFileNameW(directory, L"tmd", 0, destination) != 0;
+      bool temporaryCreated = false, written = false, refused = false, preserved = false;
+      const auto temporary = destinationCreated ? std::wstring(destination) + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp" : L"";
+      constexpr char sentinel[] = "Existing temporary file belongs to another operation.";
+      if (destinationCreated) {
+        { Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+          temporaryCreated = file.value != INVALID_HANDLE_VALUE; DWORD count = 0;
+          written = temporaryCreated && WriteFile(file.value, sentinel, sizeof(sentinel), &count, nullptr) && count == sizeof(sentinel); }
+        if (written) {
+          // CREATE_NEW must fail before MiniDumpWriteDump: this test never writes a dump.
+          try { processAction(owned, Action::Dump, destination); }
+          catch (const std::exception& error) { refused = std::string(error.what()) == utf8(winerror(ERROR_FILE_EXISTS)); }
+          { Handle file(CreateFileW(temporary.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+            std::array<char, sizeof(sentinel) + 1> contents{}; DWORD count = 0;
+            preserved = file.value != INVALID_HANDLE_VALUE && ReadFile(file.value, contents.data(), DWORD(contents.size()), &count, nullptr) && count == sizeof(sentinel) && memcmp(contents.data(), sentinel, sizeof(sentinel)) == 0; }
+        }
+      }
+      check("dump_collision_fixture_created", destinationCreated && temporaryCreated && written);
+      check("dump_collision_error_reported", refused);
+      check("dump_collision_existing_file_preserved", preserved);
+      const bool temporaryRemoved = !temporaryCreated || DeleteFileW(temporary.c_str()) != FALSE || GetLastError() == ERROR_FILE_NOT_FOUND;
+      const bool destinationRemoved = !destinationCreated || DeleteFileW(destination) != FALSE;
+      check("dump_collision_fixture_cleanup", temporaryRemoved && destinationRemoved);
+    }
     PROCESS_POWER_THROTTLING_STATE available{}; available.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
     const bool supportsEfficiency = GetProcessInformation(childHandle.value, ProcessPowerThrottling, &available, sizeof(available)) != FALSE;
     const DWORD efficiencyError = supportsEfficiency ? ERROR_SUCCESS : GetLastError();
