@@ -230,6 +230,7 @@ public:
 #ifdef TASKMGR_DIAGNOSTICS
   std::vector<double> latencies;
   std::vector<double> displayLatencies;
+  void setTestMetadata(const Process& process, Metadata metadata) { entries[{process.id, process.created}] = std::move(metadata); }
   Icons(HWND window, int iconSize, bool measure = false);
 #else
   Icons(HWND window, int iconSize);

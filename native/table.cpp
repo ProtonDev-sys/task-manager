@@ -176,8 +176,8 @@ void Application::buildProcesses(std::vector<Row>& next) {
     if (known[size_t(index)]) return owners[size_t(index)];
     const auto& process = processes[size_t(index)]; const auto& metadata = icons->get(process);
     std::pair<std::wstring, bool> result{L"pid:" + std::to_wstring(process.id), process.app};
-    if (!metadata.package.empty()) result = {L"package:" + metadata.package, process.app};
-    else if (const auto parent = byId.find(process.parent); depth < 64 && process.id > 4 && parent != byId.end() && process.parent != process.id && process.parent > 4 && processes[size_t(parent->second)].created <= process.created) {
+    if (!metadata.package.empty()) result = {L"package:" + std::to_wstring(process.session) + L":" + metadata.package, process.app};
+    else if (const auto parent = byId.find(process.parent); depth < 64 && process.id > 4 && parent != byId.end() && process.parent != process.id && process.parent > 4 && processes[size_t(parent->second)].session == process.session && processes[size_t(parent->second)].created <= process.created) {
       const auto& parentOwner = owner(parent->second, depth + 1); const auto& parentProcess = processes[size_t(parent->second)];
       const bool sameImage = lower(parentProcess.name) == lower(process.name), shell = lower(parentProcess.name) == L"explorer.exe" && !sameImage;
       if (parentOwner.second && (!process.app || sameImage) && (sameImage || !shell)) result = parentOwner;

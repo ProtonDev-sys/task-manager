@@ -114,6 +114,38 @@ bool Application::verifySorting() {
       }
     }
   }
+  {
+    // Anonymous packaged and desktop applications in separate logon sessions.
+    const auto savedSample = current; const int originalTab = selectedTab, originalSort = sortColumn[ProcessesTab];
+    const bool originalCompact = compact, originalGrouping = groupByType, originalDirection = ascending[ProcessesTab];
+    auto originalExpanded = std::move(expanded);
+    auto sample = std::make_shared<Sample>(); sample->processes.resize(7);
+    for (size_t index = 0; index < sample->processes.size(); ++index) {
+      auto& process = sample->processes[index]; process.id = DWORD(900101 + index * 4); process.created = 100 + index; process.name = L"Fixture.exe";
+      process.session = index < 2 ? 11 : index < 4 ? 22 : index == 4 ? 33 : 44; process.app = index == 0 || index == 2 || index == 5;
+      if (index < 4) { Metadata metadata; metadata.package = L"Anonymous.Package"; icons->setTestMetadata(process, std::move(metadata)); }
+    }
+    sample->processes[1].parent = sample->processes[0].id; sample->processes[3].parent = sample->processes[2].id;
+    sample->processes[4].parent = sample->processes[0].id; sample->processes[6].parent = sample->processes[5].id;
+    current = sample; selectedTab = ProcessesTab; compact = false; sortColumn[ProcessesTab] = 0; ascending[ProcessesTab] = true; expanded.clear();
+    for (const bool grouped : {false, true}) {
+      groupByType = grouped; std::vector<Row> fixture; buildProcesses(fixture);
+      unsigned roots = 0;
+      for (const auto& row : fixture) if (row.depth == 0 && (row.kind == RowKind::Process || row.kind == RowKind::Group)) {
+        ++roots; const DWORD session = sample->processes[size_t(row.process)].session;
+        check(std::all_of(row.members.begin(), row.members.end(), [&](int member) { return sample->processes[size_t(member)].session == session; }), "process-group-stays-in-one-session");
+        const std::vector<int> expected = session == 11 ? std::vector<int>{0, 1} : session == 22 ? std::vector<int>{2, 3} : session == 33 ? std::vector<int>{4} : std::vector<int>{5, 6};
+        check(row.members == expected, "process-group-keeps-same-session-members");
+        if (row.expandable) expanded.insert(row.key);
+      }
+      check(roots == 4, "process-groups-separate-package-and-parent-sessions");
+      fixture.clear(); buildProcesses(fixture);
+      check(std::count_if(fixture.begin(), fixture.end(), [](const Row& row) { return row.depth == 1 && row.kind == RowKind::Process; }) == 6, "process-group-expansion-keeps-members");
+      expanded.clear();
+    }
+    current = savedSample; selectedTab = originalTab; compact = originalCompact; groupByType = originalGrouping; sortColumn[ProcessesTab] = originalSort; ascending[ProcessesTab] = originalDirection; expanded = std::move(originalExpanded);
+    indexedServices.clear(); indexedInventory.reset(); icons->prune(activity);
+  }
   selectTab(DetailsTab);
   const auto cpuColumn = std::find(shown[DetailsTab].begin(), shown[DetailsTab].end(), 5);
   if (cpuColumn != shown[DetailsTab].end()) {
