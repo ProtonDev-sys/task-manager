@@ -8,7 +8,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) { throw 'Build the optimized developer executable with ./build.ps1 -TestConfiguration Release before benchmarking.' }
+$Executable = (Resolve-Path -LiteralPath $Executable).Path
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+$OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $cases = @(
     @{ Name = 'self-test'; Arguments = '--self-test' },
     @{ Name = 'components'; Arguments = '--component-benchmark' },
@@ -26,16 +28,34 @@ $cases = @(
     @{ Name = 'minimized'; Arguments = "--ui-benchmark --minimized --seconds $Seconds" }
 )
 foreach ($tab in 0..6) { $cases += @{ Name = "tab-$tab"; Arguments = "--ui-benchmark --tab $tab --seconds $Seconds" } }
+$suitePath = Join-Path $OutputDirectory 'suite.json'
+# A failed attempt must not leave a previous successful suite or reuse old case reports.
+foreach ($reportPath in @($suitePath) + @($cases | ForEach-Object { Join-Path $OutputDirectory ($_.Name + '.json') })) {
+    if (Test-Path -LiteralPath $reportPath -PathType Leaf) { Remove-Item -LiteralPath $reportPath }
+}
 $results = foreach ($case in $cases) {
     $reportPath = Join-Path $OutputDirectory ($case.Name + '.json')
     $process = Start-Process -FilePath $Executable -ArgumentList "$($case.Arguments) --output `"$reportPath`"" -WindowStyle Hidden -PassThru
-    if (-not $process.WaitForExit(($Seconds + 60) * 1000)) {
-        $process.Kill()
-        throw "Benchmark $($case.Name) exceeded its deadline. Only its owned diagnostic process was stopped."
+    try {
+        if (-not $process.WaitForExit(($Seconds + 60) * 1000)) {
+            $process.Kill()
+            $process.WaitForExit()
+            throw "Benchmark $($case.Name) exceeded its deadline. Only its owned diagnostic process was stopped."
+        }
+        if ($process.ExitCode -ne 0) { throw "Benchmark $($case.Name) failed with exit code $($process.ExitCode). See $reportPath" }
     }
-    if ($process.ExitCode -ne 0) { throw "Benchmark $($case.Name) failed with exit code $($process.ExitCode). See $reportPath" }
-    $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-    if ($report.passed -eq $false -or $report.error) { throw "Benchmark $($case.Name) failed. See $reportPath" }
+    finally { $process.Dispose() }
+    if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) { throw "Benchmark $($case.Name) produced no fresh report. See $reportPath" }
+    $reportText = Get-Content -LiteralPath $reportPath -Raw
+    # ConvertFrom-Json otherwise unwraps a single-element array into a success object.
+    if ($reportText -notmatch '^\s*\{') { throw "Benchmark $($case.Name) did not report success. See $reportPath" }
+    $report = $reportText | ConvertFrom-Json
+    if ($report -isnot [pscustomobject]) { throw "Benchmark $($case.Name) did not report success. See $reportPath" }
+    $passed = $report.PSObject.Properties['passed']
+    $reportedError = $report.PSObject.Properties['error']
+    if ($null -eq $passed -or $passed.Value -isnot [bool] -or -not $passed.Value -or ($null -ne $reportedError -and $null -ne $reportedError.Value)) {
+        throw "Benchmark $($case.Name) did not report success. See $reportPath"
+    }
     if ($EnforceBudgets -and $report.uiUpdate.count -gt 0) {
         if ($report.uiUpdate.p95Milliseconds -gt 50 -or $report.cachedSort.p95Milliseconds -gt 50 -or $report.tabSwitch.p95Milliseconds -gt 50 -or $report.messageQueue.p95Milliseconds -gt 100 -or $report.letterNavigation.p95Milliseconds -gt 100 -or $report.firstSampleMilliseconds -gt 2000) {
             throw "Responsiveness budget exceeded for $($case.Name). See $reportPath"
@@ -44,4 +64,4 @@ $results = foreach ($case in $cases) {
     Write-Host "$($case.Name): passed"
     [pscustomobject]@{ name = $case.Name; passed = $true; report = $reportPath }
 }
-$results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'suite.json') -Encoding utf8
+$results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $suitePath -Encoding utf8

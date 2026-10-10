@@ -7,10 +7,11 @@ Keep changes focused on a reproducible bug, a usability problem or a measured pe
 Use Windows x64 with Visual Studio 2022 or Build Tools, the Desktop development with C++ workload, a Windows SDK, and CMake 3.24 or newer.
 
 ```powershell
+./tests/benchmark.ps1
 ./build.ps1
 ```
 
-This builds production and a separate Debug developer executable, runs all nine CTest cases, and verifies production packaging. The published binary is `artifacts/app/TaskManager.exe`. Build output stays in `artifacts/` and should not be committed.
+The benchmark script regression uses mocked process objects and owned temporary reports; it does not require a build or launch the application. The build script builds production and a separate Debug developer executable, runs all ten CTest cases, and verifies production packaging. The published binary is `artifacts/app/TaskManager.exe`. Build output stays in `artifacts/` and should not be committed.
 
 For optimized developer tests and benchmarks:
 
@@ -53,7 +54,7 @@ Use `./performance.ps1 -BaselineExecutable <before.exe> -Executable <after.exe> 
 - Windows integration: replacement must remain optional, reversible and unable to overwrite another application's registration. Normal tests must not change the default Task Manager.
 - Diagnostics: guard developer-only tooling with `TASKMGR_DIAGNOSTICS`. Production must remain a standalone executable without diagnostic commands or report generation.
 
-The code is under `native/`. `native/diagnostics.cpp` contains self-tests, and `native/verify.cpp` exercises the native UI headlessly. `tests/production.ps1` checks the release manifest and diagnostic exclusion. GitHub Actions runs the optimized build and benchmark suite.
+The code is under `native/`. `native/diagnostics.cpp` contains self-tests, and `native/verify.cpp` exercises the native UI headlessly. `tests/production.ps1` checks the release manifest and diagnostic exclusion. GitHub Actions runs `tests/benchmark.ps1` before the optimized build and benchmark suite.
 
 ## Reports and pull requests
 

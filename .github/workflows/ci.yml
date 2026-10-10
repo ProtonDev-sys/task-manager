@@ -11,6 +11,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Verify benchmark report validation
+        shell: pwsh
+        run: ./tests/benchmark.ps1
       - name: Build and verify published application
         shell: pwsh
         run: ./build.ps1 -TestConfiguration Release
