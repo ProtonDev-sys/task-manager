@@ -23,6 +23,32 @@ bool Application::verifySorting() {
     next = previous; next.key = L"replacement"; check(!sameRowPaint(previous, next), "row-paint-detects-identity");
   }
   {
+    // Priority labels must follow their scheduler values in full and cached sorts.
+    const auto savedSample = current; const int originalTab = selectedTab, originalColumn = sortColumn[DetailsTab];
+    const bool originalDirection = ascending[DetailsTab], originalRebuilding = rebuilding; rebuilding = true;
+    const int previousOrderedTab = orderedTab, previousOrderedColumn = orderedColumn; const bool previousOrderedAscending = orderedAscending;
+    auto savedRows = std::move(rows); auto sample = std::make_shared<Sample>();
+    for (const LONG priority : {8, 24, 1, 13, 6, 10, 0}) { Process process; process.id = DWORD(900501 + sample->processes.size() * 4); process.created = 1; process.name = L"Priority fixture"; process.priority = priority; sample->processes.push_back(std::move(process)); }
+    current = sample; selectedTab = DetailsTab; sortColumn[DetailsTab] = 13;
+    const std::array<double, 7> values{0, 1, 6, 8, 10, 13, 24};
+    const std::array<std::wstring_view, 7> labels{L"N/A", L"Low", L"Below normal", L"Normal", L"Above normal", L"High", L"Realtime"};
+    auto priorityOrder = [&](const std::vector<Row>& items, bool direction) {
+      if (items.size() != values.size()) return false;
+      for (size_t index = 0; index < items.size(); ++index) { const size_t expected = direction ? index : values.size() - index - 1; if (items[index].cells[13].value != values[expected] || items[index].cells[13].text != labels[expected]) return false; }
+      return true;
+    };
+    for (const bool direction : {false, true}) {
+      ascending[DetailsTab] = direction; std::vector<Row> fixture; buildDetails(fixture);
+      check(priorityOrder(fixture, direction), "priority-full-sort-follows-scheduler-order");
+      rows = fixture; std::reverse(rows.begin(), rows.end()); orderedTab = -1; sortVisibleRows();
+      check(priorityOrder(rows, direction), "priority-cached-sort-follows-scheduler-order");
+      orderedTab = DetailsTab; orderedColumn = 13; orderedAscending = direction; ascending[DetailsTab] = !direction; sortVisibleRows();
+      check(priorityOrder(rows, !direction), "priority-cached-direction-reversal");
+    }
+    current = savedSample; selectedTab = originalTab; sortColumn[DetailsTab] = originalColumn; ascending[DetailsTab] = originalDirection; rows = std::move(savedRows); rebuilding = originalRebuilding;
+    orderedTab = previousOrderedTab; orderedColumn = previousOrderedColumn; orderedAscending = previousOrderedAscending;
+  }
+  {
     const auto savedSample = current;
     auto inventory = std::make_shared<ServiceInventory>(); inventory->services.resize(3);
     inventory->services[0].pid = 42; inventory->services[0].description = L"Zulu";

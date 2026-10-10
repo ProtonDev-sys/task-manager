@@ -28,7 +28,7 @@ std::span<const ColumnDef> Application::definitions(int tab) {
   static const ColumnDef users[] = {{L"User", 250, false, true, false}, {L"ID", 50, true, false, false}, {L"Session", 90, false, false, false}, {L"Status", 110, false, true, false}, {L"CPU", 73, true, true, true}, {L"Memory", 90, true, true, true}, {L"Disk", 73, true, true, true}, {L"Network", 73, true, true, true}};
   static const ColumnDef details[] = {{L"Name", 200, false, true, false}, {L"PID", 60, true, true, false}, {L"Status", 80, false, true, false}, {L"User name", 100, false, true, false}, {L"Session ID", 70, true, false, false}, {L"CPU", 40, true, true, false},
     {L"CPU time", 80, true, false, false}, {L"Memory (active private working set)", 110, true, true, false}, {L"Memory (private working set)", 110, true, false, false}, {L"Memory (commit size)", 110, true, false, false}, {L"Memory (working set)", 110, true, false, false},
-    {L"Memory (peak working set)", 110, true, false, false}, {L"Page faults", 90, true, false, false}, {L"Base priority", 90, false, false, false}, {L"Handles", 70, true, false, false}, {L"Threads", 70, true, false, false}, {L"I/O read bytes", 110, true, false, false},
+    {L"Memory (peak working set)", 110, true, false, false}, {L"Page faults", 90, true, false, false}, {L"Base priority", 90, false, false, false, true}, {L"Handles", 70, true, false, false}, {L"Threads", 70, true, false, false}, {L"I/O read bytes", 110, true, false, false},
     {L"I/O write bytes", 110, true, false, false}, {L"Image path name", 300, false, false, false}, {L"Command line", 300, false, false, false}, {L"UAC virtualization", 100, false, true, false}, {L"Description", 280, false, true, false}, {L"GPU", 50, true, false, false}, {L"GPU engine", 110, false, false, false}};
   static const ColumnDef services[] = {{L"Name", 200, false, true, false}, {L"PID", 60, true, true, false}, {L"Description", 300, false, true, false}, {L"Status", 80, false, true, false}, {L"Group", 200, false, true, false}};
   switch (tab) { case ProcessesTab: return processes; case HistoryTab: return history; case StartupTab: return startup; case UsersTab: return users; case DetailsTab: return details; case ServicesTab: return services; default: return performance; }
@@ -126,14 +126,14 @@ static bool rowLess(const Row& left, const Row& right, int column, bool directio
 }
 void Application::sortRows(std::vector<Row>& items) const {
   const int column = sortColumn[size_t(selectedTab)]; const bool direction = ascending[size_t(selectedTab)];
-  const auto defs = definitions(selectedTab); const bool numeric = column > 0 && size_t(column) < defs.size() && (defs[size_t(column)].right || defs[size_t(column)].heat);
+  const auto defs = definitions(selectedTab); const bool numeric = column > 0 && size_t(column) < defs.size() && (defs[size_t(column)].right || defs[size_t(column)].heat || defs[size_t(column)].numeric);
   std::sort(items.begin(), items.end(), [&](const Row& left, const Row& right) { return rowLess(left, right, column, direction, numeric); });
 }
 void Application::sortVisibleRows() {
   const bool reverse = orderedTab == selectedTab && orderedColumn == sortColumn[size_t(selectedTab)] && orderedAscending != ascending[size_t(selectedTab)];
   if (compact || (selectedTab != ProcessesTab && selectedTab != UsersTab)) { if (reverse) std::reverse(rows.begin(), rows.end()); else sortRows(rows); return; }
   const int column = sortColumn[size_t(selectedTab)]; const bool direction = ascending[size_t(selectedTab)];
-  const auto defs = definitions(selectedTab); const bool numeric = column > 0 && size_t(column) < defs.size() && (defs[size_t(column)].right || defs[size_t(column)].heat);
+  const auto defs = definitions(selectedTab); const bool numeric = column > 0 && size_t(column) < defs.size() && (defs[size_t(column)].right || defs[size_t(column)].heat || defs[size_t(column)].numeric);
   auto less = [&](const Row& left, const Row& right) { return rowLess(left, right, column, direction, numeric); };
   struct Block { size_t start, end; };
   std::vector<Block> blocks; blocks.reserve(rows.size());

@@ -19,7 +19,7 @@ inline bool sameRowPaint(const Row& previous, const Row& next) {
   for (size_t index = 0; index < next.cells.size(); ++index) if (previous.cells[index].text != next.cells[index].text || previous.cells[index].heat != next.cells[index].heat) return false;
   return true;
 }
-struct ColumnDef { const wchar_t* title; int width; bool right, visible, heat; };
+struct ColumnDef { const wchar_t* title; int width; bool right, visible, heat; bool numeric = false; };
 struct PerfItem { std::wstring key, title, subtitle, value, description; COLORREF color; };
 struct ActionResult { std::wstring error, report; };
 constexpr int FewerId = 15, EndId = 14, LinkId = 18, HistoryLinkId = 19, ListId = 12, TabsId = 11, PerformanceId = 13;
