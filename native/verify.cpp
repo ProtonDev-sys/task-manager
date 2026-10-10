@@ -150,6 +150,17 @@ bool Application::verifySorting() {
     const int columnCount = Header_GetItemCount(header);
     check(columnCount <= int(originalOrder.size()) && ListView_GetColumnOrderArray(list, columnCount, originalOrder.data()), "column-original-order");
     for (int position = 0; position < columnCount; ++position) reversedOrder[size_t(position)] = originalOrder[size_t(columnCount - position - 1)];
+    check(!ListView_SetColumnOrderArray(list, columnCount, reversedOrder.data()), "column-order-keeps-name-first");
+    check(!Header_SetOrderArray(header, columnCount, reversedOrder.data()), "header-order-keeps-name-first");
+    HDITEMW moveName{}; moveName.mask = HDI_ORDER; moveName.iOrder = columnCount - 1;
+    check(!Header_SetItem(header, 0, &moveName), "column-name-cannot-move-away");
+    moveName.iOrder = 0; check(!Header_SetItem(header, 1, &moveName), "column-cannot-move-before-name");
+    NMHEADERW drag{}; drag.hdr = {header, 0, HDN_BEGINDRAG}; drag.iItem = 0;
+    check(SendMessageW(list, WM_NOTIFY, 0, LPARAM(&drag)) != 0, "column-name-drag-rejected");
+    drag.hdr.code = HDN_ENDDRAG; drag.iItem = 1; drag.pitem = &moveName;
+    check(SendMessageW(list, WM_NOTIFY, 0, LPARAM(&drag)) != 0, "column-drop-before-name-rejected");
+    reversedOrder[0] = 0;
+    for (int position = 1; position < columnCount; ++position) reversedOrder[size_t(position)] = originalOrder[size_t(columnCount - position)];
     check(ListView_SetColumnOrderArray(list, columnCount, reversedOrder.data()), "column-reorder");
     check(!geometryQueued && !columnGeometryDirty && std::equal(reversedOrder.begin(), reversedOrder.begin() + columnCount, displayOrder.begin()), "column-reorder-synchronous-geometry");
     ListView_SetColumnOrderArray(list, columnCount, originalOrder.data());

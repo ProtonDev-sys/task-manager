@@ -503,6 +503,11 @@ void Application::paintHeader(HDC dc, RECT client) {
 }
 LRESULT CALLBACK Application::headerProcedure(HWND target, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context) {
   auto app = reinterpret_cast<Application*>(context);
+  if (!app->rebuilding && message == HDM_SETORDERARRAY && word && data && reinterpret_cast<const int*>(data)[0] != 0) return FALSE;
+  if (!app->rebuilding && message == HDM_SETITEMW && data) {
+    const auto item = reinterpret_cast<const HDITEMW*>(data);
+    if ((item->mask & HDI_ORDER) && ((word == 0 && item->iOrder != 0) || (word != 0 && item->iOrder == 0))) return FALSE;
+  }
   HDITEMW widthItem{};
   const bool widthChange = message == HDM_SETITEMW && data && (reinterpret_cast<HDITEMW*>(data)->mask & HDI_WIDTH);
   if (widthChange && !app->compact) {
@@ -576,6 +581,7 @@ LRESULT CALLBACK Application::listProcedure(HWND target, UINT message, WPARAM wo
   const int previousScroll = horizontal ? GetScrollPos(target, SB_HORZ) : 0;
   const bool control = GetKeyState(VK_CONTROL) & 0x8000;
   switch (message) {
+  case LVM_SETCOLUMNORDERARRAY: if (!app->rebuilding && word && data && reinterpret_cast<const int*>(data)[0] != 0) return FALSE; break;
   case LVM_SETCOLUMNWIDTH:
     if (data >= 0 && !app->compact) {
       data = std::max(int(data), app->scale(app->minimumColumnWidth(app->columnsTab, app->columnAt(int(word)))));
@@ -584,6 +590,10 @@ LRESULT CALLBACK Application::listProcedure(HWND target, UINT message, WPARAM wo
     break;
   case WM_NOTIFY: {
     const auto notice = reinterpret_cast<NMHEADERW*>(data);
+    if (notice && notice->hdr.hwndFrom == app->header && !app->rebuilding) {
+      if (notice->hdr.code == HDN_BEGINDRAG && notice->iItem == 0) return TRUE;
+      if (notice->hdr.code == HDN_ENDDRAG && (notice->iItem == 0 || (notice->pitem && notice->pitem->iOrder == 0))) return TRUE;
+    }
     if (notice && notice->hdr.hwndFrom == app->header && (notice->hdr.code == HDN_ITEMCHANGINGW || notice->hdr.code == HDN_TRACKW) && notice->pitem && (notice->pitem->mask & HDI_WIDTH) && !app->compact) {
       notice->pitem->cxy = std::max(notice->pitem->cxy, app->scale(app->minimumColumnWidth(app->columnsTab, app->columnAt(notice->iItem))));
       if (notice->hdr.code == HDN_TRACKW && app->columnTracking) { app->trackingColumn = notice->iItem; app->trackingWidth = notice->pitem->cxy; }
