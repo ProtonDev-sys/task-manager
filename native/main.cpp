@@ -108,7 +108,7 @@ void Application::create() {
   SetWindowSubclass(tabs, tabsProcedure, 4, reinterpret_cast<DWORD_PTR>(this));
   for (int index = 0; index < TabCount; ++index) { TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(tabNames[index]); TabCtrl_InsertItem(tabs, index, &item); }
   TabCtrl_SetCurSel(tabs, selectedTab);
-  list = control(WC_LISTVIEWW, L"", LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_TABSTOP, ListId);
+  list = control(WC_LISTVIEWW, L"", LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_SHAREIMAGELISTS | WS_TABSTOP, ListId);
   ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP);
   SetWindowSubclass(list, listProcedure, 1, reinterpret_cast<DWORD_PTR>(this));
   header = ListView_GetHeader(list); SetWindowSubclass(header, headerProcedure, 2, reinterpret_cast<DWORD_PTR>(this));
