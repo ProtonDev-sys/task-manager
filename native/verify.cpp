@@ -392,7 +392,22 @@ bool Application::verifyHighContrast() {
   check(screen && memory && bitmap && backgroundBrush, "high-contrast-render-buffer");
   if (screen && memory && bitmap && backgroundBrush) {
     const auto previous = SelectObject(memory, bitmap); SetBkMode(memory, TRANSPARENT);
-    current = std::make_shared<Sample>(*snapshot); current->cpu = 95;
+    const RECT canvas{0, 0, width, height}; FillRect(memory, &canvas, backgroundBrush);
+    auto capture = [&](RECT bounds, const wchar_t* name) {
+      if (options.output.empty()) return;
+      const std::filesystem::path output(options.output);
+      const auto path = output.parent_path() / (output.stem().wstring() + L"-high-contrast-" + name + L".png");
+      std::error_code error; if (!output.parent_path().empty()) std::filesystem::create_directories(output.parent_path(), error);
+      if (error) { check(false, "high-contrast-capture-directory"); return; }
+      GdiFlush(); SelectObject(memory, previous);
+      {
+        Gdiplus::Bitmap image(bitmap, nullptr); const CLSID png{0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+        std::unique_ptr<Gdiplus::Bitmap> cropped(image.Clone(Gdiplus::Rect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top), PixelFormat32bppRGB));
+        check(cropped && cropped->Save(path.c_str(), &png, nullptr) == Gdiplus::Ok, "high-contrast-capture-save");
+      }
+      SelectObject(memory, bitmap);
+    };
+    current = std::make_shared<Sample>(); current->cpu = 95;
     const auto cpu = std::find(shown[ProcessesTab].begin(), shown[ProcessesTab].end(), 7);
     check(cpu != shown[ProcessesTab].end(), "high-contrast-cpu-column");
     if (cpu != shown[ProcessesTab].end()) {
@@ -403,6 +418,7 @@ bool Application::verifyHighContrast() {
         check(GetPixel(memory, box.left + 1, (box.top + box.bottom) / 2) == GetSysColor(hovered ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-busy-header-background");
         check(GetTextColor(memory) == GetSysColor(hovered ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), "high-contrast-header-text-pair");
         RestoreDC(memory, saved);
+        capture(box, hovered ? L"header-hover" : L"header-normal");
       }
     }
     current = snapshot;
@@ -414,6 +430,8 @@ bool Application::verifyHighContrast() {
         check(GetPixel(memory, box.left + 1, box.top + 1) == GetSysColor(index == selection ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-tab-background");
       }
       check(GetTextColor(memory) == GetSysColor(selection == ServicesTab ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), "high-contrast-tab-text-pair");
+      RECT last{}; TabCtrl_GetItemRect(tabs, TabCount - 1, &last);
+      capture({0, 0, std::min(tabBounds.right, last.right + scale(2)), tabBounds.bottom}, selection == ServicesTab ? L"tabs-services" : L"tabs-processes");
     }
     TabCtrl_SetCurSel(tabs, selectedTab);
     const auto savedSidebarFont = sidebarFont, savedLabelFont = labelFont;
@@ -434,6 +452,7 @@ bool Application::verifyHighContrast() {
       check(containsColor({scale(16), top + scale(27), scale(150), top + scale(57)}, foreground), "high-contrast-sidebar-secondary-text");
     }
     sidebarFont = savedSidebarFont; labelFont = savedLabelFont;
+    FillRect(memory, &sidebar, backgroundBrush); paintSidebar(memory, sidebar, fixtures); capture(sidebar, L"sidebar");
     SelectObject(memory, previous);
   }
   if (bitmap) DeleteObject(bitmap); if (memory) DeleteDC(memory); if (screen) ReleaseDC(window, screen);
