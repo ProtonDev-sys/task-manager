@@ -273,6 +273,7 @@ void efficiencyAction(const Process& process, bool enabled);
 void processAction(const Process& process, Action action, const std::wstring& argument = L"");
 std::vector<Identity> processTree(std::span<const Process> processes, const Process& root);
 std::wstring waitChain(const Process& process);
+DWORD serviceActionAccess(int action);
 void serviceAction(const Entry& entry, int action);
 void startupAction(const Entry& entry);
 void sessionAction(const Entry& entry, bool logoff);

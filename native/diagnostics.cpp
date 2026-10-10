@@ -1,5 +1,6 @@
 #include "core.hpp"
 #include "report.hpp"
+#include <sddl.h>
 
 namespace taskmgr {
 static int findNext(std::span<const std::wstring> names, std::wstring_view prefix, int start) {
@@ -37,10 +38,40 @@ static int startupReport(const std::wstring& output) {
   }
   stream << "]}"; return stream && progressive && completed && snapshots == 6 ? 0 : 1;
 }
+static std::vector<std::pair<std::string, bool>> servicePermissionTests() {
+  std::vector<std::pair<std::string, bool>> result;
+  Handle token, impersonation;
+  const bool available = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &token.value) && DuplicateToken(token.value, SecurityImpersonation, &impersonation.value);
+  result.emplace_back("service_permissions_owned_token", available);
+  if (available) {
+    // Check actual Windows authorization against an in-memory service-style ACL.
+    // No service is created, queried or controlled by these fixtures.
+    auto permits = [&](DWORD allowed, int action) -> std::optional<bool> {
+      const auto text = L"O:SYG:SYD:(A;;0x" + hexadecimal(allowed) + L";;;WD)";
+      PSECURITY_DESCRIPTOR descriptor = nullptr;
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(text.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) return std::nullopt;
+      GENERIC_MAPPING mapping{READ_CONTROL | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_INTERROGATE | SERVICE_ENUMERATE_DEPENDENTS,
+                              READ_CONTROL | SERVICE_CHANGE_CONFIG,
+                              READ_CONTROL | SERVICE_START | SERVICE_STOP | SERVICE_PAUSE_CONTINUE | SERVICE_USER_DEFINED_CONTROL, SERVICE_ALL_ACCESS};
+      std::vector<BYTE> privileges(1024); DWORD size = DWORD(privileges.size()), granted = 0; BOOL permitted = FALSE;
+      const bool checked = AccessCheck(descriptor, impersonation.value, serviceActionAccess(action), &mapping, reinterpret_cast<PRIVILEGE_SET*>(privileges.data()), &size, &granted, &permitted) != FALSE;
+      LocalFree(descriptor);
+      if (!checked) return std::nullopt;
+      return permitted != FALSE;
+    };
+    result.emplace_back("service_start_without_stop_permission", permits(SERVICE_START | SERVICE_QUERY_STATUS, 0) == true);
+    result.emplace_back("service_stop_without_start_permission", permits(SERVICE_STOP | SERVICE_QUERY_STATUS, 1) == true);
+    result.emplace_back("service_start_does_not_require_query_permission", permits(SERVICE_START, 0) == true);
+    result.emplace_back("service_restart_requires_both_permissions", permits(SERVICE_START | SERVICE_QUERY_STATUS, 2) == false && permits(SERVICE_STOP | SERVICE_QUERY_STATUS, 2) == false);
+    result.emplace_back("service_restart_with_required_permissions", permits(SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS, 2) == true);
+  }
+  return result;
+}
 static void metric(Report& stream, const std::string& name, std::vector<double> times) { std::sort(times.begin(), times.end()); stream << '"' << name << "\":{\"count\":" << times.size() << ",\"meanMilliseconds\":" << (times.empty() ? 0 : std::accumulate(times.begin(), times.end(), 0.0) / double(times.size())) << ",\"p95Milliseconds\":" << (times.empty() ? 0 : times[size_t(std::ceil(double(times.size()) * .95)) - 1]) << '}'; }
 static int selfTest(const std::wstring& output) {
   std::vector<std::pair<std::string, bool>> checks; auto check = [&](std::string name, bool passed) { checks.emplace_back(std::move(name), passed); };
   for (auto& test : startupTests()) checks.push_back(std::move(test));
+  for (auto& test : servicePermissionTests()) checks.push_back(std::move(test));
   check("hexadecimal_bounds", hexadecimal(0) == L"0" && hexadecimal(UINT64_MAX) == L"ffffffffffffffff");
   check("counter_integer_decimal", counterInteger(L"0", 10) == 0u && counterInteger(L"0042", 10) == 42u && counterInteger(L"4294967295", 10) == UINT32_MAX);
   check("counter_integer_hexadecimal", counterInteger(L"0000002a", 16) == 42u && counterInteger(L"FFFFFFFF", 16) == UINT32_MAX);

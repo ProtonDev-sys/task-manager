@@ -125,10 +125,19 @@ std::wstring waitChain(const Process& process) {
   } while (Thread32Next(threads.value, &thread));
   CloseThreadWaitChainSession(session); return result.empty() ? L"No accessible threads." : result;
 }
+DWORD serviceActionAccess(int action) {
+  switch (action) {
+  case 0: return SERVICE_START;
+  case 1: return SERVICE_STOP | SERVICE_QUERY_STATUS;
+  case 2: return SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS;
+  default: throw std::runtime_error("Unsupported service action");
+  }
+}
 void serviceAction(const Entry& entry, int action) {
+  const DWORD access = serviceActionAccess(action);
   SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
   if (!manager) throw std::runtime_error(utf8(winerror()));
-  SC_HANDLE service = OpenServiceW(manager, entry.key.c_str(), SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS);
+  SC_HANDLE service = OpenServiceW(manager, entry.key.c_str(), access);
   if (!service) { const DWORD error = GetLastError(); CloseServiceHandle(manager); throw std::runtime_error(utf8(winerror(error))); }
   try {
     if (action != 0) {
