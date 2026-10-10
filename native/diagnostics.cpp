@@ -38,10 +38,33 @@ static int startupReport(const std::wstring& output) {
   stream << "]}"; return stream && progressive && completed && snapshots == 6 ? 0 : 1;
 }
 static void metric(Report& stream, const std::string& name, std::vector<double> times) { std::sort(times.begin(), times.end()); stream << '"' << name << "\":{\"count\":" << times.size() << ",\"meanMilliseconds\":" << (times.empty() ? 0 : std::accumulate(times.begin(), times.end(), 0.0) / double(times.size())) << ",\"p95Milliseconds\":" << (times.empty() ? 0 : times[size_t(std::ceil(double(times.size()) * .95)) - 1]) << '}'; }
+static bool cacheTimingMatches(Time previous, Time checked, Time current, Clock::duration lifetime, bool invalidated = false) {
+  if (previous == Time{} || checked < previous) return false;
+  return !invalidated && checked - previous < lifetime ? current == previous : current >= checked;
+}
+static std::vector<std::pair<std::string, bool>> cacheTimingTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  const Time previous = Time{} + std::chrono::seconds(10);
+  for (const auto lifetime : {std::chrono::seconds(1), std::chrono::seconds(5)}) {
+    const std::string name = lifetime == std::chrono::seconds(1) ? "resource_cache_" : "inventory_cache_";
+    const Time boundary = previous + lifetime, before = boundary - std::chrono::milliseconds(1), after = boundary + std::chrono::seconds(2);
+    checks.emplace_back(name + "reuses_before_deadline", cacheTimingMatches(previous, before, previous, lifetime));
+    checks.emplace_back(name + "refreshes_at_deadline", cacheTimingMatches(previous, boundary, boundary, lifetime));
+    checks.emplace_back(name + "accepts_refresh_after_slow_sample", cacheTimingMatches(previous, after, after + std::chrono::milliseconds(1), lifetime));
+    checks.emplace_back(name + "rejects_premature_refresh", !cacheTimingMatches(previous, before, before, lifetime));
+    checks.emplace_back(name + "rejects_expired_reuse", !cacheTimingMatches(previous, boundary, previous, lifetime));
+    if (lifetime == std::chrono::seconds(1)) {
+      checks.emplace_back(name + "accepts_topology_refresh_before_deadline", cacheTimingMatches(previous, before, before, lifetime, true));
+      checks.emplace_back(name + "rejects_reuse_after_topology_change", !cacheTimingMatches(previous, before, previous, lifetime, true));
+    }
+  }
+  return checks;
+}
 static int selfTest(const std::wstring& output) {
   std::vector<std::pair<std::string, bool>> checks; auto check = [&](std::string name, bool passed) { checks.emplace_back(std::move(name), passed); };
   for (auto& test : startupTests()) checks.push_back(std::move(test));
   for (auto& test : networkSamplingTests()) checks.push_back(std::move(test));
+  for (auto& test : cacheTimingTests()) checks.push_back(std::move(test));
   check("hexadecimal_bounds", hexadecimal(0) == L"0" && hexadecimal(UINT64_MAX) == L"ffffffffffffffff");
   check("counter_integer_decimal", counterInteger(L"0", 10) == 0u && counterInteger(L"0042", 10) == 42u && counterInteger(L"4294967295", 10) == UINT32_MAX);
   check("counter_integer_hexadecimal", counterInteger(L"0000002a", 16) == 42u && counterInteger(L"FFFFFFFF", 16) == UINT32_MAX);
@@ -116,10 +139,13 @@ static int selfTest(const std::wstring& output) {
   check("adaptive_refresh_invalid_costs", adaptiveRefreshInterval(NAN, 0) == 4000 && adaptiveRefreshInterval(INFINITY, 0) == 4000 && adaptiveRefreshInterval(-1, 0) == 4000);
   {
     const auto retained = sample; const auto next = sampler.sample();
-    check("resource_counters_reused_between_fast_samples", next.resourcesSampledAt == sample.resourcesSampledAt && next.cores == sample.cores && next.disks.size() == sample.disks.size());
+    const bool resourcesReused = next.resourcesSampledAt == sample.resourcesSampledAt;
+    check("resource_counters_follow_cache_interval", cacheTimingMatches(sample.resourcesSampledAt, next.resourcesCheckedAt, next.resourcesSampledAt, std::chrono::seconds(1), next.cpuTopologyChanged) &&
+      (resourcesReused ? next.cores == sample.cores && next.disks.size() == sample.disks.size() : next.resourcesSampledAt == next.resourcesCheckedAt));
     Sleep(1050); const auto later = sampler.sample();
     check("resource_counters_refresh_after_one_second", later.resourcesSampledAt > next.resourcesSampledAt);
-    check("inventory_shared_between_samples", sample.inventory && next.inventory == sample.inventory && next.services.data() == sample.services.data() && next.sessions.data() == sample.sessions.data());
+    check("inventory_snapshots_follow_cache_interval", sample.inventory && next.inventory && cacheTimingMatches(sample.inventorySampledAt, next.inventoryCheckedAt, next.inventorySampledAt, std::chrono::seconds(5)) &&
+      ((next.inventory == sample.inventory) == (next.inventorySampledAt == sample.inventorySampledAt)) && next.services.data() == next.inventory->services.data() && next.sessions.data() == next.inventory->sessions.data());
     sampler.invalidateInventory(); const auto refreshed = sampler.sample();
     check("manual_refresh_invalidates_resource_cache", refreshed.resourcesSampledAt > later.resourcesSampledAt);
     check("inventory_refresh_replaces_snapshot", refreshed.inventory && refreshed.inventory != sample.inventory && refreshed.services.data() == refreshed.inventory->services.data());

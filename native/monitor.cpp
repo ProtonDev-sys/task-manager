@@ -223,6 +223,9 @@ Sample Sampler::sample(bool startupVisible) {
 #endif
   Sample result; result.cpuInfo = cpuInfo;
   const bool refreshResources = resourcesAt == Time{} || started - resourcesAt >= std::chrono::seconds(1);
+#ifdef TASKMGR_DIAGNOSTICS
+  result.resourcesCheckedAt = started;
+#endif
   if (!refreshResources) {
     result.cpuSpeed = cachedResources.cpuSpeed; result.interrupts = cachedResources.interrupts;
     result.memory = cachedResources.memory; result.cores = cachedResources.cores;
@@ -350,7 +353,8 @@ Sample Sampler::sample(bool startupVisible) {
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[2] = milliseconds(phase); phase = Clock::now();
 #endif
-  const bool refreshInventory = inventoryAt == Time{} || milliseconds(inventoryAt) >= 5000;
+  const auto inventoryCheckedAt = Clock::now();
+  const bool refreshInventory = inventoryAt == Time{} || inventoryCheckedAt - inventoryAt >= std::chrono::seconds(5);
   if (refreshInventory) {
     adapterAddresses.clear();
     const auto addresses = readAdapterAddressBuffer([](IP_ADAPTER_ADDRESSES* buffer, ULONG* size) { return GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, buffer, size); });
@@ -424,6 +428,7 @@ Sample Sampler::sample(bool startupVisible) {
   }
   result.inventory = cachedInventory; result.services = result.inventory->services; result.sessions = result.inventory->sessions; result.startup = cachedStartup; result.users = cachedUsers;
 #ifdef TASKMGR_DIAGNOSTICS
+  result.inventoryCheckedAt = inventoryCheckedAt; result.inventorySampledAt = inventoryAt;
   result.stages[5] = milliseconds(phase);
   result.duration = milliseconds(started);
 #endif
