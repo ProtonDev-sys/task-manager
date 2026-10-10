@@ -60,6 +60,7 @@ std::wstring bits(double value);
 std::wstring duration(uint64_t seconds);
 std::wstring winerror(DWORD code = GetLastError());
 std::string utf8(const std::wstring& value);
+std::wstring fromUtf8(std::string_view value);
 std::wstring executable();
 std::wstring windowsDirectory();
 std::wstring commandExecutable(const std::wstring& command);

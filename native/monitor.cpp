@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include <limits>
 #include <ws2ipdef.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
@@ -54,6 +55,16 @@ std::string utf8(const std::wstring& value) {
   const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), int(value.size()), nullptr, 0, nullptr, nullptr);
   std::string result(size_t(size), '\0');
   WideCharToMultiByte(CP_UTF8, 0, value.data(), int(value.size()), result.data(), size, nullptr, nullptr);
+  return result;
+}
+std::wstring fromUtf8(std::string_view value) {
+  if (value.empty()) return {};
+  if (value.size() > size_t(std::numeric_limits<int>::max())) return L"Error message is too long to display.";
+  const int length = int(value.size());
+  const int needed = MultiByteToWideChar(CP_UTF8, 0, value.data(), length, nullptr, 0);
+  if (needed <= 0) return L"Unable to decode the error message.";
+  std::wstring result(size_t(needed), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, 0, value.data(), length, result.data(), needed) != needed) return L"Unable to decode the error message.";
   return result;
 }
 std::wstring executable() { std::wstring path(32768, L'\0'); path.resize(GetModuleFileNameW(nullptr, path.data(), DWORD(path.size()))); return path; }

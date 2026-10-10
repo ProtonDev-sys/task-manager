@@ -46,6 +46,15 @@ static int selfTest(const std::wstring& output) {
   check("counter_integer_hexadecimal", counterInteger(L"0000002a", 16) == 42u && counterInteger(L"FFFFFFFF", 16) == UINT32_MAX);
   check("counter_integer_overflow", !counterInteger(L"4294967296", 10) && !counterInteger(L"100000000", 16));
   check("counter_integer_invalid", !counterInteger(L"", 10) && !counterInteger(L"-1", 10) && !counterInteger(L" 1", 10) && !counterInteger(L"1_", 10) && !counterInteger(L"a", 10) && !counterInteger(L"0x42", 16) && !counterInteger(L"1", 2));
+  check("utf8_decode_empty", fromUtf8({}).empty());
+  check("utf8_decode_ascii", fromUtf8("Access denied.\r\n") == L"Access denied.\r\n");
+  check("utf8_decode_localized", fromUtf8("Accès refusé : C:\\资料\\Не найдено.txt") == L"Accès refusé : C:\\资料\\Не найдено.txt");
+  check("utf8_decode_supplementary", fromUtf8("\xf0\x9f\x93\x84") == L"\U0001f4c4");
+  check("utf8_decode_view_length", fromUtf8(std::string_view("prefix:suffix").substr(0, 6)) == L"prefix");
+  check("utf8_decode_embedded_null", fromUtf8(std::string_view("before\0after", 12)) == std::wstring(L"before\0after", 12));
+  check("utf8_decode_replacement", fromUtf8("before\xff" "after") == L"before\ufffdafter");
+  const std::runtime_error localizedError("Accès refusé : C:\\资料\\report.txt");
+  check("utf8_decode_exception_roundtrip", fromUtf8(utf8(L"Unable to terminate process.\n\n" + fromUtf8(localizedError.what()))) == L"Unable to terminate process.\n\nAccès refusé : C:\\资料\\report.txt");
   check("gpu_temperature_invalid_key", gpuTemperature(L"luid_0x100000000_0x0") == -1 && gpuTemperature(L"luid_0x0_0x1trailing") == -1 && gpuTemperature(L"invalid") == -1);
   check("split_empty", splitFields(L"", L',').empty());
   check("split_delimiters", splitFields(L",alpha,,beta,", L',') == std::vector<std::wstring_view>{L"", L"alpha", L"", L"beta"});

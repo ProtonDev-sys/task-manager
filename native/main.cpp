@@ -415,7 +415,7 @@ void Application::worker() {
       if (forceInventory) source.invalidateInventory(); force = forceInventory = false;
     }
     if (SUCCEEDED(initialized)) CoUninitialize();
-  } catch (const std::exception& exception) { std::lock_guard lock(actionMutex); const auto text = exception.what(); actionResults.push_back({std::wstring(text, text + strlen(text)), L""}); PostMessageW(window, ActionMessage, 0, 0); }
+  } catch (const std::exception& exception) { std::lock_guard lock(actionMutex); actionResults.push_back({fromUtf8(exception.what()), L""}); PostMessageW(window, ActionMessage, 0, 0); }
 }
 void Application::consume() {
   if (rebuilding || verifyingSorting) return;
@@ -677,7 +677,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     result = taskmgr::runApplication();
 #endif
   } catch (const std::exception& error) {
-    if (interactive) MessageBoxA(nullptr, error.what(), "Task Manager", MB_OK | MB_ICONERROR);
+    if (interactive) MessageBoxW(nullptr, taskmgr::fromUtf8(error.what()).c_str(), L"Task Manager", MB_OK | MB_ICONERROR);
 #ifdef TASKMGR_DIAGNOSTICS
     else { auto report = std::find(values.begin(), values.end(), L"--output"); if (report != values.end() && report + 1 != values.end()) { taskmgr::Report stream{*(report + 1)}; stream << "{\"native\":true,\"passed\":false,\"error\":\"" << error.what() << "\"}"; } }
 #endif

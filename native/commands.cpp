@@ -54,7 +54,7 @@ void Application::asynchronous(std::function<std::wstring()> operation) {
   if (actionWorker.joinable()) actionWorker.join();
   actionWorker = std::thread([this, operation = std::move(operation)] {
     ActionResult result; const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    try { result.report = operation(); } catch (const std::exception& error) { const auto text = error.what(); const int needed = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0); if (needed > 0) { result.error.resize(size_t(needed)); MultiByteToWideChar(CP_UTF8, 0, text, -1, result.error.data(), needed); result.error.resize(size_t(needed - 1)); } }
+    try { result.report = operation(); } catch (const std::exception& error) { result.error = fromUtf8(error.what()); }
     if (SUCCEEDED(initialized)) CoUninitialize();
     { std::lock_guard lock(actionMutex); actionResults.push_back(std::move(result)); } actionBusy = false; if (!stopping) PostMessageW(window, ActionMessage, 0, 0);
   });
@@ -87,7 +87,7 @@ void Application::endSelected(bool tree) {
     if (!tree) { targets.push_back(*member); continue; }
     for (const auto& identity : processTree(current->processes, *member)) for (const auto& process : current->processes) if (process.id == identity.pid && process.created == identity.created) targets.push_back(process);
   }
-  asynchronous([targets] { std::wstring failures; for (const auto& process : targets) { try { processAction(process, Action::End); } catch (const std::exception& error) { if (failures.empty() || targets.size() == 1) failures = std::wstring(error.what(), error.what() + strlen(error.what())); } } if (!failures.empty()) throw std::runtime_error(utf8(L"Unable to terminate process.\n\n" + failures)); return std::wstring{}; });
+  asynchronous([targets] { std::wstring failures; for (const auto& process : targets) { try { processAction(process, Action::End); } catch (const std::exception& error) { if (failures.empty() || targets.size() == 1) failures = fromUtf8(error.what()); } } if (!failures.empty()) throw std::runtime_error(utf8(L"Unable to terminate process.\n\n" + failures)); return std::wstring{}; });
 }
 void Application::command(int id) {
   if (tabQueued && pendingTab >= 0) { const int tab = pendingTab; pendingTab = -1; SendMessageW(tabs, WM_SETREDRAW, TRUE, 0); selectTab(tab); InvalidateRect(tabs, nullptr, FALSE); }
@@ -154,9 +154,7 @@ void Application::command(int id) {
       if (enabled && !confirm(L"Turn on Efficiency mode?", L"This lowers the selected process priority and requests power-efficient scheduling. It can make that application less responsive. It does not limit CPU usage. Child processes are not changed.", L"Turn on Efficiency mode")) return;
       const auto target = *process; asynchronous([target, enabled] { efficiencyAction(target, enabled); return std::wstring{}; });
     } catch (const std::exception& error) {
-      const auto message = error.what(); const int length = MultiByteToWideChar(CP_UTF8, 0, message, -1, nullptr, 0); std::wstring text(size_t(std::max(1, length)), L'\0');
-      if (length > 0) MultiByteToWideChar(CP_UTF8, 0, message, -1, text.data(), length);
-      MessageBoxW(window, text.c_str(), L"Efficiency mode unavailable", MB_OK | MB_ICONERROR);
+      MessageBoxW(window, fromUtf8(error.what()).c_str(), L"Efficiency mode unavailable", MB_OK | MB_ICONERROR);
     }
     return;
   }
