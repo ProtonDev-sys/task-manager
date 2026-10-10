@@ -237,6 +237,7 @@ void Application::paintWindow(HDC dc) {
 }
 void Application::selectTab(int tab) {
   if (tab < 0 || tab >= TabCount || tab == selectedTab) return;
+  const bool focusInPerformance = selectedTab == PerformanceTab && GetFocus() == performance;
   captureColumns();
   KillTimer(window, 3); sortQueued = false;
   selectedTab = tab; startupVisible = tab == StartupTab && !compact; if (TabCtrl_GetCurSel(tabs) != tab) TabCtrl_SetCurSel(tabs, tab); hotRow = -1;
@@ -245,6 +246,7 @@ void Application::selectTab(int tab) {
   layout();
   if (tab == StartupTab && !startupRequested) { startupRequested = true; if (!current || current->startup->entries.empty()) refresh(false); }
   if (tab == PerformanceTab && !hidden()) SetFocus(performance);
+  else if (focusInPerformance) SetFocus(list);
 }
 void Application::requestTab(int tab) {
   if (tab < 0 || tab >= TabCount) return;

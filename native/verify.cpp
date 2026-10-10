@@ -275,6 +275,7 @@ bool Application::verifySorting() {
 }
 bool Application::verifyTabSwitching() {
   const int savedTab = selectedTab, savedTheme = theme;
+  const HWND savedFocus = GetFocus();
   bool passed = true;
   auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   const auto sample = current;
@@ -370,7 +371,14 @@ bool Application::verifyTabSwitching() {
     BOOL immersive = FALSE;
     if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive, sizeof(immersive)))) check((immersive != FALSE) == dark, "caption-immediate-theme");
   }
-  theme = savedTheme; applyTheme(); selectTab(savedTab);
+  // Exercise only this thread's owned diagnostic controls; do not request foreground activation.
+  selectTab(PerformanceTab); SetFocus(performance);
+  check(GetFocus() == performance, "tab-focus-fixture-owned-performance-child");
+  selectTab(DetailsTab);
+  check(GetFocus() == list, "tab-leaving-performance-focuses-visible-table");
+  SetFocus(tabs); selectTab(ProcessesTab);
+  check(GetFocus() == tabs, "tab-navigation-keeps-tab-strip-focus");
+  theme = savedTheme; applyTheme(); selectTab(savedTab); SetFocus(savedFocus);
   return passed;
 }
 bool Application::verifyPerformanceHover() {
