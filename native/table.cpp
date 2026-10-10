@@ -252,7 +252,7 @@ void Application::buildUsers(std::vector<Row>& next) {
     const auto& session = current->sessions[entry]; Row row; row.kind = RowKind::User; row.entry = int(entry); row.key = session.key; row.icon = Icons::UserIcon; row.expandable = true;
     for (size_t index = 0; index < current->processes.size(); ++index) if (current->processes[index].session == session.session && current->processes[index].id > 4) row.members.push_back(int(index));
     processCells(row, row.members);
-    row.cells[0] = {(fullName ? fullAccountName(session.cells[0]) : session.cells[0]) + L" (" + std::to_wstring(row.members.size()) + L")"}; row.cells[1] = {session.cells[2], double(session.session)}; row.cells[2] = {session.cells[3]}; row.cells[3] = {session.cells[1]};
+    row.cells[0] = {(fullName && !session.description.empty() ? session.description : accountName(session.cells[0], session.accountDomain)) + L" (" + std::to_wstring(row.members.size()) + L")"}; row.cells[1] = {session.cells[2], double(session.session)}; row.cells[2] = {session.cells[3]}; row.cells[3] = {session.cells[1]};
     row.expanded = expanded.contains(row.key); users.push_back(std::move(row));
   }
   sortRows(users);

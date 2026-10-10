@@ -415,10 +415,42 @@ std::vector<Entry> readSessions() {
   for (DWORD index = 0; index < count; ++index) {
     wchar_t* user = nullptr; DWORD size = 0;
     if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sessions[index].SessionId, WTSUserName, &user, &size)) {
-      if (user && *user) { Entry entry; entry.key = L"session:" + std::to_wstring(sessions[index].SessionId); entry.session = sessions[index].SessionId; entry.cells = {user, sessions[index].State == WTSActive ? L"" : L"Disconnected", std::to_wstring(sessions[index].SessionId), sessions[index].pWinStationName ? sessions[index].pWinStationName : L""}; result.push_back(std::move(entry)); }
+      if (user && *user) {
+        Entry entry; entry.key = L"session:" + std::to_wstring(sessions[index].SessionId); entry.session = sessions[index].SessionId;
+        entry.cells = {user, sessions[index].State == WTSActive ? L"" : L"Disconnected", std::to_wstring(sessions[index].SessionId), sessions[index].pWinStationName ? sessions[index].pWinStationName : L""};
+        wchar_t* domain = nullptr; DWORD domainSize = 0;
+        if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, entry.session, WTSDomainName, &domain, &domainSize)) { if (domain) entry.accountDomain = domain; WTSFreeMemory(domain); }
+        // Enrichment runs with inventory sampling, before the UI receives this immutable entry.
+        entry.description = fullAccountName(entry.cells[0], entry.accountDomain);
+        result.push_back(std::move(entry));
+      }
       WTSFreeMemory(user);
     }
   }
   WTSFreeMemory(sessions); return result;
 }
+bool sameSessionAccount(const Entry& expected, const Entry& current) {
+  return expected.session == current.session && !expected.cells.empty() && !current.cells.empty() && !expected.cells[0].empty() && !expected.accountDomain.empty() && !current.accountDomain.empty() &&
+    CompareStringOrdinal(expected.cells[0].c_str(), -1, current.cells[0].c_str(), -1, TRUE) == CSTR_EQUAL && CompareStringOrdinal(expected.accountDomain.c_str(), -1, current.accountDomain.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> sessionIdentityTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  Entry expected; expected.session = 7; expected.cells = {L"alex"}; expected.accountDomain = L"DESKTOP"; auto current = expected;
+  checks.emplace_back("session_identity_accepts_same_account", sameSessionAccount(expected, current));
+  current.accountDomain = L"CORPORATE";
+  checks.emplace_back("session_identity_rejects_same_username_in_other_domain", !sameSessionAccount(expected, current));
+  current = expected; current.accountDomain = L"desktop"; current.cells[0] = L"Alex";
+  checks.emplace_back("session_identity_comparison_ignores_case", sameSessionAccount(expected, current));
+  current = expected; current.session = 8;
+  checks.emplace_back("session_identity_rejects_other_session", !sameSessionAccount(expected, current));
+  current = expected; current.cells[0] = L"other";
+  checks.emplace_back("session_identity_rejects_other_username", !sameSessionAccount(expected, current));
+  current = expected; current.accountDomain.clear();
+  checks.emplace_back("session_identity_rejects_missing_domain", !sameSessionAccount(expected, current) && !sameSessionAccount(current, current));
+  current = expected; current.cells.clear();
+  checks.emplace_back("session_identity_rejects_missing_username", !sameSessionAccount(expected, current));
+  return checks;
+}
+#endif
 }

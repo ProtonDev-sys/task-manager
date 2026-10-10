@@ -82,7 +82,7 @@ struct Metadata { std::wstring path, description, publisher, user, commandLine, 
 struct FileInfo { std::wstring description, publisher; int icon = -1; };
 struct Identity { DWORD pid; uint64_t created; bool operator==(const Identity&) const = default; };
 struct IdentityHash { size_t operator()(const Identity& key) const { return std::hash<uint64_t>{}(key.created) ^ (std::hash<DWORD>{}(key.pid) << 1); } };
-struct Entry { std::wstring key; std::vector<std::wstring> cells; DWORD pid = 0, session = 0; bool enabled = false, startupEditable = false; std::wstring path, location, group, description; };
+struct Entry { std::wstring key; std::vector<std::wstring> cells; DWORD pid = 0, session = 0; bool enabled = false, startupEditable = false; std::wstring path, location, group, description, accountDomain; };
 struct StartupInventory { std::vector<Entry> entries; std::vector<std::wstring> warnings; bool complete = true; };
 struct ServiceInventory { std::vector<Entry> services, sessions; };
 struct CpuInfo { std::wstring name; double baseMhz = 0; unsigned sockets = 0, cores = 0, logical = 1; std::array<uint64_t, 3> caches{}; bool virtualization = false; };
@@ -182,11 +182,15 @@ double lastBiosSeconds();
 std::wstring serviceGroupCaption(const std::wstring& group);
 std::vector<Entry> readServices();
 std::vector<Entry> readSessions();
+bool sameSessionAccount(const Entry& expected, const Entry& current);
 StartupInventory readStartup(const std::function<void(const StartupInventory&)>& progress = {});
 #ifdef TASKMGR_DIAGNOSTICS
 std::vector<std::pair<std::string, bool>> startupTests();
+std::vector<std::pair<std::string, bool>> accountNameTests();
+std::vector<std::pair<std::string, bool>> sessionIdentityTests();
 #endif
-std::wstring fullAccountName(const std::wstring& user);
+std::wstring accountName(const std::wstring& user, const std::wstring& domain);
+std::wstring fullAccountName(const std::wstring& user, const std::wstring& domain);
 class Icons {
   struct Request {
     DWORD pid = 0; uint64_t created = 0; std::wstring path;

@@ -171,7 +171,7 @@ void startupAction(const Entry& entry) {
 }
 void sessionAction(const Entry& entry, bool logoff) {
   const auto sessions = readSessions();
-  if (std::none_of(sessions.begin(), sessions.end(), [&](const Entry& current) { return current.session == entry.session && current.cells[0] == entry.cells[0]; })) throw std::runtime_error("Session changed. Refresh it first.");
+  if (std::none_of(sessions.begin(), sessions.end(), [&](const Entry& current) { return sameSessionAccount(entry, current); })) throw std::runtime_error("Session account could not be verified or has changed. Refresh it first.");
   if (!(logoff ? WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, entry.session, FALSE) : WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE, entry.session, FALSE))) throw std::runtime_error(utf8(winerror()));
 }
 }

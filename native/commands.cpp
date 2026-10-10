@@ -241,7 +241,8 @@ void Application::command(int id) {
   }
   case Disconnect: case SignOff: {
     if (!entry || selectedTab != UsersTab) return;
-    if (!confirm(id == SignOff ? L"Are you sure you want to sign off " + entry->cells[0] + L"?" : L"Are you sure you want to disconnect " + entry->cells[0] + L"?", id == SignOff ? L"Any unsaved data from this user's open programs might be lost." : L"The user's session will remain signed in, and their programs will keep running.", id == SignOff ? L"Sign off user" : L"Disconnect user")) return;
+    const auto user = accountName(entry->cells[0], entry->accountDomain);
+    if (!confirm(id == SignOff ? L"Are you sure you want to sign off " + user + L"?" : L"Are you sure you want to disconnect " + user + L"?", id == SignOff ? L"Any unsaved data from this user's open programs might be lost." : L"The user's session will remain signed in, and their programs will keep running.", id == SignOff ? L"Sign off user" : L"Disconnect user")) return;
     const auto target = *entry; const bool logoff = id == SignOff; asynchronous([target, logoff] { sessionAction(target, logoff); return std::wstring{}; }); return;
   }
   case ManageAccounts: ShellExecuteW(window, nullptr, L"control.exe", L"/name Microsoft.UserAccounts", nullptr, SW_SHOWNORMAL); return;
