@@ -180,4 +180,10 @@ const Metadata& Icons::get(const Process& process) const {
   static const Metadata empty;
   auto found = entries.find({process.id, process.created}); return found != entries.end() ? found->second : empty;
 }
+bool Icons::draw(HDC dc, int index, int left, int top, int pixels) const {
+  IMAGELISTDRAWPARAMS draw{sizeof(draw)}; draw.himl = images; draw.i = index; draw.hdcDst = dc;
+  draw.x = left; draw.y = top; draw.cx = draw.cy = pixels; draw.rgbBk = CLR_NONE; draw.rgbFg = CLR_DEFAULT; draw.fStyle = ILD_TRANSPARENT | ILD_SCALE;
+  if (ImageList_DrawIndirect(&draw)) return true;
+  draw.i = DefaultIcon; return ImageList_DrawIndirect(&draw) != FALSE;
+}
 }

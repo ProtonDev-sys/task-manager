@@ -450,7 +450,7 @@ void Application::drawRow(HDC dc, int index, RECT bounds) {
         if (row.expandable) chevron(dc, float(box.left + scale(11) + indent), float(box.top + (box.bottom - box.top) / 2), float(scale(100)) / 100, row.expanded);
         iconLeft = box.left + scale(28) + indent;
       } else if (compact) iconLeft = box.left + scale(8);
-      if (!ImageList_Draw(icons->images, row.icon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT)) ImageList_Draw(icons->images, Icons::DefaultIcon, dc, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, ILD_TRANSPARENT);
+      icons->draw(dc, row.icon, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, iconSize);
       text.left = iconLeft + iconSize + scale(6);
     }
     SetTextColor(dc, highContrast && (selected || hot) ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0)));

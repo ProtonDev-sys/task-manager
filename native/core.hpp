@@ -239,6 +239,7 @@ public:
   const FileInfo& file(const std::wstring& path, bool urgent = false);
   void consume();
   const Metadata& get(const Process& process) const;
+  bool draw(HDC dc, int index, int left, int top, int pixels) const;
   template<class Live> void prune(const Live& live) {
     std::erase_if(entries, [&](const auto& item) { return !live.contains(item.first); });
     std::lock_guard lock(mutex);

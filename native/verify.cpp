@@ -240,6 +240,34 @@ bool Application::verifySorting() {
     shown[DetailsTab] = originalShown; widths[DetailsTab] = originalWidths; sortColumn[DetailsTab] = originalSort; ascending[DetailsTab] = originalDirection; columns(true); rebuild();
     ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED); if (originalSelection >= 0) select(originalSelection);
     ListView_Scroll(list, 0, (originalTop - ListView_GetTopIndex(list)) * rowHeight());
+    HDC screen = GetDC(list), canvas = screen ? CreateCompatibleDC(screen) : nullptr;
+    HBITMAP bitmap = canvas ? CreateCompatibleBitmap(screen, 64, 40) : nullptr;
+    const auto previousBitmap = bitmap ? SelectObject(canvas, bitmap) : nullptr;
+    BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth = 16; info.bmiHeader.biHeight = -16; info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+    void* pixels = nullptr; HBITMAP source = screen ? CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+    HIMAGELIST fixtureImages = ImageList_Create(16, 16, ILC_COLOR32, 1, 1);
+    check(bitmap && source && pixels && fixtureImages, "dpi-icon-fixture-resources");
+    if (bitmap && source && pixels && fixtureImages) {
+      std::fill_n(static_cast<DWORD*>(pixels), 256, DWORD(0xff336699));
+      check(ImageList_Add(fixtureImages, source, nullptr) == 0, "dpi-icon-fixture-image");
+      const auto originalImages = std::exchange(icons->images, fixtureImages);
+      for (const int size : {8, 16, 32}) for (const int index : {0, 9999}) {
+        PatBlt(canvas, 0, 0, 64, 40, WHITENESS);
+        check(icons->draw(canvas, index, 1, 1, size), "dpi-icon-draw-and-fallback");
+        check(GetPixel(canvas, size - 1, size - 1) == RGB(51, 102, 153) && GetPixel(canvas, size + 1, size + 1) == RGB(255, 255, 255), "dpi-icon-fills-only-requested-size");
+      }
+      icons->images = originalImages;
+      if (!options.output.empty()) {
+        PatBlt(canvas, 0, 0, 64, 40, WHITENESS); icons->draw(canvas, Icons::DefaultIcon, 4, 12, 16); icons->draw(canvas, Icons::DefaultIcon, 28, 4, 32);
+        const std::filesystem::path output(options.output), capturePath = output.parent_path() / (output.stem().wstring() + L"-dpi-icons-16px-32px.png");
+        std::error_code error; if (!capturePath.parent_path().empty()) std::filesystem::create_directories(capturePath.parent_path(), error);
+        SelectObject(canvas, previousBitmap);
+        { Gdiplus::Bitmap capture(bitmap, nullptr); const CLSID png{0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}}; check(capture.Save(capturePath.c_str(), &png, nullptr) == Gdiplus::Ok, "dpi-icon-review-capture"); }
+        SelectObject(canvas, bitmap);
+      }
+    }
+    if (fixtureImages) ImageList_Destroy(fixtureImages); if (source) DeleteObject(source);
+    if (bitmap) { SelectObject(canvas, previousBitmap); DeleteObject(bitmap); } if (canvas) DeleteDC(canvas); if (screen) ReleaseDC(list, screen);
   }
   {
     selectTab(DetailsTab); rebuild(); const auto snapshot = current; const unsigned builds = fullRebuilds; const size_t unfiltered = rows.size();
