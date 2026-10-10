@@ -50,13 +50,11 @@ void Application::columns(bool preserveRows) {
   const auto previousStyle = GetWindowLongPtrW(list, GWL_STYLE);
   const auto style = compact ? previousStyle | LVS_NOCOLUMNHEADER : previousStyle & ~LONG_PTR(LVS_NOCOLUMNHEADER);
   if (style != previousStyle) SetWindowLongPtrW(list, GWL_STYLE, style);
-  if (!preserveRows) {
-    int spacerWidth = 0, spacerHeight = 0;
-    if (!rowSpacer || !ImageList_GetIconSize(rowSpacer, &spacerWidth, &spacerHeight) || spacerHeight != rowHeight() - 1) {
-      const auto previous = rowSpacer;
-      rowSpacer = ImageList_Create(1, rowHeight() - 1, ILC_COLOR32, 1, 1); ListView_SetImageList(list, rowSpacer, LVSIL_SMALL);
-      if (previous) ImageList_Destroy(previous);
-    }
+  int spacerWidth = 0, spacerHeight = 0;
+  if (!rowSpacer || !ImageList_GetIconSize(rowSpacer, &spacerWidth, &spacerHeight) || spacerHeight != rowHeight() - 1) {
+    const auto previous = rowSpacer;
+    rowSpacer = ImageList_Create(1, rowHeight() - 1, ILC_COLOR32, 1, 1); ListView_SetImageList(list, rowSpacer, LVSIL_SMALL);
+    if (previous) ImageList_Destroy(previous);
   }
   const auto defs = definitions(selectedTab);
   if (compact) { RECT area{}; GetClientRect(window, &area); LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH; column.pszText = const_cast<wchar_t*>(L"Name"); column.cx = std::max(scale(100), int(area.right) - GetSystemMetrics(SM_CXVSCROLL) - scale(4)); ListView_InsertColumn(list, 0, &column); }

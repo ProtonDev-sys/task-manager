@@ -215,6 +215,33 @@ bool Application::verifySorting() {
     check(fullRebuilds == unchanged && rows.data() == unchangedRows, "idempotent-actions");
   } else check(false, "cpu-column-present");
   {
+    selectTab(DetailsTab); captureColumns(); columns(true);
+    const UINT originalDpi = dpi; RECT originalBounds{}; GetWindowRect(window, &originalBounds);
+    const auto originalShown = shown[DetailsTab], originalWidths = widths[DetailsTab];
+    const int originalSelection = selectedIndex(), originalTop = ListView_GetTopIndex(list);
+    const int originalSort = sortColumn[DetailsTab]; const bool originalDirection = ascending[DetailsTab];
+    sortColumn[DetailsTab] = 0; ascending[DetailsTab] = true; rebuild();
+    const int count = Header_GetItemCount(header); std::vector<int> order(size_t(count), 0), expectedIds, logicalWidths;
+    std::iota(order.begin(), order.end(), 0); if (count > 2) std::swap(order[1], order[2]);
+    for (int index = 0; index < count; ++index) { const int width = minimumColumnWidth(DetailsTab, columnAt(index)) + 80 + index * 8; logicalWidths.push_back(width); ListView_SetColumnWidth(list, index, scale(width)); }
+    for (const int index : order) expectedIds.push_back(originalShown[size_t(index)]);
+    check(ListView_SetColumnOrderArray(list, count, order.data()), "dpi-fixture-native-column-order");
+    if (rows.size() > 5) select(5);
+    SendMessageW(list, WM_VSCROLL, SB_TOP, 0); ListView_Scroll(list, 0, rowHeight() * 2);
+    const auto selected = rowKey(selectedIndex()), top = rowKey(ListView_GetTopIndex(list));
+    for (const UINT targetDpi : {originalDpi * 2, originalDpi}) {
+      SendMessageW(window, WM_DPICHANGED, MAKEWPARAM(targetDpi, targetDpi), LPARAM(&originalBounds));
+      check(dpi == targetDpi && shown[DetailsTab] == expectedIds, "dpi-change-preserves-column-order");
+      for (int position = 0; position < count; ++position) check(ListView_GetColumnWidth(list, position) == scale(logicalWidths[size_t(order[size_t(position)])]), "dpi-change-scales-live-column-widths");
+      int spacerWidth = 0, spacerHeight = 0;
+      check(ImageList_GetIconSize(rowSpacer, &spacerWidth, &spacerHeight) && spacerHeight == rowHeight() - 1, "dpi-change-updates-row-height");
+      check(rowKey(selectedIndex()) == selected && rowKey(ListView_GetTopIndex(list)) == top, "dpi-change-preserves-selection-and-scroll");
+    }
+    shown[DetailsTab] = originalShown; widths[DetailsTab] = originalWidths; sortColumn[DetailsTab] = originalSort; ascending[DetailsTab] = originalDirection; columns(true); rebuild();
+    ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED); if (originalSelection >= 0) select(originalSelection);
+    ListView_Scroll(list, 0, (originalTop - ListView_GetTopIndex(list)) * rowHeight());
+  }
+  {
     selectTab(DetailsTab); rebuild(); const auto snapshot = current; const unsigned builds = fullRebuilds; const size_t unfiltered = rows.size();
     const bool savedSearchVisible = searchVisible; searchVisible = true;
     SendMessageW(window, WM_COMMAND, MAKEWPARAM(SearchId, EN_SETFOCUS), LPARAM(searchBox));

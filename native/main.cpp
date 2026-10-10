@@ -345,7 +345,7 @@ void Application::captureColumns() {
   if (!list || rebuilding || compact || selectedTab != columnsTab) return;
   const int count = Header_GetItemCount(header); std::vector<int> order(size_t(std::max(0, count)));
   if (count <= 0 || size_t(count) != shown[size_t(selectedTab)].size() || !ListView_GetColumnOrderArray(list, count, order.data())) return;
-  std::vector<int> ids, sizes; for (const int index : order) { ids.push_back(shown[size_t(selectedTab)][size_t(index)]); sizes.push_back(MulDiv(ListView_GetColumnWidth(list, index), 96, int(GetDpiForWindow(window)))); }
+  std::vector<int> ids, sizes; for (const int index : order) { ids.push_back(shown[size_t(selectedTab)][size_t(index)]); sizes.push_back(MulDiv(ListView_GetColumnWidth(list, index), 96, int(dpi))); }
   if (!ids.empty() && ids.front() == 0) { shown[size_t(selectedTab)] = ids; widths[size_t(selectedTab)] = sizes; }
 }
 void Application::saveSettings() {
@@ -497,7 +497,15 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     return 0;
   case WM_SIZE: { const bool wasMinimized = app->minimized; app->minimized = word == SIZE_MINIMIZED; if (app->minimized && app->hideMinimized && app->trayAdded) ShowWindow(target, SW_HIDE); if (!app->minimized) { app->layout(); if (wasMinimized) { app->consume(); if (app->interval != 0) app->refresh(false); } } return 0; }
   case WM_GETMINMAXINFO: reinterpret_cast<MINMAXINFO*>(data)->ptMinTrackSize = app->summary ? POINT{app->scale(200), app->scale(150)} : app->compact ? POINT{app->scale(250), app->scale(200)} : POINT{app->scale(420), app->scale(300)}; return 0;
-  case WM_DPICHANGED: { app->dpi = HIWORD(word); const auto rect = reinterpret_cast<RECT*>(data); SetWindowPos(target, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE); app->createFonts(); app->columns(); app->rebuild(); app->layout(); return 0; }
+  case WM_DPICHANGED: {
+    const int top = ListView_GetTopIndex(app->list);
+    // The controls still use the old scale; GetDpiForWindow already reports the new DPI.
+    app->captureColumns(); app->dpi = HIWORD(word);
+    const auto rect = reinterpret_cast<RECT*>(data); SetWindowPos(target, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+    app->createFonts(); app->columns(true); app->rebuild(); app->layout();
+    ListView_Scroll(app->list, 0, (top - ListView_GetTopIndex(app->list)) * app->rowHeight());
+    return 0;
+  }
   case SampleMessage: app->consume(); return 0;
   case IconMessage: app->icons->consume(); if (!app->iconRefreshQueued) app->iconRefreshQueued = SetTimer(target, 2, app->hidden() ? 10 : 120, nullptr) != 0; return 0;
   case ActionMessage: { std::deque<ActionResult> results; { std::lock_guard lock(app->actionMutex); results.swap(app->actionResults); } for (const auto& result : results) { if (!app->hidden() && !result.error.empty()) MessageBoxW(target, result.error.c_str(), L"Task Manager", MB_OK | MB_ICONERROR); if (!app->hidden() && !result.report.empty()) DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(103), target, [](HWND dialog, UINT code, WPARAM parameter, LPARAM value) -> INT_PTR { if (code == WM_INITDIALOG) { SetDlgItemTextW(dialog, 1001, reinterpret_cast<const wchar_t*>(value)); return TRUE; } if (code == WM_COMMAND && (LOWORD(parameter) == IDOK || LOWORD(parameter) == IDCANCEL)) { EndDialog(dialog, IDOK); return TRUE; } return FALSE; }, LPARAM(result.report.c_str())); } app->refresh(); return 0; }
