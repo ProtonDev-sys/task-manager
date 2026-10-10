@@ -34,7 +34,6 @@ void efficiencyAction(const Process& process, bool enabled) {
   const auto original = readPowerPolicy(handle.value); const Identity identity{process.id, process.created};
   const DWORD execution = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
   const bool active = (original.control & original.state & execution) != 0;
-  if (active == enabled) return;
   for (auto entry = previous.begin(); entry != previous.end();) {
     Handle known(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry->first.pid));
     FILETIME created{}, exited{}, kernel{}, user{};
@@ -42,6 +41,9 @@ void efficiencyAction(const Process& process, bool enabled) {
   }
   const auto saved = previous.find(identity);
   const bool hadSaved = saved != previous.end();
+  // Another actor can clear EcoQoS before a queued disable runs. Our priority
+  // change still needs restoring, even when execution throttling is already off.
+  if (active == enabled && (enabled || !hadSaved)) return;
   PowerPolicy requested = original;
   if (enabled) {
     if (previous.size() >= 256 && !hadSaved) throw std::runtime_error("Efficiency mode restoration limit reached. Disable some managed processes first.");

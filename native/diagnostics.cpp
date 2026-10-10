@@ -144,6 +144,26 @@ static int selfTest(const std::wstring& output) {
       efficiencyAction(owned, true); efficiencyAction(owned, false); const auto restored = powerPolicy(owned);
       check("owned_child_efficiency_restore", restored.priority == BELOW_NORMAL_PRIORITY_CLASS && restored.control == before.control && restored.state == before.state);
       efficiencyAction(owned, false); check("owned_child_efficiency_idempotent", powerPolicy(owned).priority == BELOW_NORMAL_PRIORITY_CLASS);
+      efficiencyAction(owned, true);
+      PROCESS_POWER_THROTTLING_STATE external{}; external.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+      external.ControlMask = before.control | PROCESS_POWER_THROTTLING_EXECUTION_SPEED; external.StateMask = before.state & ~PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+      const bool changed = SetProcessInformation(childHandle.value, ProcessPowerThrottling, &external, sizeof(external)) != FALSE;
+      check("owned_child_efficiency_external_disable", changed);
+      if (changed) {
+        efficiencyAction(owned, false); const auto afterExternal = powerPolicy(owned);
+        check("owned_child_efficiency_restore_after_external_disable", afterExternal.priority == BELOW_NORMAL_PRIORITY_CLASS && afterExternal.control == before.control && afterExternal.state == before.state);
+        processAction(owned, Action::Normal); efficiencyAction(owned, true); efficiencyAction(owned, false);
+        check("owned_child_efficiency_releases_saved_policy", powerPolicy(owned).priority == NORMAL_PRIORITY_CLASS);
+        processAction(owned, Action::BelowNormal); efficiencyAction(owned, true); processAction(owned, Action::Normal);
+        const bool changedAgain = SetProcessInformation(childHandle.value, ProcessPowerThrottling, &external, sizeof(external)) != FALSE;
+        check("owned_child_efficiency_external_priority_setup", changedAgain);
+        if (changedAgain) {
+          efficiencyAction(owned, false);
+          check("owned_child_efficiency_preserves_external_priority", powerPolicy(owned).priority == NORMAL_PRIORITY_CLASS);
+          efficiencyAction(owned, true); efficiencyAction(owned, false);
+          check("owned_child_efficiency_external_priority_becomes_new_baseline", powerPolicy(owned).priority == NORMAL_PRIORITY_CLASS);
+        }
+      }
       auto stalePower = owned; ++stalePower.created; bool rejected = false; try { efficiencyAction(stalePower, true); } catch (...) { rejected = true; }
       check("efficiency_stale_identity_refused", rejected);
       processAction(owned, Action::Normal);
