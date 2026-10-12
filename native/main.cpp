@@ -504,7 +504,7 @@ void Application::worker() {
   int retry = 0;
   bool postedFailure = false;
   const auto startupReady = [&] { return source && source->startupReady(); };
-  const auto postStatus = [&](bool failed) {
+  const auto postStatus = [&]([[maybe_unused]] bool failed) {
 #ifdef TASKMGR_DIAGNOSTICS
     if (samplingStatusNotification) return samplingStatusNotification(failed);
 #endif
