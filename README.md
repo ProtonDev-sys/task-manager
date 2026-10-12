@@ -11,7 +11,7 @@ Requires **64-bit Windows 10 or Windows 11** and administrator approval. ARM64 a
 3. Approve the Windows administrator prompt. The app does not launch if you cancel.
 4. On first launch, choose **No** at the replacement prompt if you only want to try it alongside Windows Task Manager.
 
-The executable is currently **unsigned**. Windows may show a security warning. Check that the download came from this repository; each release includes a SHA-256 checksum file. In PowerShell, run `Get-FileHash .\TaskManager.exe -Algorithm SHA256` and compare it with `SHA256SUMS.txt`.
+The executable is currently **unsigned**. Windows may show a security warning. Check that the download came from this repository; each release includes a SHA-256 checksum file. Run `certutil -hashfile TaskManager.exe SHA256` in Command Prompt and compare it with `SHA256SUMS.txt`.
 
 Settings and locally recorded CPU history are stored in `%LOCALAPPDATA%\TaskManagerNative`.
 
@@ -21,10 +21,10 @@ Enable **Options > Replace default Task Manager** to redirect Windows Task Manag
 
 Turn the same option off to restore Windows Task Manager. Setup does not overwrite another application's replacement, modify Microsoft's executable, or install a background service.
 
-If you need to restore Windows Task Manager outside the UI, run this from an administrator PowerShell terminal:
+If you need to restore Windows Task Manager outside the UI, run this from an administrator Command Prompt:
 
-```powershell
-& "$env:ProgramFiles\TaskManagerNative\TaskManager.exe" --disable-replacement
+```bat
+"%ProgramFiles%\TaskManagerNative\TaskManager.exe" --disable-replacement
 ```
 
 **Update:** for standalone use, close the app and replace your downloaded executable. If replacement is enabled, disable it first, close the installed app, delete its old executable, then run the new download and enable replacement again.
@@ -71,15 +71,15 @@ See [feature differences](docs/PARITY.md) and [startup coverage](docs/STARTUP.md
 
 ## Build from source
 
-On Windows x64, install Visual Studio 2022 or its Build Tools with **Desktop development with C++**, a Windows SDK, and **CMake 3.24 or newer**. Use PowerShell from the repository directory:
+On Windows x64, install Visual Studio 2022 or its Build Tools with **Desktop development with C++**, a Windows SDK, **CMake 3.24 or newer**, and **Python 3.10 or newer**. Run this from the repository directory in your preferred terminal:
 
-```powershell
-./build.ps1
+```text
+python tools/taskmgr.py build
 ```
 
-The script builds the production executable, runs ten self-test, sampler and UI/stress test cases in a separate developer build, checks the production manifest and diagnostic exclusion, and copies the verified binary to `artifacts/app/TaskManager.exe`.
+The command builds the production executable, runs self-test, sampler and UI/stress CTest cases in a separate developer build, checks the production manifest and diagnostic exclusion, and copies the verified binary to `artifacts/app/TaskManager.exe`. The tooling uses Python's standard library; there are no Python package dependencies. Run `python tools/taskmgr.py --help` for benchmarks, paired performance comparisons, compiler studies and packaging commands. Python is needed only for development, not to run the app.
 
-Production requires elevation and excludes test, benchmark and screenshot tooling. Developer builds run without an elevation requirement and must not be distributed as releases. When the build script runs unelevated, it verifies Windows' refusal to launch production without elevation; runtime command-rejection checks require an elevated test shell.
+Production requires elevation and excludes test, benchmark and screenshot tooling. Developer builds run without an elevation requirement and must not be distributed as releases. When the build command runs unelevated, it verifies Windows' refusal to launch production without elevation; runtime command-rejection checks require an elevated test shell.
 
 ## Contributing
 

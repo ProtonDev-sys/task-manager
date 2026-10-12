@@ -4,31 +4,33 @@ Keep changes focused on a reproducible bug, a usability problem or a measured pe
 
 ## Build and test
 
-Use Windows x64 with Visual Studio 2022 or Build Tools, the Desktop development with C++ workload, a Windows SDK, and CMake 3.24 or newer.
+Use Windows x64 with Visual Studio 2022 or Build Tools, the Desktop development with C++ workload, a Windows SDK, CMake 3.24 or newer, and Python 3.10 or newer. The developer CLI uses only Python's standard library and works from Command Prompt, Git Bash, or another terminal.
 
-```powershell
-./tests/benchmark.ps1
-./build.ps1
+```text
+python -m unittest discover -s tests -p "test_*.py" -v
+python tools/taskmgr.py build
 ```
 
-The benchmark script regression uses mocked process objects and owned temporary reports; it does not require a build or launch the application. The build script builds production and a separate Debug developer executable, runs all ten CTest cases, and verifies production packaging. The published binary is `artifacts/app/TaskManager.exe`. Build output stays in `artifacts/` and should not be committed.
+The tooling regressions use mocked native process requests, owned temporary reports, and two short Python child-process fixtures to verify argument handling and timeout cleanup. They run on Linux and Windows without building or launching the app; Windows also exercises the resource APIs against the running Python executable. The build command builds production and a separate Debug developer executable, runs all registered CTest cases, and verifies production packaging. The published binary is `artifacts/app/TaskManager.exe`. Build output stays in `artifacts/` and should not be committed.
 
 For optimized developer tests and benchmarks:
 
-```powershell
-./build.ps1 -TestConfiguration Release
-./benchmark.ps1 -Seconds 15 -EnforceBudgets
+```text
+python tools/taskmgr.py build --test-configuration Release
+python tools/taskmgr.py benchmark --seconds 15 --enforce-budgets
 ```
 
-Benchmark reports are written to `artifacts/benchmark-suite/`. Compare before and after on the same machine with the same workload. Report the Windows build, hardware, update interval and configuration; do not describe Debug timings as production performance.
+Benchmark reports are written to `artifacts/benchmark-suite/`. All 21 scenarios must finish successfully before `suite.json` is published. Failed attempts clear old summaries and scenario reports, reject invalid JSON, non-boolean success values, duplicate fields and non-finite numbers, and terminate only their own timed-out child. Compare before and after on the same machine with the same workload. Report the Windows build, hardware, update interval and configuration; do not describe Debug timings as production performance.
 
 For repeated, alternating baseline/candidate performance comparisons, retain an optimized developer executable before making changes, then run:
 
-```powershell
-./performance.ps1 -BaselineExecutable artifacts/baseline/TaskManager.exe
+```text
+python tools/taskmgr.py compare --baseline-executable artifacts/baseline/TaskManager.exe
 ```
 
-Both developer executables must include the instrumented headless sampler benchmark. The comparison runs five repetitions of saturated sampling, a fixed-tab idle UI and component workloads, alternates execution order, checks exit codes and validation results, and writes raw reports plus median/min/max measurements to `artifacts/performance-comparison/comparison.json`. Use `-BaselineProductionExecutable` to include the original production file size; developer executable sizes include diagnostic tooling and are not release sizes. Do not build or run another benchmark concurrently with a comparison.
+Both developer executables must include the instrumented headless sampler benchmark. The comparison runs five repetitions of saturated sampling, a fixed-tab idle UI and component workloads, alternates execution order, checks exit codes and strict validation results, and writes raw reports plus median/min/max measurements to `artifacts/performance-comparison/comparison.json`. Missing or inconsistent metric sets fail the comparison instead of being treated as zero. Supply `--baseline-production-executable` and `--production-executable` to include release file sizes; those paths are optional so diagnostic-only baselines can be compared independently. Developer executable sizes include diagnostic tooling and are not release sizes. Do not build or run another benchmark concurrently with a comparison.
+
+For a short paired CI investigation, use `--repetitions 3 --samples 500 --seconds 15 --warmup-seconds 5`. Preserve both executables and run them serially on the same runner. The report includes executable SHA-256 hashes, sizes, operating system and logical processor count. `--output-dir` selects a report directory; the command removes only its explicitly named report files there.
 
 Headless sampler reports include warmup, initialization time, process-count range, stage timings, CPU milliseconds per sample, private committed bytes and resident working-set bytes. CPU percent uses **one logical core** as 100%; divide by the machine's logical processor count to compare with whole-machine CPU percentages. Private bytes and working set are different measurements. Repeated ranges matter: process population, drivers, background load and heap retention introduce noise. A lower minimum or a single fast run is not proof of an improvement.
 
@@ -36,7 +38,7 @@ See [performance investigation](docs/PERFORMANCE.md) for the optimization ration
 
 To rerun just the self-tests or UI verification after an incremental build:
 
-```powershell
+```text
 cmake --build artifacts/native-tests --config Debug --parallel
 ctest --test-dir artifacts/native-tests -C Debug -R "^native-self-test$" --output-on-failure
 ctest --test-dir artifacts/native-tests -C Debug -R "^native-ui-test$" --output-on-failure
@@ -46,7 +48,7 @@ Use `-C Release` and `--config Release` instead if you built the optimized devel
 
 ## Areas to check
 
-Use `./performance.ps1 -BaselineExecutable <before.exe> -Executable <after.exe> -ThemeComparison` for paired light/dark process, performance and tab-burst measurements. `./compiler-study.ps1` builds size/speed, LTO/no-LTO and inlining alternatives and saves raw headless reports. Run these serially on a quiet machine; compare production sizes separately from instrumented binaries. See `docs/PERFORMANCE-ROUND2.md` for methodology and rejected experiments.
+Use `python tools/taskmgr.py compare --baseline-executable <before.exe> --executable <after.exe> --theme-comparison` for paired light/dark process, performance and tab-burst measurements. `python tools/taskmgr.py compiler-study` builds size/speed, LTO/no-LTO and inlining alternatives and saves raw headless reports, compiler logs and executable identities. It checks diagnostic exclusion for each production variant. Run these serially on a quiet machine; compare production sizes separately from instrumented binaries. See `docs/PERFORMANCE-ROUND2.md` for methodology and rejected experiments.
 
 - UI changes: light/dark themes, High Contrast, DPI scaling, keyboard navigation, selection and scroll position. Include screenshots when they help show the change.
 - Sampling and sorting: identity handling when PIDs are reused, missing counters, paused updates and grouped rows. Keep slow discovery work off the UI thread.
@@ -54,13 +56,15 @@ Use `./performance.ps1 -BaselineExecutable <before.exe> -Executable <after.exe> 
 - Windows integration: replacement must remain optional, reversible and unable to overwrite another application's registration. Normal tests must not change the default Task Manager.
 - Diagnostics: guard developer-only tooling with `TASKMGR_DIAGNOSTICS`. Production must remain a standalone executable without diagnostic commands or report generation.
 
-The code is under `native/`. `native/diagnostics.cpp` contains self-tests, and `native/verify.cpp` exercises the native UI headlessly. `tests/production.ps1` checks the release manifest and diagnostic exclusion. GitHub Actions runs `tests/benchmark.ps1` before the optimized build and benchmark suite.
+The code is under `native/`. `native/diagnostics.cpp` contains self-tests, and `native/verify.cpp` exercises the native UI headlessly. `python tools/taskmgr.py check-production --executable <file.exe>` checks the embedded release manifest, diagnostic exclusion and command rejection. It reads Windows resources directly, without locating or invoking the SDK manifest utility. GitHub Actions runs the tooling and release-guard regressions on Linux and Windows before the optimized native build and full benchmark suite.
 
 ## Releases
 
 For a release, update the version in `CMakeLists.txt`, `native/app.rc`, and `app.manifest`, and add `docs/releases/v<version>.md` with the changes and verification limits. Use the next appropriate semantic version; do not move an existing release tag.
 
 After the versioned changes merge into `main`, Windows verification rebuilds that exact commit, runs all tests and benchmark scenarios, checks production packaging and matching executable/manifest versions, and prepares `TaskManager.exe` with `SHA256SUMS.txt`. A separate release job publishes those verified artifacts only after verification succeeds. Pull requests run the validation without publishing. An already-published version is left unchanged; a draft can resume only for the same commit. Release publication guards are tested with `python -m unittest discover -s .github/scripts -p test_release.py -v`.
+
+`python tools/taskmgr.py package --sha <full-commit-sha>` prepares the release package locally after a verified build. CI supplies `GITHUB_SHA` automatically. Packaging checks CMake, manifest, numeric resource versions and displayed version strings, then writes release notes, the executable checksum and commit metadata. It never publishes to GitHub; publication stays in the separately guarded release job.
 
 ## Reports and pull requests
 

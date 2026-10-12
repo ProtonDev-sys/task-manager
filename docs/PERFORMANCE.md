@@ -22,9 +22,9 @@ Replacing the floating-point display formatter with `std::to_chars` passed numer
 
 ## Measurement
 
-Run `performance.ps1` using two optimized diagnostic executables with the same instrumented sampler. It alternates baseline/candidate order, retains individual JSON reports and publishes medians and observed ranges. Production executable sizes are measured separately, not inferred from developer binaries. Measurements are sequential; do not compile or run other benchmark suites concurrently.
+Run `python tools/taskmgr.py compare --baseline-executable <before.exe> --executable <after.exe>` using two optimized diagnostic executables with the same instrumented sampler. It alternates baseline/candidate order, retains individual JSON reports and publishes medians and observed ranges. Production executable sizes are measured separately, not inferred from developer binaries. Measurements are sequential; do not compile or run other benchmark suites concurrently.
 
-The saturated sampler workload measures throughput and CPU cost without sleeping. The fixed-tab idle workload retains the ordinary one-second update interval. Component tests and the full `benchmark.ps1` suite exercise navigation, sorting, graph rendering, every tab, rapid interactions, update rates, paused and minimized behaviour. Hidden rendering is automated, not a guarantee of zero desktop/compositor involvement; the sampler case does not create a UI.
+The saturated sampler workload measures throughput and CPU cost without sleeping. The fixed-tab idle workload retains the ordinary one-second update interval. Component tests and the full `python tools/taskmgr.py benchmark` suite exercise navigation, sorting, graph rendering, every tab, rapid interactions, update rates, paused and minimized behaviour. Hidden rendering is automated, not a guarantee of zero desktop/compositor involvement; the sampler case does not create a UI.
 
 CPU percent is relative to one logical core. Private bytes are committed private memory, not resident RAM; working set includes resident shared pages as well. Peak working set includes initialization. Heap retention, process churn, driver behaviour and background work can change memory and timing between runs. Headless diagnostic runs without elevation also do not measure administrator-only network attribution. Runtime production command rejection must be verified separately in an elevated test shell.
 
@@ -58,7 +58,7 @@ The optimized build passes all **nine CTest cases** and production manifest/diag
 
 The budget-enforcing suite is **not green**. It stops at dark-tab spam: message-queue p95 is **223.458 milliseconds**, above its 100-millisecond limit, while functional assertions pass. A subsequent functional run records 112.177 milliseconds for the same metric, still above that budget. The first baseline budget-enforcing attempt also hit a tab-spam responsiveness failure. These observations do not establish whether the missed budget is an optimization regression, an existing stress bottleneck or background contention. Do not change the threshold, hide the failure or claim every performance target passes. The original failed reports remain in `artifacts/performance-study/after/`.
 
-The new PowerShell comparison runner passes syntax validation and executes both alternating A/B batches successfully. `git diff --check` passes. Elevated production runtime rejection and administrator-only telemetry remain untested in this unelevated shell. Final diagnostic and production binary snapshots are retained alongside the baseline files in `artifacts/performance-study/`.
+The original comparison runner passed syntax validation and executed both alternating A/B batches successfully. `git diff --check` passed. Elevated production runtime rejection and administrator-only telemetry remained untested in that unelevated shell. Final diagnostic and production binary snapshots were retained alongside the baseline files in `artifacts/performance-study/`. The maintained comparison command is now `python tools/taskmgr.py compare`; the measurements above describe the original investigation.
 
 ## Remaining limits
 
