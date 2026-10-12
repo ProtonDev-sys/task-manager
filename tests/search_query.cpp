@@ -25,7 +25,7 @@ int main() {
     check(query.scoped && query.terms.size() == 4, "all scoped terms parsed");
     if (query.terms.size() == 4) {
       check(query.terms[0].field == SearchField::Name && query.terms[0].text == L"browser" && !query.terms[0].excluded, "name term");
-      check(query.terms[1].field == SearchField::Pid && query.terms[1].pid == 4242 && query.terms[1].numeric, "exact PID term");
+      check(query.terms[1].field == SearchField::Pid && query.terms[1].pid == 4242u && query.terms[1].numeric, "exact PID term");
       check(query.terms[2].field == SearchField::Publisher && query.terms[2].text == L"Orbit Labs", "quoted publisher");
       check(query.terms[3].field == SearchField::Status && query.terms[3].text == L"suspended" && query.terms[3].excluded, "excluded status");
     }
@@ -56,9 +56,9 @@ int main() {
   }
   {
     const auto query = parseSearchQuery(L"name:browser\tstatus:running\r\npid:42");
-    check(query.scoped && query.terms.size() == 3 && query.terms[2].pid == 42, "ASCII whitespace splits scoped terms");
+    check(query.scoped && query.terms.size() == 3 && query.terms[2].pid == 42u, "ASCII whitespace splits scoped terms");
   }
-  for (const auto& [text, expected] : std::vector<std::pair<std::wstring, uint32_t>>{{L"0", 0}, {L"00042", 42}, {L"4294967295", 4294967295u}}) {
+  for (const auto& [text, expected] : std::vector<std::pair<std::wstring, uint32_t>>{{L"0", 0u}, {L"00042", 42u}, {L"4294967295", 4294967295u}}) {
     check(searchPid(text) == expected, "valid uint32 PID");
     const auto query = parseSearchQuery(L"pid:" + text);
     check(query.scoped && query.terms.size() == 1 && query.terms[0].pid == expected, "parsed exact PID");
