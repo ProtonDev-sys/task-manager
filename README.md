@@ -71,7 +71,7 @@ See [feature differences](docs/PARITY.md) and [startup coverage](docs/STARTUP.md
 
 ## Build from source
 
-On Windows x64, install Visual Studio 2022 or its Build Tools with **Desktop development with C++**, a Windows SDK, **CMake 3.24 or newer**, and **Python 3.10 or newer**. Run this from the repository directory in your preferred terminal:
+On Windows x64, install Visual Studio 2022 or newer (or its Build Tools) with **Desktop development with C++**, a Windows SDK, **CMake 3.24 or newer** with support for your Visual Studio version, and **Python 3.10 or newer**. Run this from the repository directory in your preferred terminal:
 
 ```text
 python tools/taskmgr.py build

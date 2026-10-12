@@ -4,7 +4,7 @@ Keep changes focused on a reproducible bug, a usability problem or a measured pe
 
 ## Build and test
 
-Use Windows x64 with Visual Studio 2022 or Build Tools, the Desktop development with C++ workload, a Windows SDK, CMake 3.24 or newer, and Python 3.10 or newer. The developer CLI uses only Python's standard library and works from Command Prompt, Git Bash, or another terminal.
+Use Windows x64 with Visual Studio 2022 or newer (or Build Tools), the Desktop development with C++ workload, a Windows SDK, CMake 3.24 or newer with support for your Visual Studio version, and Python 3.10 or newer. The developer CLI uses only Python's standard library and works from Command Prompt, Git Bash, or another terminal. CMake selects the installed Visual Studio generator automatically; use `--generator "Visual Studio 18 2026"` with build or compiler-study to select a specific installed version.
 
 ```text
 python -m unittest discover -s tests -p "test_*.py" -v

@@ -309,7 +309,8 @@ def command(arguments, log=None):
 
 
 def configure(directory, diagnostics, generator, *definitions, log=None):
-    command(["cmake", "-S", ROOT, "-B", directory, "-G", generator, "-A", "x64",
+    selection = ["-G", generator] if generator is not None else []
+    command(["cmake", "-S", ROOT, "-B", directory, *selection, "-A", "x64",
              f"-DTASKMGR_DIAGNOSTICS={'ON' if diagnostics else 'OFF'}", *definitions], log)
 
 
@@ -459,8 +460,8 @@ def parser():
     study.set_defaults(function=compiler_study)
     for native_parser in (build_parser, study):
         native_parser.add_argument("--jobs", type=bounded_integer(1, 1024), default=min(8, os.cpu_count() or 1))
-        native_parser.add_argument("--generator", default="Visual Studio 17 2022",
-                                   help="Visual Studio CMake generator (default: Visual Studio 17 2022)")
+        native_parser.add_argument("--generator",
+                                   help="optional Visual Studio CMake generator; auto-detect installed Visual Studio by default")
     production_parser = sub.add_parser("check-production", help="check production resources and diagnostic exclusion")
     production_parser.add_argument("--executable", type=Path, default=PRODUCTION)
     production_parser.set_defaults(function=lambda arguments: production.check_production(arguments.executable))

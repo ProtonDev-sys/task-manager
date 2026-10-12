@@ -264,6 +264,19 @@ class ToolingTests(unittest.TestCase):
         self.assertIn("-DTASKMGR_DIAGNOSTICS=OFF", configurations[0])
         self.assertIn("-DTASKMGR_DIAGNOSTICS=ON", configurations[1])
 
+    def test_generator_auto_detection_and_explicit_override_keep_x64(self):
+        for generator in (None, "Visual Studio 18 2026"):
+            with self.subTest(generator=generator), patch.object(taskmgr, "command") as command:
+                taskmgr.configure(self.directory, True, generator)
+                arguments = command.call_args.args[0]
+                self.assertEqual(arguments[arguments.index("-A") + 1], "x64")
+                if generator is None:
+                    self.assertNotIn("-G", arguments)
+                else:
+                    self.assertEqual(arguments[arguments.index("-G") + 1], generator)
+        self.assertIsNone(taskmgr.parser().parse_args(["build"]).generator)
+        self.assertIsNone(taskmgr.parser().parse_args(["compiler-study"]).generator)
+
     def test_compiler_study_builds_all_variants_checks_production_and_reverses_order(self):
         payload = json.dumps({"passed": True, "cpuMillisecondsPerSample": 1,
                               "sort": {"meanMilliseconds": 1, "p95Milliseconds": 2}})
