@@ -39,9 +39,9 @@ If you need to restore Windows Task Manager outside the UI, run this from an adm
 - **Startup:** Run entries, startup folders, boot/logon scheduled tasks, automatic services and drivers, and packaged startup declarations. Supported Run and folder entries can be enabled or disabled; other sources link to Windows management tools.
 - **Users, Details and Services:** session activity, process metadata and controls, service status and start/stop/restart actions. Windows protection and permissions still apply.
 - **Appearance:** Light, Dark and Use Windows setting; High Contrast follows system colours. Columns and sorting are saved separately for each tab.
-- **Search:** filter table rows by name, PID, cell text or available publisher and command-line metadata. Matching groups retain their context. Search does not request a fresh system sample.
+- **Search:** filter table rows by text or combine exact PID, name, publisher, command line, path, account and status fields. Quoted values and field exclusions are supported. Matching groups retain their context. Search does not request a fresh system sample.
 
-Right-click a column heading to choose visible columns. **Ctrl+F** opens search; **Esc** clears it. **F5** refreshes. **Ctrl+Tab** cycles tabs, and **Alt+1** through **Alt+7** selects one directly. Double-click a Performance graph or its sidebar to enter a summary view.
+Right-click a column heading to choose visible columns. **Ctrl+F** opens search; **Enter** applies it immediately and focuses the results; **Esc** clears it. **F5** refreshes. **Ctrl+Tab** cycles tabs, and **Alt+1** through **Alt+7** selects one directly. Double-click a Performance graph or its sidebar to enter a summary view.
 
 **View → Update speed → Adaptive (low overhead)** targets process updates between 250 ms and 4 seconds, backing off when measured sampling and table-update work becomes expensive. It aims for roughly 2% sampling/display wall-time duty, not a guaranteed CPU cap; asynchronous metadata, painting and tracing also use resources. Adaptive uses a 1-second target on other full-size tabs. It is the default for new settings; existing saved update speeds are preserved. Fixed High targets 500 ms, Normal 1 second, and Low 4 seconds.
 
@@ -49,7 +49,21 @@ Process CPU, memory, I/O, window classification and traced network activity are 
 
 Sampling time is included in the cadence rather than added to it; slow samples cannot trigger a catch-up polling loop. Minimized monitoring slows to at least 4 seconds, and restoring the window consumes the latest snapshot and requests a fresh one unless paused. Holding Ctrl temporarily freezes table updates; releasing it consumes the latest available snapshot. These are sampled measurements, not instantaneous guarantees: CPU and I/O rates describe the interval between snapshots, and short-lived processes can exist entirely between samples. Adaptive backoff is tested with simulated costs, but performance on physical 20-year-old hardware has not been verified; the Windows 10/11 x64 requirement still applies.
 
-Stable tables repaint only visible rows whose text, heat colours, icons or tree appearance changed. Numeric sorting keeps the viewport position instead of scrolling after a process whose rank changes. Light and dark modes share this refresh path; changing appearance does not request another system sample.
+Stable tables, including filtered results, repaint only visible rows whose text, heat colours, icons or tree appearance changed. Numeric sorting keeps the viewport position instead of scrolling after a process whose rank changes. Selection and independent keyboard focus retain their process identities as rows move. Light and dark modes share this refresh path; changing appearance does not request another system sample.
+
+### Search queries
+
+Plain text remains a case-insensitive substring, including spaces: `Orbit Browser` searches for that phrase. Windows paths and command switches also work as ordinary text. A recognized field prefix enables queries with multiple terms; every term must match. Quote values containing spaces and prefix a field with `-` to exclude it.
+
+| Query | Matches |
+| --- | --- |
+| `pid:4242` | Exactly PID 4242. Plain `4242` still searches substrings. |
+| `name:browser publisher:"Orbit Labs"` | A process whose executable name or description contains `browser` and whose publisher contains `Orbit Labs`. |
+| `path:"C:\Program Files\Orbit\" -status:suspended` | Processes with that path text that are not suspended. Backslashes remain literal inside quotes. |
+| `command:"--profile Main"` | Available command-line metadata containing that phrase. |
+| `user:alice status:"not responding"` | A process associated with an account containing `alice` that is not responding. |
+
+Fields are `name`, `pid`, `publisher`, `command`, `path`, `user` and `status`. They use the current snapshot and available metadata; an unavailable field cannot satisfy a positive term. Startup, service and history entries use the corresponding fields where available. User rows can also match the session account and status. For process groups, one member must satisfy the whole query. The group and its visible children remain together, so some context rows may not match individually. Group headings retain their unfiltered totals. Performance resources are not filtered.
 
 ## Differences from Windows Task Manager
 
@@ -65,7 +79,7 @@ This is an independent implementation, not a complete copy of Microsoft's Task M
 | Packaged apps | Grouped by package family, but classified as apps only when the group has a visible app window. Names and icons use available executable metadata, with a generic icon fallback rather than resolved manifest display names and logos. |
 | Process controls | No UAC virtualization toggle or kernel dumps. Affinity covers one processor group, up to 64 logical processors. Protected processes may refuse actions even with elevation. |
 | Efficiency mode | Available only when Windows supports querying the process's policy. Requests EcoQoS and lowers priority; it is not a CPU cap. Disabled on the tested Windows 10 build 19045. Live Windows 11 verification is still outstanding. |
-| Search and themes | Added to the classic tab layout. Search is substring-based, not a Boolean query language, and does not filter Performance resources. Popup menus and system dialogs remain OS-dependent. |
+| Search and themes | Added to the classic tab layout. Search supports plain substrings and scoped AND/exclusion queries, without OR, regular expressions or Performance-resource filtering. Popup menus and system dialogs remain OS-dependent. |
 
 See [feature differences](docs/PARITY.md) and [startup coverage](docs/STARTUP.md) for details.
 
