@@ -66,8 +66,17 @@ std::wstring registryString(HKEY root, const std::wstring& key, const wchar_t* n
   return value.data();
 }
 void replaceInsensitive(std::wstring& text, const std::wstring& token, const std::wstring& value) {
+  if (token.empty() || text.size() < token.size()) return;
+  const auto normalized = lower(text), pattern = lower(token);
+  auto match = normalized.find(pattern);
+  if (match == std::wstring::npos) return;
+  std::wstring expanded; expanded.reserve(text.size());
   size_t offset = 0;
-  while ((offset = lower(text).find(lower(token), offset)) != std::wstring::npos) { text.replace(offset, token.size(), value); offset += value.size(); }
+  do {
+    expanded.append(text, offset, match - offset); expanded += value;
+    offset = match + token.size(); match = normalized.find(pattern, offset);
+  } while (match != std::wstring::npos);
+  expanded.append(text, offset, text.size() - offset); text = std::move(expanded);
 }
 std::wstring expandForProfile(std::wstring text, const std::wstring& profile, HKEY hive, bool current) {
   if (!profile.empty()) {
@@ -83,7 +92,10 @@ std::wstring expandForProfile(std::wstring text, const std::wstring& profile, HK
   }
   if (current) {
     const DWORD size = ExpandEnvironmentStringsW(text.c_str(), nullptr, 0);
-    if (size && size <= 32768) { std::wstring expanded(size, L'\0'); if (ExpandEnvironmentStringsW(text.c_str(), expanded.data(), size)) { expanded.resize(size - 1); return expanded; } }
+    if (size && size <= 32768) {
+      std::wstring expanded(size, L'\0'); const DWORD written = ExpandEnvironmentStringsW(text.c_str(), expanded.data(), size);
+      if (written && written <= size) { expanded.resize(written - 1); return expanded; }
+    }
   } else {
     for (const auto token : {L"SystemRoot", L"windir", L"ProgramFiles", L"ProgramFiles(x86)", L"ProgramW6432", L"ProgramData", L"SystemDrive"}) {
       wchar_t value[32768]{}; const DWORD size = GetEnvironmentVariableW(token, value, DWORD(std::size(value)));
@@ -386,6 +398,25 @@ StartupInventory readStartup(const std::function<void(const StartupInventory&)>&
 #ifdef TASKMGR_DIAGNOSTICS
 std::vector<std::pair<std::string, bool>> startupTests() {
   std::vector<std::pair<std::string, bool>> result;
+  {
+    std::wstring command = L"%UserProfile%\\bin\\app.exe --profile=%USERPROFILE%";
+    replaceInsensitive(command, L"%userprofile%", L"C:\\Users\\Example");
+    result.emplace_back("startup_expansion_replaces_all_cases", command == L"C:\\Users\\Example\\bin\\app.exe --profile=C:\\Users\\Example");
+    command = L"%X%%X%"; replaceInsensitive(command, L"%x%", L"%X%/literal");
+    result.emplace_back("startup_expansion_does_not_recurse_into_replacement", command == L"%X%/literal%X%/literal");
+    command = L"abaBA"; replaceInsensitive(command, L"aba", L"x");
+    result.emplace_back("startup_expansion_nonoverlapping_matches", command == L"xBA");
+    command = L"%X%middle%X%"; replaceInsensitive(command, L"%x%", L"");
+    result.emplace_back("startup_expansion_empty_replacement", command == L"middle");
+    replaceInsensitive(command, L"", L"prefix");
+    result.emplace_back("startup_expansion_empty_token_is_noop", command == L"middle");
+    command = L"A literal command"; replaceInsensitive(command, L"%missing%", L"value");
+    result.emplace_back("startup_expansion_missing_token_is_noop", command == L"A literal command");
+    command.clear(); std::wstring expected;
+    for (int index = 0; index < 2000; ++index) { command += L"%X%"; expected += L"replacement"; }
+    replaceInsensitive(command, L"%x%", L"replacement");
+    result.emplace_back("startup_expansion_large_repeated_value", command == expected);
+  }
   RegistryKey root; const auto key = L"Software\\TaskManagerNativeTests\\Startup-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
   if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, REG_OPTION_VOLATILE, KEY_ALL_ACCESS, nullptr, &root.value, nullptr) != ERROR_SUCCESS) return {{"startup_fixture_created", false}};
   RegistryKey run, approval;
