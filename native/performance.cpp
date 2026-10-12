@@ -8,6 +8,8 @@ static double niceScale(double peak, std::span<const double> steps) { for (const
 static constexpr double bitSteps[] = {100e3, 500e3, 1e6, 5e6, 10e6, 50e6, 100e6, 500e6, 1e9, 5e9, 10e9, 50e9, 100e9};
 static constexpr double byteSteps[] = {100.0 * 1024, 500.0 * 1024, 1048576, 5.0 * 1048576, 10.0 * 1048576, 50.0 * 1048576, 100.0 * 1048576, 500.0 * 1048576, 1073741824, 5.0 * 1073741824};
 static std::wstring gigabytes(double value) { return number(value / 1073741824, 1); }
+static constexpr const wchar_t* gpuUnavailable = L"GPU engine data unavailable.";
+static std::wstring gpuUtilization(const GpuInfo& gpu) { return gpu.engines.empty() ? L"N/A" : number(gpu.usage, 0) + L"%"; }
 static std::wstring sendReceive(const NetworkInfo& network) {
   const auto send = bits(network.send), receive = bits(network.receive); const auto unit = [](const std::wstring& value) { return value.substr(value.rfind(L' ') + 1); };
   return unit(send) == unit(receive) ? L"S: " + send.substr(0, send.rfind(L' ')) + L"  R: " + receive : L"S: " + send + L"  R: " + receive;
@@ -67,12 +69,21 @@ bool Application::verifyGraphPanels() {
   bool passed = true; const auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   for (const auto& [name, result] : graphPanelLayoutTests()) check(result, name.c_str());
   const auto savedSample = current; auto savedHistories = std::move(histories); histories.clear();
+  auto savedItems = std::move(performanceItems); const bool originalItemsDirty = performanceItemsDirty; const auto originalBuilds = performanceItemBuilds;
   const auto originalDpi = dpi; const auto originalTime = graphTime; const auto originalPaints = performanceDetailPaints;
   const int originalSummary = summary; const bool originalLogical = logical, originalDark = dark, originalContrast = highContrast, originalRebuilding = rebuilding;
+  const auto originalResource = selectedResource; const int originalScroll = sidebarScroll, originalHover = hotResource; const bool originalGraphs = hideGraphs; const auto originalFont = font;
   rebuilding = true; dpi = 96; graphTime = 60; summary = 1; logical = true; dark = highContrast = false;
   auto sample = std::make_shared<Sample>(); sample->cores.resize(128, 50); sample->cpu = 50; current = sample;
   histories[L"cpu"].add(0, 25); histories[L"cpu"].add(60, 75);
   for (size_t index = 0; index < sample->cores.size(); ++index) { auto& history = histories[L"core/" + std::to_wstring(index)]; history.add(0, 25); history.add(60, 75); }
+  const auto saveImage = [&](HBITMAP bitmap, const wchar_t* suffix) {
+    if (options.output.empty()) return;
+    const std::filesystem::path output(options.output), imagePath = output.parent_path() / (output.stem().wstring() + suffix + L".png"); std::error_code error;
+    if (!imagePath.parent_path().empty()) std::filesystem::create_directories(imagePath.parent_path(), error);
+    Gdiplus::Bitmap image(bitmap, nullptr); const CLSID png{0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+    check(!error && image.Save(imagePath.c_str(), &png, nullptr) == Gdiplus::Ok, "graph-grid-render-png");
+  };
   const auto render = [&](const wchar_t* suffix, int width, int height, RECT detail, const PerfItem& item, const std::vector<RECT>& plots) {
     HDC screen = GetDC(performance), memory = screen ? CreateCompatibleDC(screen) : nullptr; HBITMAP bitmap = memory ? CreateCompatibleBitmap(screen, width, height) : nullptr;
     check(screen && memory && bitmap, "graph-grid-render-resources");
@@ -85,12 +96,7 @@ bool Application::verifyGraphPanels() {
         check(painted, "graph-grid-every-plot-renders");
       }
       SelectObject(memory, old);
-      if (!options.output.empty()) {
-        const std::filesystem::path output(options.output), imagePath = output.parent_path() / (output.stem().wstring() + suffix + L".png"); std::error_code error;
-        if (!imagePath.parent_path().empty()) std::filesystem::create_directories(imagePath.parent_path(), error);
-        Gdiplus::Bitmap image(bitmap, nullptr); const CLSID png{0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
-        check(!error && image.Save(imagePath.c_str(), &png, nullptr) == Gdiplus::Ok, "graph-grid-render-png");
-      }
+      saveImage(bitmap, suffix);
       DeleteObject(bitmap);
     }
     if (memory) DeleteDC(memory); if (screen) ReleaseDC(performance, screen);
@@ -105,8 +111,54 @@ bool Application::verifyGraphPanels() {
   for (const auto& [type, value] : gpu.engines) { auto& history = histories[L"engine/fixture/" + type]; history.add(0, value); history.add(60, value); }
   const RECT gpuArea{0, 8, 400, 288}; const auto gpuLayout = graphPanelLayout(4, gpuArea, 8, 18); plots.clear(); if (gpuLayout) for (int index = 0; index < 4; ++index) plots.push_back(gpuLayout->plot(gpuArea, index));
   render(L"-graph-gpu-4", 400, 288, {0, 0, 400, 448}, {L"gpu/fixture", L"GPU 0", L"", L"", L"", GpuColor}, plots);
+  summary = 0; hideGraphs = false; sidebarScroll = 0; hotResource = -1; selectedResource = L"gpu/fixture";
+  sample->cpuSpeed = 3; sample->memory.total = 16ull * 1073741824; sample->memory.available = 8ull * 1073741824;
+  auto& fixtureGpu = sample->gpus.front(); fixtureGpu.name = L"GPU availability fixture"; fixtureGpu.usage = 0;
+  fixtureGpu.dedicated = 512ull * 1048576; fixtureGpu.dedicatedLimit = 2ull * 1073741824; fixtureGpu.shared = 128ull * 1048576; fixtureGpu.sharedLimit = 4ull * 1073741824;
+  for (const auto& [key, value] : {std::pair{L"gpu/fixture", 0.0}, std::pair{L"engine/fixture/3D", 0.0}, std::pair{L"dedicated/fixture", double(fixtureGpu.dedicated)}, std::pair{L"shared/fixture", double(fixtureGpu.shared)}}) {
+    auto& history = histories[key]; history = History{}; history.add(0, value); history.add(60, value);
+  }
+  static const wchar_t* const suffixes[] = {L"-gpu-unavailable-light", L"-gpu-unavailable-dark", L"-gpu-unavailable-high-contrast"};
+  // Exercise the application's High Contrast colors without changing desktop settings.
+  for (int appearance = 0; appearance < 3; ++appearance) {
+    dark = appearance == 1; highContrast = appearance == 2; std::vector<COLORREF> idleUtilization;
+    for (const bool available : {true, false}) {
+      fixtureGpu.engines.clear(); if (available) fixtureGpu.engines.emplace_back(L"3D", 0);
+      performanceItemsDirty = true; const auto& item = perfItems().back(); const std::wstring expected = available ? L"0%" : L"N/A";
+      check(item.key == selectedResource && item.value == expected, "gpu-sidebar-distinguishes-zero-and-unavailable");
+      const auto copied = performanceSummary();
+      check(copied.find(L"\t" + expected + L"\r\n") != copied.npos && (copied.find(gpuUnavailable) == copied.npos) == available, "gpu-copy-distinguishes-zero-and-unavailable");
+      HDC screen = GetDC(performance), memory = screen ? CreateCompatibleDC(screen) : nullptr; HBITMAP bitmap = memory ? CreateCompatibleBitmap(screen, 1000, 660) : nullptr;
+      check(screen && memory && bitmap, "gpu-availability-render-resources");
+      if (bitmap) {
+        const auto old = SelectObject(memory, bitmap); const RECT canvas{0, 0, 1000, 660}, detail{250, 0, 974, 660};
+        const auto paint = [&] {
+          SetDCBrushColor(memory, themeColor(RGB(255, 255, 255))); FillRect(memory, &canvas, GetStockBrush(DC_BRUSH)); SetBkMode(memory, TRANSPARENT);
+          paintSidebar(memory, {0, 0, 222, canvas.bottom}, perfItems()); paintDetail(memory, detail, item); GdiFlush();
+        };
+        // A raster font makes the message's exact theme color independent of text smoothing.
+        font = HFONT(GetStockObject(SYSTEM_FIXED_FONT)); paint();
+        bool message = false;
+        for (int y = 196; !message && y < 228; ++y) for (int x = 452; x < 772; ++x) if (GetPixel(memory, x, y) == themeColor(LabelColor)) { message = true; break; }
+        check(message == !available, "gpu-unavailable-message-is-visible-and-themed");
+        for (const int y : {359, 430}) check(GetPixel(memory, detail.left, y) == themeColor(GpuColor), "gpu-memory-graphs-survive-unavailable-engines");
+        std::vector<COLORREF> utilization;
+        for (int y = 525; y < 559; ++y) for (int x = 250; x < 390; ++x) utilization.push_back(GetPixel(memory, x, y));
+        if (available) idleUtilization = std::move(utilization);
+        else check(!idleUtilization.empty() && utilization != idleUtilization, "gpu-rendered-utilization-distinguishes-zero-and-unavailable");
+        font = originalFont;
+        if (!available) paint();
+        SelectObject(memory, old);
+        if (!available) saveImage(bitmap, suffixes[size_t(appearance)]);
+        DeleteObject(bitmap);
+      }
+      if (memory) DeleteDC(memory); if (screen) ReleaseDC(performance, screen);
+    }
+  }
   current = savedSample; histories = std::move(savedHistories); dpi = originalDpi; graphTime = originalTime; performanceDetailPaints = originalPaints;
+  performanceItems = std::move(savedItems); performanceItemsDirty = originalItemsDirty; performanceItemBuilds = originalBuilds;
   summary = originalSummary; logical = originalLogical; dark = originalDark; highContrast = originalContrast; rebuilding = originalRebuilding;
+  selectedResource = originalResource; sidebarScroll = originalScroll; hotResource = originalHover; hideGraphs = originalGraphs; font = originalFont;
   return passed;
 }
 #endif
@@ -123,7 +175,7 @@ const std::vector<PerfItem>& Application::perfItems() const {
   result.push_back({L"memory", L"Memory", L"", gigabytes(used) + L"/" + gigabytes(double(current->memory.total)) + L" GB (" + number(100 * used / std::max(1.0, double(current->memory.total)), 0) + L"%)", bytes(double(current->memory.installed ? current->memory.installed : current->memory.total)), MemoryColor});
   for (const auto& disk : current->disks) result.push_back({L"disk/" + disk.key, disk.title, disk.type, number(disk.active, 0) + L"%", disk.model, DiskColor});
   for (const auto& network : current->networks) result.push_back({L"net/" + std::to_wstring(network.luid), network.type, L"", sendReceive(network), network.description, NetworkColor});
-  for (const auto& gpu : current->gpus) result.push_back({L"gpu/" + gpu.key, L"GPU " + std::to_wstring(gpu.index), gpu.name, number(gpu.usage, 0) + L"%" + (gpu.temperature >= 0 ? L" (" + number(gpu.temperature, 0) + L" °C)" : L""), gpu.name, GpuColor});
+  for (const auto& gpu : current->gpus) result.push_back({L"gpu/" + gpu.key, L"GPU " + std::to_wstring(gpu.index), gpu.name, gpuUtilization(gpu) + (gpu.temperature >= 0 ? L" (" + number(gpu.temperature, 0) + L" °C)" : L""), gpu.name, GpuColor});
   return result;
 }
 static size_t selectedResourceIndex(const std::vector<PerfItem>& items, std::wstring_view key) {
@@ -243,7 +295,8 @@ void Application::paintDetail(HDC dc, RECT bounds, const PerfItem& item) {
       for (const auto& engine : found->engines) if (engines.size() < 4 && std::none_of(engines.begin(), engines.end(), [&](const auto& value) { return value.first == engine.first; })) engines.push_back(engine);
       std::vector<std::tuple<std::wstring, std::wstring, std::wstring>> items;
       for (const auto& [type, value] : engines) { auto title = type; if (title == L"VideoEncode") title = L"Video Encode"; else if (title == L"VideoDecode") title = L"Video Decode"; else if (title == L"VideoProcessing") title = L"Video Processing"; items.emplace_back(L"engine/" + found->key + L"/" + type, title, number(value, 0) + L"%"); }
-      panels(items, {graph.left, graph.top - scale(21), graph.right, graph.bottom}, themeColor(item.color));
+      if (found->engines.empty()) text(dc, gpuUnavailable, font, themeColor(LabelColor), graph, DT_CENTER | DT_VCENTER);
+      else panels(items, {graph.left, graph.top - scale(21), graph.right, graph.bottom}, themeColor(item.color));
       int y = graph.bottom + scale(10);
       for (const auto& [series, label, used, limit] : {std::tuple{L"dedicated/", L"Dedicated GPU memory usage", found->dedicated, found->dedicatedLimit}, std::tuple{L"shared/", L"Shared GPU memory usage", found->shared, found->sharedLimit}}) {
         if (compactSummary) break;
@@ -316,7 +369,7 @@ void Application::paintDetail(HDC dc, RECT bounds, const PerfItem& item) {
     }
   } else if (gpu) {
     const auto found = std::find_if(current->gpus.begin(), current->gpus.end(), [&](const GpuInfo& value) { return L"gpu/" + value.key == key; }); if (found == current->gpus.end()) return;
-    stat(L"Utilization", number(found->usage, 0) + L"%", left, stats); stat(L"Dedicated GPU memory", gigabytes(double(found->dedicated)) + L"/" + gigabytes(double(found->dedicatedLimit)) + L" GB", left + scale(160), stats);
+    stat(L"Utilization", gpuUtilization(*found), left, stats); stat(L"Dedicated GPU memory", gigabytes(double(found->dedicated)) + L"/" + gigabytes(double(found->dedicatedLimit)) + L" GB", left + scale(160), stats);
     stat(L"GPU Memory", gigabytes(double(found->dedicated + found->shared)) + L"/" + gigabytes(double(found->dedicatedLimit + found->sharedLimit)) + L" GB", left, stats + scale(57), false); stat(L"Shared GPU memory", gigabytes(double(found->shared)) + L"/" + gigabytes(double(found->sharedLimit)) + L" GB", left + scale(160), stats + scale(57), false);
     if (found->temperature >= 0) stat(L"GPU Temperature", number(found->temperature, 0) + L" °C", left, stats + scale(104), false);
     if (width >= scale(600)) {
@@ -332,6 +385,10 @@ std::wstring Application::performanceSummary() const {
   const auto& item = items[selectedResourceIndex(items, selectedResource)];
   std::wstring result = item.title + L"\r\n\r\n\t" + item.description + L"\r\n\r\n\t" + item.value + L"\r\n";
   if (item.key == L"cpu") result += L"\tProcesses:\t" + std::to_wstring(current->processes.size()) + L"\r\n\tThreads:\t" + std::to_wstring(current->threads) + L"\r\n\tHandles:\t" + std::to_wstring(current->handles) + L"\r\n\tUp time:\t" + duration(current->uptime) + L"\r\n";
+  else if (item.key.starts_with(L"gpu/")) {
+    const auto found = std::find_if(current->gpus.begin(), current->gpus.end(), [&](const GpuInfo& gpu) { return L"gpu/" + gpu.key == item.key; });
+    if (found != current->gpus.end() && found->engines.empty()) result += std::wstring(L"\t") + gpuUnavailable + L"\r\n";
+  }
   return result;
 }
 void Application::performanceClick(POINT point, bool right, bool twice) {
