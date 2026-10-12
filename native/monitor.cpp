@@ -601,6 +601,11 @@ template <typename ReadDisk> static const DiskInfo& cachedDiskHardware(std::unor
   const auto found = disks.find(index);
   return found != disks.end() ? found->second : disks.emplace(index, read(index)).first->second;
 }
+template <typename Read> static void refreshServiceEntries(ServiceInventory& inventory, const ServiceInventory* previous, Read read) {
+  auto services = read(&inventory.servicesError);
+  if (inventory.servicesError != ERROR_SUCCESS && previous) inventory.services = previous->services;
+  else inventory.services = std::move(services);
+}
 static void pruneDiskHardware(std::unordered_map<int, DiskInfo>& hardware, std::span<const DiskInfo> disks) {
   // Disk snapshots are sorted by physical index before pruning cached metadata.
   std::erase_if(hardware, [&](const auto& item) {
@@ -828,7 +833,8 @@ Sample Sampler::sample(bool startupVisible) {
     }
   }
   if (refreshResources) {
-  readNetworkInterfaces(started, networkAt, networkPrevious, adapterAddresses, result.networks, GetIfTable2, FreeMibTable);
+  // Slow disk/address discovery above must not become part of another byte interval.
+  readNetworkInterfaces(Clock::now(), networkAt, networkPrevious, adapterAddresses, result.networks, GetIfTable2, FreeMibTable);
   }
   if (trace) result.networkAttribution = trace->sample(result.processes);
 #ifdef TASKMGR_DIAGNOSTICS
@@ -855,7 +861,7 @@ Sample Sampler::sample(bool startupVisible) {
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[4] = milliseconds(phase); phase = Clock::now();
 #endif
-  if (refreshInventory) { cachedInventory = std::make_shared<const ServiceInventory>(ServiceInventory{readServices(), readSessions()}); readUsers(); inventoryAt = Clock::now(); }
+  if (refreshInventory) { auto inventory = std::make_shared<ServiceInventory>(); refreshServiceEntries(*inventory, cachedInventory.get(), readServices); inventory->sessions = readSessions(); cachedInventory = std::move(inventory); readUsers(); inventoryAt = Clock::now(); }
   if (startupProgressReady.load()) { std::lock_guard lock(startupMutex); if (startupProgressReady.exchange(false)) cachedStartup = std::move(startupProgress); }
   if (startupJob.valid() && startupJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
     try { cachedStartup = std::make_shared<StartupInventory>(startupJob.get()); }
@@ -893,29 +899,123 @@ static std::wstring serviceGroup(const std::wstring& service) {
   if (cache.size() < 4096) cache.emplace(service, group);
   return group;
 }
-std::vector<Entry> readServices() {
-  std::vector<Entry> result;
-  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE);
-  if (!manager) return result;
-  DWORD needed = 0, count = 0, resume = 0;
-  EnumServicesStatusExW(manager, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_STATE_ALL, nullptr, 0, &needed, &count, &resume, nullptr);
-  if (needed && needed <= 16 * 1024 * 1024) {
-    std::vector<BYTE> data(needed); resume = 0;
-    if (EnumServicesStatusExW(manager, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_STATE_ALL, data.data(), DWORD(data.size()), &needed, &count, &resume, nullptr)) {
-      auto records = reinterpret_cast<ENUM_SERVICE_STATUS_PROCESSW*>(data.data()); result.reserve(count);
-      static const wchar_t* states[] = {L"Unknown", L"Stopped", L"Starting", L"Stopping", L"Running", L"Continuing", L"Pausing", L"Paused"};
-      for (DWORD index = 0; index < count; ++index) {
-        const auto& service = records[index]; const DWORD state = service.ServiceStatusProcess.dwCurrentState; const DWORD pid = state == SERVICE_STOPPED ? 0 : service.ServiceStatusProcess.dwProcessId;
-        Entry entry{service.lpServiceName, {service.lpServiceName, pid ? std::to_wstring(pid) : L"", service.lpDisplayName, states[state <= 7 ? state : 0], L""}, pid};
-        entry.group = serviceGroup(service.lpServiceName); entry.cells[4] = entry.group; entry.description = service.lpDisplayName;
-        result.push_back(std::move(entry));
-      }
+struct ServiceEnumeration { std::vector<Entry> entries; DWORD error = ERROR_SUCCESS; };
+template <typename Read, typename Group> static ServiceEnumeration enumerateServices(Read read, Group group) {
+  constexpr DWORD bufferLimit = 256 * 1024, entryLimit = 65536;
+  std::vector<BYTE> data(32768); ServiceEnumeration result; DWORD resume = 0;
+  for (unsigned page = 0; page < 256; ++page) {
+    DWORD needed = 0, count = 0; const DWORD previous = resume;
+    const auto status = read(data.data(), DWORD(data.size()), &needed, &count, &resume);
+    if (status != ERROR_SUCCESS && status != ERROR_MORE_DATA) return {{}, status};
+    if (count > data.size() / sizeof(ENUM_SERVICE_STATUS_PROCESSW)) return {{}, ERROR_INVALID_DATA};
+    if (count > entryLimit - result.entries.size()) return {{}, ERROR_MORE_DATA};
+    if (result.entries.empty()) result.entries.reserve(count);
+    const auto records = reinterpret_cast<const ENUM_SERVICE_STATUS_PROCESSW*>(data.data());
+    static const wchar_t* states[] = {L"Unknown", L"Stopped", L"Starting", L"Stopping", L"Running", L"Continuing", L"Pausing", L"Paused"};
+    for (DWORD index = 0; index < count; ++index) {
+      const auto& service = records[index];
+      if (!service.lpServiceName || !*service.lpServiceName || !service.lpDisplayName) return {{}, ERROR_INVALID_DATA};
+      const DWORD state = service.ServiceStatusProcess.dwCurrentState, pid = state == SERVICE_STOPPED ? 0 : service.ServiceStatusProcess.dwProcessId;
+      Entry entry{service.lpServiceName, {service.lpServiceName, pid ? std::to_wstring(pid) : L"", service.lpDisplayName, states[state <= 7 ? state : 0], L""}, pid};
+      entry.group = group(service.lpServiceName); entry.cells[4] = entry.group; entry.description = service.lpDisplayName;
+      result.entries.push_back(std::move(entry));
     }
+    if (status == ERROR_SUCCESS) {
+      std::sort(result.entries.begin(), result.entries.end(), [](const Entry& left, const Entry& right) { return CompareStringOrdinal(left.key.c_str(), -1, right.key.c_str(), -1, TRUE) == CSTR_LESS_THAN; });
+      // Service creation/deletion during paging can repeat a name at a resume boundary.
+      result.entries.erase(std::unique(result.entries.begin(), result.entries.end(), [](const Entry& left, const Entry& right) { return CompareStringOrdinal(left.key.c_str(), -1, right.key.c_str(), -1, TRUE) == CSTR_EQUAL; }), result.entries.end());
+      return result;
+    }
+    if (count && (resume == 0 || resume == previous)) return {{}, ERROR_INVALID_DATA};
+    const size_t nextSize = std::min<size_t>(bufferLimit, std::max<size_t>(needed, data.size()));
+    if (!count && nextSize <= data.size()) return {{}, ERROR_MORE_DATA};
+    if (nextSize > data.size()) data.resize(nextSize);
   }
-  CloseServiceHandle(manager);
-  std::sort(result.begin(), result.end(), [](const Entry& left, const Entry& right) { return CompareStringOrdinal(left.key.c_str(), -1, right.key.c_str(), -1, TRUE) == CSTR_LESS_THAN; });
-  return result;
+  return {{}, ERROR_MORE_DATA};
 }
+std::vector<Entry> readServices(DWORD* error) {
+  SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE);
+  if (!manager) { if (error) *error = GetLastError(); return {}; }
+  struct Close { SC_HANDLE handle; ~Close() { CloseServiceHandle(handle); } } close{manager};
+  auto result = enumerateServices([&](BYTE* data, DWORD size, DWORD* needed, DWORD* count, DWORD* resume) {
+    return EnumServicesStatusExW(manager, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_STATE_ALL, data, size, needed, count, resume, nullptr) ? DWORD(ERROR_SUCCESS) : GetLastError();
+  }, serviceGroup);
+  if (error) *error = result.error;
+  return std::move(result.entries);
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> serviceInventoryTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  {
+    ServiceInventory previous; Entry service; service.key = L"existing"; previous.services.push_back(service);
+    ServiceInventory unavailable;
+    const auto fail = [](DWORD* error) { *error = ERROR_ACCESS_DENIED; return std::vector<Entry>{}; };
+    refreshServiceEntries(unavailable, &previous, fail);
+    checks.emplace_back("services_refresh_failure_retains_last_complete_inventory", unavailable.servicesError == ERROR_ACCESS_DENIED && unavailable.services.size() == 1 && unavailable.services[0].key == L"existing" && previous.servicesError == ERROR_SUCCESS);
+    ServiceInventory initial; refreshServiceEntries(initial, nullptr, fail);
+    checks.emplace_back("services_initial_failure_is_distinct_from_empty_success", initial.services.empty() && initial.servicesError == ERROR_ACCESS_DENIED);
+    ServiceInventory recovered; refreshServiceEntries(recovered, &unavailable, [](DWORD* error) { *error = ERROR_SUCCESS; return std::vector<Entry>{}; });
+    checks.emplace_back("services_successful_empty_snapshot_clears_stale_inventory", recovered.services.empty() && recovered.servicesError == ERROR_SUCCESS && unavailable.services.size() == 1);
+  }
+  const auto group = [](const wchar_t*) { return std::wstring(L"fixture-group"); };
+  const auto record = [](BYTE* data, const wchar_t* name, DWORD state = SERVICE_RUNNING, DWORD pid = 42) {
+    auto& service = *reinterpret_cast<ENUM_SERVICE_STATUS_PROCESSW*>(data); service = {};
+    service.lpServiceName = const_cast<wchar_t*>(name); service.lpDisplayName = const_cast<wchar_t*>(L"Example service"); service.ServiceStatusProcess.dwCurrentState = state; service.ServiceStatusProcess.dwProcessId = pid;
+  };
+  {
+    unsigned calls = 0;
+    const auto complete = enumerateServices([&](BYTE* data, DWORD size, DWORD*, DWORD* count, DWORD* resume) { ++calls; checks.emplace_back("services_initial_buffer_is_bounded", size == 32768 && *resume == 0); record(data, L"alpha", SERVICE_STOPPED); *count = 1; return DWORD(ERROR_SUCCESS); }, group);
+    checks.emplace_back("services_single_page_avoids_size_probe", calls == 1 && complete.error == ERROR_SUCCESS && complete.entries.size() == 1 && complete.entries[0].key == L"alpha" && complete.entries[0].pid == 0 && complete.entries[0].cells[3] == L"Stopped" && complete.entries[0].group == L"fixture-group");
+  }
+  {
+    unsigned calls = 0; bool resumed = true, bounded = true;
+    const auto partial = enumerateServices([&](BYTE* data, DWORD size, DWORD* needed, DWORD* count, DWORD* resume) {
+      bounded = bounded && size <= 256 * 1024; ++calls; *count = 1;
+      if (calls == 1) { record(data, L"zeta"); *needed = 1024 * 1024; *resume = 7; return DWORD(ERROR_MORE_DATA); }
+      resumed = resumed && *resume == 7; record(data, L"alpha"); *resume = 0; return DWORD(ERROR_SUCCESS);
+    }, group);
+    checks.emplace_back("services_more_data_preserves_partial_pages_and_resume", calls == 2 && resumed && partial.error == ERROR_SUCCESS && partial.entries.size() == 2 && partial.entries[0].key == L"alpha" && partial.entries[1].key == L"zeta");
+    checks.emplace_back("services_large_inventory_respects_native_buffer_cap", bounded);
+  }
+  {
+    unsigned calls = 0;
+    const auto churn = enumerateServices([&](BYTE* data, DWORD, DWORD* needed, DWORD* count, DWORD* resume) {
+      ++calls; record(data, calls == 1 ? L"Example" : L"example"); *count = 1;
+      if (calls == 1) { *resume = 1; *needed = 100; return DWORD(ERROR_MORE_DATA); }
+      *resume = 0; return DWORD(ERROR_SUCCESS);
+    }, group);
+    checks.emplace_back("services_paging_churn_deduplicates_case_insensitive_names", calls == 2 && churn.error == ERROR_SUCCESS && churn.entries.size() == 1);
+  }
+  {
+    unsigned calls = 0;
+    const auto grown = enumerateServices([&](BYTE* data, DWORD size, DWORD* needed, DWORD* count, DWORD* resume) {
+      ++calls; if (calls == 1) { *count = 0; *needed = 65536; return DWORD(ERROR_MORE_DATA); }
+      checks.emplace_back("services_empty_page_growth_keeps_resume", size == 65536 && *resume == 0); record(data, L"alpha"); *count = 1; return DWORD(ERROR_SUCCESS);
+    }, group);
+    checks.emplace_back("services_initial_buffer_race_recovers", calls == 2 && grown.error == ERROR_SUCCESS && grown.entries.size() == 1);
+    calls = 0;
+    const auto bounded = enumerateServices([&](BYTE*, DWORD, DWORD* needed, DWORD* count, DWORD*) { ++calls; *needed = UINT32_MAX; *count = 0; return DWORD(ERROR_MORE_DATA); }, group);
+    checks.emplace_back("services_unserviceable_record_has_bounded_retries", calls == 2 && bounded.error == ERROR_MORE_DATA && bounded.entries.empty());
+  }
+  {
+    unsigned calls = 0;
+    const auto failed = enumerateServices([&](BYTE* data, DWORD, DWORD* needed, DWORD* count, DWORD* resume) {
+      if (++calls == 1) { record(data, L"alpha"); *count = 1; *resume = 1; *needed = 100; return DWORD(ERROR_MORE_DATA); }
+      return DWORD(ERROR_ACCESS_DENIED);
+    }, group);
+    checks.emplace_back("services_failure_reports_error_without_partial_inventory", calls == 2 && failed.error == ERROR_ACCESS_DENIED && failed.entries.empty());
+    calls = 0;
+    const auto stuck = enumerateServices([&](BYTE* data, DWORD, DWORD*, DWORD* count, DWORD*) { ++calls; record(data, L"alpha"); *count = 1; return DWORD(ERROR_MORE_DATA); }, group);
+    checks.emplace_back("services_nonadvancing_resume_is_rejected", calls == 1 && stuck.error == ERROR_INVALID_DATA && stuck.entries.empty());
+    calls = 0;
+    const auto endless = enumerateServices([&](BYTE* data, DWORD, DWORD*, DWORD* count, DWORD* resume) { ++calls; record(data, L"alpha"); *count = 1; ++*resume; return DWORD(ERROR_MORE_DATA); }, group);
+    checks.emplace_back("services_endless_paging_is_bounded", calls == 256 && endless.error == ERROR_MORE_DATA && endless.entries.empty());
+    const auto invalid = enumerateServices([](BYTE*, DWORD size, DWORD*, DWORD* count, DWORD*) { *count = size; return DWORD(ERROR_SUCCESS); }, group);
+    checks.emplace_back("services_invalid_array_extent_is_rejected", invalid.error == ERROR_INVALID_DATA && invalid.entries.empty());
+  }
+  return checks;
+}
+#endif
 std::vector<Entry> readSessions() {
   std::vector<Entry> result; PWTS_SESSION_INFOW sessions = nullptr; DWORD count = 0;
   if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &count)) return result;
