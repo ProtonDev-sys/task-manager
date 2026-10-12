@@ -2,6 +2,8 @@
 
 A native Windows task manager with the classic Windows 10 layout, live hardware graphs, process controls, search, and light and dark themes. Written in C++20. Runs as a single executable without .NET or additional runtime downloads.
 
+See the [v1.3.0 release notes](docs/releases/v1.3.0.md) for scoped search, CSV export, sampling recovery, reliability fixes and the Python development tools.
+
 ## Install
 
 Requires **64-bit Windows 10 or Windows 11** and administrator approval. ARM64 and 32-bit builds are not provided. Windows 11-specific features have not all been verified on Windows 11.
@@ -46,9 +48,11 @@ Right-click a column heading to choose visible columns. **Ctrl+F** opens search;
 
 **View → Update speed → Adaptive (low overhead)** targets process updates between 250 ms and 4 seconds, backing off when measured sampling and table-update work becomes expensive. It aims for roughly 2% sampling/display wall-time duty, not a guaranteed CPU cap; asynchronous metadata, painting and tracing also use resources. Adaptive uses a 1-second target on other full-size tabs. It is the default for new settings; existing saved update speeds are preserved. Fixed High targets 500 ms, Normal 1 second, and Low 4 seconds.
 
-Process CPU, memory, I/O, window classification and traced network activity are sampled on each process update. More expensive detailed memory, per-core, disk, network-interface and GPU counters are collected at most once a second during automatic polling, then reused between process updates. Their rate calculations use their own sampling interval, and cached process GPU data is matched by PID and creation time. F5 also invalidates the resource cache.
+Process CPU, memory, I/O, window classification and traced network activity are sampled on each process update. More expensive detailed memory, per-core, disk, network-interface and GPU counters normally refresh no more than once a second during automatic polling, then are reused between process updates. Processor-topology changes can force an earlier refresh. Their rate calculations use their own sampling interval, and cached process GPU data is matched by PID and creation time. F5 also invalidates the resource cache.
 
 Sampling time is included in the cadence rather than added to it; slow samples cannot trigger a catch-up polling loop. Minimized monitoring slows to at least 4 seconds, and restoring the window consumes the latest snapshot and requests a fresh one unless paused. Holding Ctrl temporarily freezes table updates; releasing it consumes the latest available snapshot. These are sampled measurements, not instantaneous guarantees: CPU and I/O rates describe the interval between snapshots, and short-lived processes can exist entirely between samples. Adaptive backoff is tested with simulated costs, but performance on physical 20-year-old hardware has not been verified; the Windows 10/11 x64 requirement still applies.
+
+If a live sampling pass fails, the app keeps the last complete snapshot and changes its title to **Task Manager - Live updates unavailable; retrying...**. It retries after 250 ms, doubling the delay after repeated failures up to 4 seconds. F5 requests an immediate retry, and closing the app interrupts the wait. A successful sample restores the normal title and the selected update speed; if updates were paused, they return to paused after recovery. The retained values may be outdated while the retry status is visible.
 
 Stable tables, including filtered results, repaint only visible rows whose text, heat colours, icons or tree appearance changed. Numeric sorting keeps the viewport position instead of scrolling after a process whose rank changes. Selection and independent keyboard focus retain their process identities as rows move. Light and dark modes share this refresh path; changing appearance does not request another system sample.
 
