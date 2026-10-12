@@ -31,6 +31,44 @@ CpuInfo readCpu() {
   cpu.virtualization = IsProcessorFeaturePresent(PF_VIRT_FIRMWARE_ENABLED) != FALSE;
   return cpu;
 }
+template <typename Value> static Value firmwareValue(std::span<const BYTE> data, size_t offset) {
+  Value value{};
+  if (offset <= data.size() && sizeof(value) <= data.size() - offset) memcpy(&value, data.data() + offset, sizeof(value));
+  return value;
+}
+static unsigned firmwareMemorySpeed(std::span<const BYTE> record, size_t ordinary, size_t extended) {
+  const auto speed = firmwareValue<WORD>(record, ordinary);
+  if (speed != 0xffff) return speed;
+  const auto value = firmwareValue<DWORD>(record, extended);
+  return value <= 0x7fffffff ? value : 0;
+}
+// SMBIOS fields are packed, and string sets can leave the next record at an odd address.
+static void readMemoryRecords(MemoryInfo& memory, std::span<const BYTE> data) {
+  if (data.size() < 8) return;
+  const size_t end = std::min<size_t>(data.size(), size_t(firmwareValue<DWORD>(data, 4)) + 8);
+  for (size_t offset = 8; offset + 4 <= end;) {
+    const BYTE type = data[offset], length = data[offset + 1];
+    if (length < 4 || offset + length > end) break;
+    size_t next = offset + length;
+    while (next + 1 < end && (data[next] || data[next + 1])) ++next;
+    if (next + 1 >= end) break;
+    // A logical memory device describes capacity carved from physical devices, not a slot.
+    if (type == 17 && length >= 21 && data[offset + 18] != 0x1f) {
+      const auto record = data.subspan(offset, length);
+      ++memory.slots; const WORD capacity = firmwareValue<WORD>(record, 12);
+      // FFFFh means installed size unknown; only zero identifies an empty socket.
+      if (capacity != 0) {
+        ++memory.usedSlots;
+        const unsigned configured = firmwareMemorySpeed(record, 32, 88), nominal = firmwareMemorySpeed(record, 21, 84);
+        const unsigned speed = configured ? configured : nominal;
+        if (speed) memory.speed = memory.speed ? std::min(memory.speed, speed) : speed;
+        memory.formFactor = data[offset + 14] == 9 ? L"DIMM" : data[offset + 14] == 13 ? L"SODIMM" : memory.formFactor;
+      }
+    }
+    offset = next + 2;
+    if (type == 127) break;
+  }
+}
 // Memory speed, slots and form factor from the SMBIOS type 17 (memory device) records.
 MemoryInfo readMemoryHardware() {
   MemoryInfo memory; ULONGLONG installed = 0; if (GetPhysicallyInstalledSystemMemory(&installed)) memory.installed = installed * 1024;
@@ -38,27 +76,68 @@ MemoryInfo readMemoryHardware() {
   if (size < 8 || size > 1024 * 1024) return memory;
   std::vector<BYTE> data(size);
   if (GetSystemFirmwareTable('RSMB', 0, data.data(), size) != size) return memory;
-  const size_t end = std::min<size_t>(size, size_t(*reinterpret_cast<const DWORD*>(data.data() + 4)) + 8);
-  for (size_t offset = 8; offset + 4 <= end;) {
-    const BYTE type = data[offset], length = data[offset + 1];
-    if (length < 4 || offset + length > end) break;
-    if (type == 17 && length >= 21) {
-      ++memory.slots; const WORD capacity = *reinterpret_cast<const WORD*>(&data[offset + 12]);
-      if (capacity != 0 && capacity != 0xffff) {
-        ++memory.usedSlots;
-        const WORD configured = length >= 34 ? *reinterpret_cast<const WORD*>(&data[offset + 32]) : 0, nominal = length >= 23 ? *reinterpret_cast<const WORD*>(&data[offset + 21]) : 0;
-        const WORD speed = configured > 0 && configured < 0xffff ? configured : nominal;
-        if (speed > 0 && speed < 0xffff) memory.speed = memory.speed ? std::min<unsigned>(memory.speed, speed) : speed;
-        memory.formFactor = data[offset + 14] == 9 ? L"DIMM" : data[offset + 14] == 13 ? L"SODIMM" : memory.formFactor;
-      }
-    }
-    offset += length;
-    while (offset + 1 < end && (data[offset] || data[offset + 1])) ++offset;
-    offset += 2;
-    if (type == 127) break;
-  }
+  readMemoryRecords(memory, data);
   return memory;
 }
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> memoryHardwareTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  const auto write = [](std::vector<BYTE>& data, size_t offset, auto value) { if (offset <= data.size() && sizeof(value) <= data.size() - offset) memcpy(data.data() + offset, &value, sizeof(value)); };
+  const auto device = [&](WORD capacity, WORD nominal, WORD configured, BYTE length = 34) {
+    std::vector<BYTE> record(size_t(length) + 2); record[0] = 17; record[1] = length;
+    write(record, 12, capacity); record[14] = 9; record[18] = 0x1a;
+    if (length >= 23) write(record, 21, nominal);
+    if (length >= 34) write(record, 32, configured);
+    return record;
+  };
+  const auto table = [&](const std::vector<std::vector<BYTE>>& records) {
+    std::vector<BYTE> data(8);
+    for (const auto& record : records) data.insert(data.end(), record.begin(), record.end());
+    write(data, 4, DWORD(data.size() - 8)); return data;
+  };
+  const auto parse = [&](const std::vector<BYTE>& data) { MemoryInfo memory; memory.installed = 123456; readMemoryRecords(memory, data); return memory; };
+  {
+    const auto memory = parse(table({{0, 5, 0, 0, 0, 0, 0}, device(8192, 5200, 4800)}));
+    checks.emplace_back("memory_firmware_reads_unaligned_device_fields", memory.slots == 1 && memory.usedSlots == 1 && memory.speed == 4800 && memory.formFactor == L"DIMM" && memory.installed == 123456);
+    const auto unknown = parse(table({device(0xffff, 3200, 0)}));
+    checks.emplace_back("memory_unknown_device_capacity_still_occupies_slot", unknown.slots == 1 && unknown.usedSlots == 1 && unknown.speed == 3200);
+    const auto empty = parse(table({device(0, 6400, 6000)}));
+    checks.emplace_back("memory_empty_socket_does_not_supply_speed_or_form_factor", empty.slots == 1 && empty.usedSlots == 0 && empty.speed == 0 && empty.formFactor.empty());
+    const auto mixed = parse(table({device(8192, 4800, 3200), device(0x7fff, 4000, 2400), device(0, 1600, 1200)}));
+    checks.emplace_back("memory_multiple_devices_use_slowest_configured_speed", mixed.slots == 3 && mixed.usedSlots == 2 && mixed.speed == 2400);
+    auto logical = device(0xffff, 0, 0); logical[18] = 0x1f;
+    const auto virtualDevice = parse(table({logical}));
+    checks.emplace_back("memory_logical_devices_do_not_add_physical_slots", virtualDevice.slots == 0 && virtualDevice.usedSlots == 0);
+  }
+  {
+    const auto old = parse(table({device(8192, 3200, 3000, 21)}));
+    checks.emplace_back("memory_old_firmware_without_speed_is_supported", old.slots == 1 && old.usedSlots == 1 && old.speed == 0);
+    const auto nominal = parse(table({device(8192, 3200, 3000, 23)}));
+    checks.emplace_back("memory_missing_configured_speed_uses_nominal", nominal.speed == 3200);
+    auto extended = device(8192, 0xffff, 0xffff, 92); write(extended, 84, DWORD(100000)); write(extended, 88, DWORD(80000));
+    checks.emplace_back("memory_extended_configured_speed_is_supported", parse(table({extended})).speed == 80000);
+    write(extended, 88, DWORD(UINT32_MAX));
+    checks.emplace_back("memory_invalid_extended_speed_falls_back_to_nominal", parse(table({extended})).speed == 100000);
+    const auto missing = parse(table({device(8192, 0xffff, 0xffff)}));
+    checks.emplace_back("memory_missing_extended_speed_is_unknown", missing.speed == 0);
+    write(extended, 21, WORD(6400)); write(extended, 32, WORD(6000));
+    checks.emplace_back("memory_extended_fields_require_escape_value", parse(table({extended})).speed == 6000);
+  }
+  {
+    auto truncated = table({device(8192, 3200, 3000)}); truncated.resize(8 + 20);
+    checks.emplace_back("memory_truncated_formatted_record_is_ignored", parse(truncated).slots == 0);
+    auto strings = device(8192, 3200, 3000); strings.resize(34);
+    checks.emplace_back("memory_unterminated_string_set_is_ignored", parse(table({strings})).slots == 0);
+    checks.emplace_back("memory_short_raw_header_is_ignored", parse(std::vector<BYTE>(7)).slots == 0);
+    const auto marker = table({device(8192, 3200, 3000), {127, 4, 0, 0, 0, 0}, device(8192, 3200, 3000)});
+    checks.emplace_back("memory_end_marker_stops_later_records", parse(marker).slots == 1);
+    auto bounded = table({device(8192, 3200, 3000), device(8192, 3200, 3000)}); write(bounded, 4, DWORD(36));
+    checks.emplace_back("memory_raw_length_bounds_record_walk", parse(bounded).slots == 1);
+    checks.emplace_back("memory_zero_length_record_stops_walk", parse(table({{17, 0, 0, 0, 0, 0}, device(8192, 3200, 3000)})).slots == 0);
+  }
+  return checks;
+}
+#endif
 DiskInfo readDiskHardware(int index) {
   DiskInfo disk; disk.index = index; disk.model = L"Physical disk";
   Handle device(CreateFileW((L"\\\\.\\PhysicalDrive" + std::to_wstring(index)).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr));
