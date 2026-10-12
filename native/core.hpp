@@ -127,12 +127,13 @@ struct Sample {
 class Counter {
   PDH_HQUERY query = nullptr;
   std::unordered_map<std::wstring, PDH_HCOUNTER> counters;
+  std::vector<std::byte> valuesBuffer;
 public:
   Counter();
   ~Counter();
   void add(const std::wstring& key, const std::wstring& path);
   void collect();
-  std::vector<std::pair<std::wstring, double>> values(const std::wstring& key) const;
+  std::vector<std::pair<std::wstring, double>> values(const std::wstring& key);
 };
 class NetworkTrace {
   struct State;
@@ -202,6 +203,7 @@ StartupInventory readStartup(const std::function<void(const StartupInventory&)>&
 std::vector<std::pair<std::string, bool>> startupTests();
 std::vector<std::pair<std::string, bool>> gpuEngineTests();
 std::vector<std::pair<std::string, bool>> networkSamplingTests();
+std::vector<std::pair<std::string, bool>> counterSamplingTests();
 std::vector<std::pair<std::string, bool>> processorGroupTests();
 std::vector<std::pair<std::string, bool>> accountNameTests();
 std::vector<std::pair<std::string, bool>> sessionIdentityTests();
