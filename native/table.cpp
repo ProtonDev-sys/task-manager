@@ -197,7 +197,7 @@ void Application::buildProcesses(std::vector<Row>& next) {
   std::vector<Top> tops; tops.reserve(groups.size() + 1);
   for (auto& [key, members] : groups) {
     int root = members.front();
-    if (key.starts_with(L"pid:")) { const auto found = byId.find(DWORD(_wtoi(key.c_str() + 4))); if (found != byId.end()) root = found->second; }
+    if (key.starts_with(L"pid:")) { const auto pid = counterInteger(std::wstring_view(key).substr(4), 10); const auto found = pid ? byId.find(*pid) : byId.end(); if (found != byId.end()) root = found->second; }
     else root = *std::min_element(members.begin(), members.end(), [&](int left, int right) { const auto& a = processes[size_t(left)]; const auto& b = processes[size_t(right)]; return a.app != b.app ? a.app : a.created < b.created; });
     const auto& rootProcess = processes[size_t(root)]; const auto& metadata = icons->get(rootProcess);
     Top top; auto& row = top.row; row.process = root; row.members = members; row.icon = lower(rootProcess.name) == L"svchost.exe" ? Icons::ServiceHostIcon : metadata.icon;
@@ -321,7 +321,8 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
   const auto begin = Clock::now();
   if (hidden()) { if (sortOnly) ++sortPasses; else if (!filterOnly) ++fullRebuilds; }
 #endif
-  const auto selected = rowKey(selectedIndex()); const int top = ListView_GetTopIndex(list); const auto topKey = rowKey(top);
+  const auto selected = rowKey(selectedIndex()), focused = rowKey(ListView_GetNextItem(list, -1, LVNI_FOCUSED));
+  const int top = ListView_GetTopIndex(list); const auto topKey = rowKey(top);
   rebuilding = true; std::vector<Row> next;
   bool partialUpdate = false;
   if (filterOnly) {
@@ -336,22 +337,24 @@ void Application::rebuild(bool sortOnly, bool filterOnly) {
   else if (selectedTab == DetailsTab) buildDetails(next);
   else if (selectedTab != PerformanceTab) buildEntries(next);
   if (!sortOnly && !filterOnly) {
-    if (searchText.empty() || compact || selectedTab == PerformanceTab) {
-      partialUpdate = !manualSort && orderedTab == selectedTab && rows.size() == next.size() && std::equal(rows.begin(), rows.end(), next.begin(), [](const Row& previous, const Row& incoming) { return previous.key == incoming.key; });
-      rows.swap(next); searchRows = std::vector<Row>{};
-    }
-    else { searchRows = std::move(next); rows = filteredRows(searchRows); }
+    if (searchText.empty() || compact || selectedTab == PerformanceTab) searchRows = std::vector<Row>{};
+    else { searchRows = std::move(next); next = filteredRows(searchRows); }
+    partialUpdate = !manualSort && orderedTab == selectedTab && rows.size() == next.size() && std::equal(rows.begin(), rows.end(), next.begin(), [](const Row& previous, const Row& incoming) { return previous.key == incoming.key; });
+    rows.swap(next);
   }
   orderedTab = selectedTab; orderedColumn = sortColumn[size_t(selectedTab)]; orderedAscending = ascending[size_t(selectedTab)];
   if (!partialUpdate) { SendMessageW(list, WM_SETREDRAW, FALSE, 0); if (!sortOnly) ListView_SetItemCountEx(list, int(rows.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL); }
-  int found = -1; if (!selected.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == selected) { found = int(index); break; }
-  if (found >= 0) {
-    if (selectedIndex() != found) {
-      // A refresh must retain the selection without scrolling after its new rank.
-      ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-      ListView_SetItemState(list, found, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-    }
-  } else if (selectedIndex() >= 0) ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+  int found = -1, focus = -1;
+  if (!selected.empty() || !focused.empty()) for (size_t index = 0; index < rows.size(); ++index) {
+    if (!selected.empty() && rows[index].key == selected) found = int(index);
+    if (!focused.empty() && rows[index].key == focused) focus = int(index);
+    if ((selected.empty() || found >= 0) && (focused.empty() || focus >= 0)) break;
+  }
+  // Ctrl+arrow navigation can focus a different process from the selection.
+  // Preserve both identities independently without scrolling after either rank.
+  if (!focused.empty() && focus < 0) focus = found;
+  if (selectedIndex() != found) { ListView_SetItemState(list, -1, 0, LVIS_SELECTED); if (found >= 0) ListView_SetItemState(list, found, LVIS_SELECTED, LVIS_SELECTED); }
+  if (ListView_GetNextItem(list, -1, LVNI_FOCUSED) != focus) { ListView_SetItemState(list, -1, 0, LVIS_FOCUSED); if (focus >= 0) ListView_SetItemState(list, focus, LVIS_FOCUSED, LVIS_FOCUSED); }
   if (manualSort) { const int offset = ListView_GetTopIndex(list); if (offset) ListView_Scroll(list, 0, -offset * rowHeight()); }
   else if (!partialUpdate && sortColumn[size_t(selectedTab)] == 0 && !topKey.empty()) for (size_t index = 0; index < rows.size(); ++index) if (rows[index].key == topKey) { const int delta = int(index) - ListView_GetTopIndex(list); if (delta) ListView_Scroll(list, 0, delta * rowHeight()); break; }
   if (partialUpdate) {
@@ -479,7 +482,8 @@ void Application::drawRow(HDC dc, int index, RECT bounds) {
   RECT client{}; GetClientRect(list, &client);
   RECT tail{bounds.right, bounds.top, client.right, bounds.bottom}; FillRect(dc, &tail, backgroundBrush);
   if (index < 0 || size_t(index) >= rows.size()) { FillRect(dc, &bounds, backgroundBrush); return; }
-  const auto& row = rows[size_t(index)]; const bool selected = ListView_GetItemState(list, index, LVIS_SELECTED) != 0, hot = index == hotRow && row.kind != RowKind::Heading;
+  const auto& row = rows[size_t(index)]; const auto state = ListView_GetItemState(list, index, LVIS_SELECTED | LVIS_FOCUSED);
+  const bool selected = (state & LVIS_SELECTED) != 0, hot = index == hotRow && row.kind != RowKind::Heading;
   updateColumnGeometry(); const auto defs = definitions(selectedTab); const int count = displayCount;
   SetBkMode(dc, TRANSPARENT); SelectObject(dc, font);
   const bool tree = (selectedTab == ProcessesTab || selectedTab == UsersTab) && !compact; const int iconSize = scale(16), indent = row.depth * scale(20);
@@ -513,6 +517,10 @@ void Application::drawRow(HDC dc, int index, RECT bounds) {
     }
     SetTextColor(dc, foreground);
     DrawTextW(dc, value.text.c_str(), -1, &text, (definition.right || definition.heat) && id != 0 && !(definition.heat && !definition.right) ? DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX : DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+  }
+  if (row.kind != RowKind::Heading && (state & LVIS_FOCUSED) && GetFocus() == list && !(SendMessageW(list, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
+    RECT focus{std::max(bounds.left, client.left), bounds.top, std::min(bounds.right, client.right), bounds.bottom};
+    InflateRect(&focus, -1, -1); if (!IsRectEmpty(&focus)) DrawFocusRect(dc, &focus);
   }
 }
 std::wstring Application::headerValue(int column) const {

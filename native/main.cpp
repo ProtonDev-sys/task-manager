@@ -90,6 +90,7 @@ int Application::run() {
     if (message.message == WM_KEYDOWN && control && message.wParam == VK_TAB && !compact && !summary) { requestTab(((pendingTab >= 0 ? pendingTab : TabCtrl_GetCurSel(tabs)) + (shift ? TabCount - 1 : 1)) % TabCount); continue; }
     if (message.message == WM_SYSKEYDOWN && alt && message.wParam >= '1' && message.wParam <= '7' && !compact && !summary) { requestTab(int(message.wParam - '1')); continue; }
     if (message.message == WM_KEYDOWN && control && shift && message.wParam == 'N') { command(RunId); continue; }
+    if (message.message == WM_KEYDOWN && control && shift && message.wParam == 'S') { command(ExportId); continue; }
     if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE && summary) { setSummary(0); continue; }
     if (!IsDialogMessageW(window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
   }
@@ -123,15 +124,16 @@ void Application::create() {
   end = control(L"BUTTON", L"End task", BS_PUSHBUTTON | WS_TABSTOP, EndId);
   SetWindowSubclass(end, linkProcedure, 3, reinterpret_cast<DWORD_PTR>(this));
   searchBox = control(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, SearchId, WS_EX_CLIENTEDGE);
+  SetWindowSubclass(searchBox, searchProcedure, 4, reinterpret_cast<DWORD_PTR>(this));
   SendMessageW(searchBox, EM_SETLIMITTEXT, 256, 0);
-  SendMessageW(searchBox, EM_SETCUEBANNER, TRUE, LPARAM(L"Search name, PID, publisher or command line"));
+  SendMessageW(searchBox, EM_SETCUEBANNER, TRUE, LPARAM(L"Search text or fields: name:browser pid:1234 -status:suspended"));
 #ifdef TASKMGR_DIAGNOSTICS
   icons = std::make_unique<Icons>(window, scale(16), hidden());
 #else
   icons = std::make_unique<Icons>(window, scale(16));
 #endif
   menuBar = CreateMenu(); const auto file = CreatePopupMenu(), options_ = CreatePopupMenu(), view = CreatePopupMenu(), speed = CreatePopupMenu(), defaults = CreatePopupMenu();
-  AppendMenuW(file, MF_STRING, RunId, L"&Run new task"); AppendMenuW(file, MF_SEPARATOR, 0, nullptr); AppendMenuW(file, MF_STRING, ExitId, L"E&xit");
+  AppendMenuW(file, MF_STRING, RunId, L"&Run new task"); AppendMenuW(file, MF_STRING, ExportId, L"&Export current table...\tCtrl+Shift+S"); AppendMenuW(file, MF_SEPARATOR, 0, nullptr); AppendMenuW(file, MF_STRING, ExitId, L"E&xit");
   AppendMenuW(options_, MF_STRING, TopmostId, L"&Always on top"); AppendMenuW(options_, MF_STRING, MinimizeOnUseId, L"&Minimize on use"); AppendMenuW(options_, MF_STRING, HideId, L"&Hide when minimized");
   AppendMenuW(options_, MF_STRING, ReplaceDefaultId, L"&Replace default Task Manager");
   const auto themes = CreatePopupMenu();
@@ -296,6 +298,7 @@ void Application::updateMenu(HMENU popup) {
   CheckMenuRadioItem(popup, ThemeLightId, ThemeSystemId, UINT(ThemeLightId + theme), MF_BYCOMMAND);
   check(SearchId, searchVisible); EnableMenuItem(popup, SearchId, MF_BYCOMMAND | ((compact || summary || selectedTab == PerformanceTab) ? MF_GRAYED : MF_ENABLED));
   EnableMenuItem(popup, ReplaceDefaultId, MF_BYCOMMAND | (actionBusy ? MF_GRAYED : MF_ENABLED));
+  EnableMenuItem(popup, ExportId, MF_BYCOMMAND | (canExportTable() && !actionBusy ? MF_ENABLED : MF_GRAYED));
   const int speed = interval == 250 ? SpeedAdaptive : interval == 500 ? SpeedHigh : interval == 4000 ? SpeedLow : interval == 0 ? SpeedPause : SpeedNormal;
   CheckMenuRadioItem(popup, SpeedHigh, SpeedAdaptive, UINT(speed), MF_BYCOMMAND);
   CheckMenuRadioItem(popup, DefaultTabId, DefaultTabId + TabCount - 1, UINT(DefaultTabId + defaultTab), MF_BYCOMMAND);
