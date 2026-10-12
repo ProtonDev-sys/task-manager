@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "atomic_file.hpp"
 #include "csv.hpp"
 #include <commdlg.h>
 #include <shlobj.h>
@@ -146,24 +147,7 @@ std::string Application::tableCsv() const {
   return csv.take();
 }
 void Application::writeExportFile(const std::wstring& path, std::string_view contents) {
-  GUID guid{}; wchar_t identifier[40]{};
-  if (FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid, identifier, int(std::size(identifier)))) throw std::runtime_error("Unable to create a temporary export file name.");
-  const auto temporary = path + L".tmp-" + identifier;
-  struct Cleanup { const std::wstring& path; bool owned = false; ~Cleanup() { if (owned) DeleteFileW(path.c_str()); } } cleanup{temporary};
-  {
-    Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (file.value == INVALID_HANDLE_VALUE) throw std::runtime_error(utf8(winerror()));
-    cleanup.owned = true;
-    while (!contents.empty()) {
-      const DWORD count = DWORD(std::min<size_t>(contents.size(), 1024 * 1024)); DWORD written = 0;
-      if (!WriteFile(file.value, contents.data(), count, &written, nullptr)) throw std::runtime_error(utf8(winerror()));
-      if (!written || written > count) throw std::runtime_error("The export file could not be completely written.");
-      contents.remove_prefix(written);
-    }
-    if (!FlushFileBuffers(file.value)) throw std::runtime_error(utf8(winerror()));
-  }
-  if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) throw std::runtime_error(utf8(winerror()));
-  cleanup.owned = false;
+  AtomicFile file(path); file.append(contents); file.commit();
 }
 void Application::exportTable() {
   if (!persistent() || actionBusy) return;

@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "atomic_file.hpp"
 #include "report.hpp"
 #include <dwmapi.h>
 #include <windowsx.h>
@@ -114,6 +115,12 @@ bool Application::verifyTableExport() {
   const auto read = [&]() { std::ifstream file{std::filesystem::path(path), std::ios::binary}; return std::string{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()}; };
   try {
     writeExportFile(path, captured); check(read() == captured, "export-writes-exact-utf8-snapshot");
+    const auto longName = (directory / (std::wstring(240, L'x') + L".csv")).wstring();
+    const auto extendedName = longName.starts_with(L"\\\\") ? L"\\\\?\\UNC\\" + longName.substr(2) : L"\\\\?\\" + longName;
+    writeExportFile(extendedName, captured);
+    { std::ifstream file{std::filesystem::path(extendedName), std::ios::binary}; const std::string contents{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+      check(contents == captured, "export-valid-long-filename-does-not-lengthen-staging-basename"); }
+    check(DeleteFileW(extendedName.c_str()) != FALSE, "export-long-filename-fixture-cleanup");
     const std::string large(1024 * 1024 + 17, 'x');
     writeExportFile(path, large); check(read() == large, "export-replaces-existing-file-across-write-chunks");
     bool failed = false;
@@ -202,25 +209,40 @@ bool Application::verifyHistoryPersistence() {
   auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
   auto saved = std::move(usage);
   struct Restore { decltype(usage)& target; decltype(usage)& original; ~Restore() { target = std::move(original); } } restore{usage, saved};
-  wchar_t temporary[MAX_PATH]{};
-  const DWORD length = GetTempPathW(MAX_PATH, temporary);
-  const auto directory = length > 0 && length < MAX_PATH ? std::wstring(temporary) + L"TaskManagerHistory-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) : L"";
-  const bool created = !directory.empty() && CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
+  GUID guid{}; wchar_t identifier[40]{}; std::error_code error;
+  const auto temporary = std::filesystem::temp_directory_path(error);
+  check(!error && SUCCEEDED(CoCreateGuid(&guid)) && StringFromGUID2(guid, identifier, int(std::size(identifier))) > 0, "history-fixture-temporary-name");
+  if (error || !*identifier) return false;
+  const auto directory = temporary / (std::wstring(L"TaskManagerHistory-") + identifier);
+  const bool created = CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
   check(created, "history-fixture-directory"); if (!created) return false;
-  const auto path = directory + L"\\history.tsv";
-  struct Cleanup { std::wstring directory, path; ~Cleanup() { DeleteFileW((path + L".tmp").c_str()); DeleteFileW(path.c_str()); RemoveDirectoryW(path.c_str()); RemoveDirectoryW(directory.c_str()); } } cleanup{directory, path};
+  struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code error; std::filesystem::remove_all(path, error); } } cleanup{directory};
+  const auto path = (directory / L"history.tsv").wstring(), neighbor = path + L".tmp";
+  const auto read = [](const std::wstring& file) { std::ifstream input{std::filesystem::path(file), std::ios::binary}; return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()}; };
+  const auto stagingFiles = [&] { size_t count = 0; for (const auto& entry : std::filesystem::directory_iterator(directory)) { const auto name = entry.path().filename().wstring(); if (name.starts_with(L".taskmgr-") && name.ends_with(L".tmp")) ++count; } return count; };
+  constexpr std::string_view sentinel = "A preexisting temporary neighbor belongs to another operation.";
+  { std::ofstream fixture{std::filesystem::path(neighbor), std::ios::binary}; fixture << sentinel; }
+  check(read(neighbor) == sentinel, "history-preexisting-temporary-neighbor-fixture");
   const std::wstring key = L"\u5de5\u5177.exe", name = L"Caf\u00e9 \U0001f680\tTabbed\r\nsecond line\\literal", executablePath = L"C:\\\u7528\u6237\\M\u00fcnchen\\\u5de5\u5177.exe";
   usage.clear(); usage[key] = {name, executablePath, 123456789, true}; usage[L"empty.exe"] = {L"", L"", 0, false};
   check(writeHistoryFile(path), "history-unicode-write");
   {
-    std::ifstream input{std::filesystem::path(path), std::ios::binary}; const std::string bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    const auto bytes = read(path);
     check(bytes.find("\xe5\xb7\xa5\xe5\x85\xb7.exe") != std::string::npos && bytes.find("\xf0\x9f\x9a\x80") != std::string::npos, "history-explicit-utf8-bytes");
     check(std::count(bytes.begin(), bytes.end(), '\n') == 3, "history-metadata-newlines-escaped");
+    const std::string header = "# TaskManagerNative history UTF-8 v1\n", emptyRow = "empty.exe\t0\t\t\t0\n";
+    const std::string unicodeRow = "\xe5\xb7\xa5\xe5\x85\xb7.exe\t123456789\tCaf\xc3\xa9 \xf0\x9f\x9a\x80\\tTabbed\\r\\nsecond line\\\\literal\tC:\\\\\xe7\x94\xa8\xe6\x88\xb7\\\\M\xc3\xbcnchen\\\\\xe5\xb7\xa5\xe5\x85\xb7.exe\t1\n";
+    check(bytes == header + emptyRow + unicodeRow || bytes == header + unicodeRow + emptyRow, "history-serialization-preserves-exact-format-bytes");
   }
+  check(read(neighbor) == sentinel && stagingFiles() == 0, "history-success-preserves-preexisting-temporary-neighbor");
   usage.clear(); readHistoryFile(path);
   const auto found = usage.find(key), empty = usage.find(L"empty.exe");
   check(usage.size() == 2 && found != usage.end() && found->second.name == name && found->second.path == executablePath && found->second.ticks == 123456789 && found->second.app, "history-unicode-round-trip");
   check(empty != usage.end() && empty->second.name.empty() && empty->second.path.empty() && empty->second.ticks == 0 && !empty->second.app, "history-empty-fields-round-trip");
+  usage.clear(); usage[L"max.exe"] = {L"Maximum", L"", UINT64_MAX, false};
+  check(writeHistoryFile(path) && read(path) == "# TaskManagerNative history UTF-8 v1\nmax.exe\t18446744073709551615\tMaximum\t\t0\n", "history-full-width-ticks-keep-decimal-format");
+  usage.clear(); readHistoryFile(path);
+  check(usage.size() == 1 && usage.contains(L"max.exe") && usage.at(L"max.exe").ticks == UINT64_MAX, "history-full-width-ticks-round-trip");
   {
     std::ofstream legacy{std::filesystem::path(path), std::ios::binary};
     legacy << "legacy.exe\t42\tLegacy app\tC:\\Program Files\\Legacy\\tool.exe\t1\r\nold.exe\t7\tOld app\r\n";
@@ -235,12 +257,54 @@ bool Application::verifyHistoryPersistence() {
   }
   readHistoryFile(path);
   check(usage.size() == 1 && usage.contains(L"good.exe") && usage.at(L"good.exe").ticks == 9, "history-malformed-records-skipped");
+  try {
+    const auto before = read(path);
+    bool failed = false;
+    { Handle lock(CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+      check(lock.value != INVALID_HANDLE_VALUE, "history-fixture-locks-existing-destination");
+      if (lock.value != INVALID_HANDLE_VALUE) failed = !writeHistoryFile(path); }
+    check(failed && read(path) == before, "history-locked-destination-is-preserved");
+    check(read(neighbor) == sentinel && stagingFiles() == 0, "history-locked-save-cleans-only-owned-temporary");
+    check(!writeHistoryFile((directory / L"missing" / L"history.tsv").wstring()), "history-missing-parent-reported");
+    try {
+      AtomicFile interrupted(path); interrupted.append(std::string(64 * 1024 + 17, 'x'));
+      throw std::runtime_error("Owned serialization failure fixture");
+    } catch (const std::exception&) {}
+    check(read(path) == before && read(neighbor) == sentinel && stagingFiles() == 0, "history-aborted-serialization-preserves-destination-and-cleans-owned-file");
+
+    // Both writers have open staging files at once. Committing either one must
+    // leave the other one's complete snapshot available for its own commit.
+    const std::string firstContents(64 * 1024 + 19, 'a'), secondContents(64 * 1024 + 31, 'b');
+    { AtomicFile first(path), second(path); first.append(firstContents); second.append(secondContents);
+      check(stagingFiles() == 2, "history-overlapping-writers-own-distinct-staging-files");
+      first.commit(); check(read(path) == firstContents && stagingFiles() == 1, "history-first-commit-preserves-other-writers-staging");
+      second.commit(); check(read(path) == secondContents && stagingFiles() == 0, "history-second-commit-publishes-complete-replacement"); }
+
+    Application first(RunOptions{}), second(RunOptions{});
+    for (unsigned index = 0; index < 160; ++index) {
+      first.usage[L"first-" + std::to_wstring(index)] = {std::wstring(1024, L'a'), L"C:\\first.exe", index, true};
+      second.usage[L"second-" + std::to_wstring(index)] = {std::wstring(1024, L'b'), L"C:\\second.exe", index + 1000u, false};
+    }
+    first.usage[L"large-first"] = {std::wstring(64 * 1024 + 17, L'a'), L"", UINT64_MAX, true};
+    second.usage[L"large-second"] = {std::wstring(64 * 1024 + 31, L'b'), L"", UINT64_MAX, false};
+    const auto firstPath = (directory / L"first.tsv").wstring(), secondPath = (directory / L"second.tsv").wstring();
+    check(first.writeHistoryFile(firstPath) && second.writeHistoryFile(secondPath), "history-concurrent-snapshot-fixtures");
+    const auto firstSnapshot = read(firstPath), secondSnapshot = read(secondPath);
+    unsigned firstCompleted = 0, secondCompleted = 0;
+    { std::jthread firstWriter([&] { for (unsigned attempt = 0; attempt < 4; ++attempt) if (first.writeHistoryFile(path)) ++firstCompleted; });
+      std::jthread secondWriter([&] { for (unsigned attempt = 0; attempt < 4; ++attempt) if (second.writeHistoryFile(path)) ++secondCompleted; }); }
+    const auto concurrent = read(path);
+    check(firstCompleted + secondCompleted > 0 && !firstSnapshot.empty() && !secondSnapshot.empty() && (concurrent == firstSnapshot || concurrent == secondSnapshot), "history-concurrent-saves-publish-one-complete-snapshot");
+    usage.clear(); readHistoryFile(path);
+    check(usage.size() == 161 && (usage.contains(L"large-first") != usage.contains(L"large-second")), "history-concurrent-snapshot-remains-readable");
+    check(read(neighbor) == sentinel && stagingFiles() == 0, "history-concurrent-writers-clean-only-owned-files");
+  } catch (const std::exception&) { check(false, "history-native-file-operations"); }
   const bool blocked = DeleteFileW(path.c_str()) && CreateDirectoryW(path.c_str(), nullptr);
   check(blocked, "history-rename-failure-fixture");
   if (blocked) {
     check(!writeHistoryFile(path), "history-rename-failure-reported");
-    std::error_code error;
-    check(!std::filesystem::exists(std::filesystem::path(path + L".tmp"), error) && !error && std::filesystem::is_directory(std::filesystem::path(path), error) && !error, "history-rename-failure-cleans-owned-temporary");
+    check(std::filesystem::is_directory(std::filesystem::path(path), error) && !error, "history-directory-destination-is-preserved");
+    check(read(neighbor) == sentinel && stagingFiles() == 0, "history-rename-failure-cleans-only-owned-temporary");
   }
   return passed;
 }

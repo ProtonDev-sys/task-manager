@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "atomic_file.hpp"
 #ifdef TASKMGR_DIAGNOSTICS
 #include "report.hpp"
 #endif
@@ -462,15 +463,18 @@ static std::optional<std::wstring> historyText(std::string_view value, bool esca
   return result;
 }
 bool Application::writeHistoryFile(const std::wstring& path) const {
-  const auto temporary = path + L".tmp";
-  std::ofstream stream{std::filesystem::path(temporary), std::ios::binary};
-  if (!stream) return false;
-  stream << historyFormat << '\n';
-  for (const auto& [key, value] : usage) stream << historyField(key) << '\t' << value.ticks << '\t' << historyField(value.name) << '\t' << historyField(value.path) << '\t' << (value.app ? 1 : 0) << '\n';
-  stream.close();
-  if (stream && MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
-  DeleteFileW(temporary.c_str());
-  return false;
+  try {
+    AtomicFile file(path); file.append(historyFormat); file.append("\n");
+    for (const auto& [key, value] : usage) {
+      // Bound staging memory independently of the number of history records.
+      // Twenty digits cover every uint64_t and keep persisted ticks locale-free.
+      char digits[20]; const auto converted = std::to_chars(std::begin(digits), std::end(digits), value.ticks);
+      if (converted.ec != std::errc{}) return false;
+      file.append(historyField(key)); file.append("\t"); file.append({digits, size_t(converted.ptr - digits)}); file.append("\t");
+      file.append(historyField(value.name)); file.append("\t"); file.append(historyField(value.path)); file.append(value.app ? "\t1\n" : "\t0\n");
+    }
+    file.commit(); return true;
+  } catch (...) { return false; }
 }
 void Application::readHistoryFile(const std::wstring& path) {
   std::ifstream stream{std::filesystem::path(path), std::ios::binary}; std::string line;
