@@ -188,12 +188,30 @@ bool Application::verifyViewportRefresh() {
   select(10); SendMessageW(list, WM_VSCROLL, SB_TOP, 0); ListView_Scroll(list, 0, rowHeight() * 80);
   const int top = ListView_GetTopIndex(list); const auto selected = rowKey(selectedIndex());
   check(top > 10 && !selected.empty(), "viewport-fixture-selection-outside-view");
+  ListView_SetItemState(list, -1, 0, LVIS_FOCUSED); ListView_SetItemState(list, 20, LVIS_FOCUSED, LVIS_FOCUSED);
+  const auto focused = rowKey(20); sample->processes[20].cpu = 95;
   sample->processes[10].cpu = 99; rebuild();
   check(rowKey(selectedIndex()) == selected && selectedIndex() == 255, "numeric-refresh-retains-selected-identity-at-new-rank");
+  check(rowKey(ListView_GetNextItem(list, -1, LVNI_FOCUSED)) == focused && ListView_GetNextItem(list, -1, LVNI_FOCUSED) != selectedIndex(), "numeric-refresh-retains-independent-keyboard-focus");
   check(ListView_GetTopIndex(list) == top, "numeric-refresh-does-not-scroll-to-lower-rank");
   sample->processes[10].cpu = 0; rebuild();
   check(rowKey(selectedIndex()) == selected && selectedIndex() <= 1, "numeric-refresh-retains-selected-identity-at-top");
   check(ListView_GetTopIndex(list) == top, "numeric-refresh-does-not-scroll-to-upper-rank");
+  sample->processes.erase(sample->processes.begin() + 10); rebuild();
+  check(selectedIndex() < 0 && rowKey(ListView_GetNextItem(list, -1, LVNI_FOCUSED)) == focused, "refresh-retains-keyboard-focus-when-selected-process-exits");
+  searchText = L"name:\"viewport fixture\""; rebuild(); ValidateRect(list, nullptr); rebuild();
+  check(!GetUpdateRect(list, nullptr, FALSE), "unchanged-filtered-snapshot-no-table-repaint");
+  sample->processes[0].privateWorking += 1024; rebuild();
+  check(!GetUpdateRect(list, nullptr, FALSE), "filtered-offscreen-cell-change-no-table-repaint");
+  const int visible = ListView_GetTopIndex(list);
+  if (visible >= 0 && size_t(visible) < rows.size()) {
+    sample->processes[size_t(rows[size_t(visible)].process)].privateWorking += 1024; rebuild();
+    RECT painted{}, rowBounds{}; ListView_GetItemRect(list, visible, &rowBounds, LVIR_BOUNDS);
+    check(GetUpdateRect(list, &painted, FALSE) && painted.top >= rowBounds.top && painted.bottom <= rowBounds.bottom, "filtered-visible-cell-change-repaints-only-changed-row");
+  } else check(false, "filtered-viewport-fixture-has-visible-row");
+  searchText = L"name:no-matching-viewport-fixture"; rebuild();
+  check(rows.empty() && ListView_GetItemCount(list) == 0, "filtered-membership-change-updates-native-item-count");
+  searchText.clear(); rebuild();
   select(200);
   check(ListView_GetTopIndex(list) <= 200 && ListView_GetTopIndex(list) + ListView_GetCountPerPage(list) >= 200, "explicit-selection-still-scrolls-into-view");
   const auto explicitSelection = rowKey(selectedIndex()); ascending[DetailsTab] = false; rebuild(true);
@@ -213,6 +231,65 @@ bool Application::verifyViewportRefresh() {
   sortQueued = savedSortQueued; if (sortQueued) SetTimer(window, 3, 32, nullptr);
   return passed;
 }
+bool Application::verifySearch() {
+  bool passed = true;
+  const auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  const auto savedSample = current; const auto savedSearch = searchText; const int savedTab = selectedTab;
+  auto sample = std::make_shared<Sample>(); sample->processes.resize(3);
+  sample->processes[0].id = 4242; sample->processes[0].created = UINT64_MAX - 10; sample->processes[0].name = L"browser.exe";
+  sample->processes[1].id = 14242; sample->processes[1].created = UINT64_MAX - 11; sample->processes[1].name = L"renderer.exe"; sample->processes[1].suspended = true;
+  sample->processes[2].id = 8000; sample->processes[2].created = UINT64_MAX - 12; sample->processes[2].name = L"editor.exe"; sample->processes[2].hung = true;
+  Metadata browser; browser.description = L"Orbit Browser"; browser.publisher = L"Orbit Labs"; browser.user = L"LOCAL\\Alice";
+  browser.path = L"C:\\Program Files\\Orbit\\browser.exe"; browser.commandLine = L"\"C:\\Program Files\\Orbit\\browser.exe\" --profile Main";
+  Metadata renderer; renderer.description = L"Orbit Renderer"; renderer.publisher = L"Renderer Labs"; renderer.user = L"LOCAL\\Guest";
+  renderer.path = L"C:\\Program Files\\Orbit\\renderer.exe"; renderer.commandLine = L"renderer.exe --utility";
+  Metadata editor; editor.description = L"Text Editor"; editor.publisher = L"Editor Labs"; editor.path = L"C:\\Tools\\editor.exe";
+  icons->setTestMetadata(sample->processes[0], browser); icons->setTestMetadata(sample->processes[1], renderer); icons->setTestMetadata(sample->processes[2], editor);
+  auto users = std::make_shared<std::unordered_map<DWORD, std::wstring>>(); (*users)[8000] = L"LOCAL\\Alice"; sample->users = users;
+  current = sample; selectedTab = ProcessesTab;
+  std::vector<Row> singles(3);
+  for (size_t index = 0; index < singles.size(); ++index) { singles[index].key = std::to_wstring(index); singles[index].process = int(index); singles[index].members = {int(index)}; }
+  const auto keys = [&](std::wstring_view query, const std::vector<Row>& source) {
+    searchText = query; std::wstring result;
+    for (const auto& row : filteredRows(source)) result += row.key;
+    return result;
+  };
+  check(keys(L"4242", singles) == L"01", "plain-pid-retains-substring-search");
+  check(keys(L"pid:4242", singles) == L"0" && keys(L"PID:0004242", singles) == L"0", "scoped-pid-is-exact-and-case-insensitive");
+  check(keys(L"pid:4294967296", singles).empty() && keys(L"pid:42x", singles).empty(), "scoped-invalid-pid-never-matches");
+  check(keys(L"name:browser publisher:\"Orbit Labs\"", singles) == L"0", "scoped-fields-and-quoted-values");
+  check(keys(L"name:\"Orbit Labs\"", singles).empty(), "scoped-name-does-not-match-publisher");
+  check(keys(L"path:\"C:\\Program Files\\Orbit\\\" -status:suspended", singles) == L"0", "scoped-path-and-status-exclusion");
+  check(keys(L"command:\"--profile Main\"", singles) == L"0", "scoped-command-preserves-switches-and-spaces");
+  check(keys(L"user:alice", singles) == L"02", "scoped-user-includes-sampled-account-fallback");
+  check(keys(L"status:\"not responding\"", singles) == L"2", "scoped-hung-process-status");
+  check(keys(L"name:renderer suspended", singles) == L"1", "unqualified-scoped-term-matches-process-status");
+  check(keys(L"-name:browser", singles) == L"12", "scoped-exclusion-only-query");
+  check(keys(L"Orbit Browser", singles) == L"0" && keys(L"Browser Orbit", singles).empty(), "plain-phrase-remains-contiguous");
+  check(keys(browser.path, singles) == L"0", "plain-search-includes-hidden-path-metadata");
+  check(keys(L"LOCAL\\Guest", singles) == L"1", "plain-search-includes-hidden-account-metadata");
+  Row heading; heading.kind = RowKind::Heading; heading.key = L"h";
+  Row group = singles[0]; group.kind = RowKind::Group; group.key = L"g"; group.members = {0, 1}; group.cells.resize(15); group.cells[0] = {L"Orbit (2)"};
+  Row child = singles[1]; child.key = L"c"; child.depth = 1;
+  const std::vector<Row> grouped{heading, group, child, singles[2]};
+  check(keys(L"pid:14242 name:renderer", grouped) == L"hgc", "scoped-child-match-retains-entire-group-context");
+  check(keys(L"pid:4242 name:renderer", grouped).empty(), "scoped-group-cannot-combine-different-member-fields");
+  check(keys(L"name:browser -pid:4242", grouped).empty(), "scoped-group-empty-pid-cannot-bypass-exclusion");
+  check(keys(L"name:browser name:renderer", grouped).empty(), "scoped-all-positive-terms-need-one-member");
+  group.process = -1;
+  check(keys(L"pid:14242", {heading, group}) == L"hg", "scoped-collapsed-group-member-identity");
+  selectedTab = UsersTab; Row session; session.kind = RowKind::User; session.key = L"u"; session.members = {0, 1}; session.cells = {{L"LOCAL\\Alice (2)"}, {L"1"}, {L"Console"}, {L"Disconnected"}};
+  check(keys(L"user:alice status:disconnected", {session}) == L"u", "scoped-user-row-can-match-session-account-and-status");
+  check(keys(L"user:alice pid:14242", {session}).empty(), "scoped-session-fields-cannot-combine-different-member-accounts");
+  selectedTab = ServicesTab; Row service; service.kind = RowKind::Entry; service.key = L"s"; service.cells = {{L"Fixture service"}, {L"642", 642}, {L"Fixture description"}, {L"Running"}, {L"Fixture group"}};
+  check(keys(L"name:fixture pid:642 status:running", {service}) == L"s" && keys(L"pid:64", {service}).empty(), "scoped-service-cell-fields-and-exact-pid");
+  selectedTab = StartupTab; auto startup = std::make_shared<StartupInventory>(); Entry entry; entry.path = L"C:\\Startup Fixture\\launcher.exe"; startup->entries.push_back(entry); sample->startup = startup;
+  Row startupRow; startupRow.kind = RowKind::Entry; startupRow.key = L"t"; startupRow.entry = 0; startupRow.cells = {{L"Launcher"}, {L"Orbit Labs"}, {L"Disabled"}, {L"Not measured"}, {L"Run"}, {L"launcher.exe --startup"}, {L"LOCAL\\Alice"}, {L"Fixture location"}};
+  check(keys(L"name:launcher publisher:\"Orbit Labs\" status:disabled user:alice command:--startup path:\"Startup Fixture\"", {startupRow}) == L"t", "scoped-startup-search-covers-hidden-columns-and-path");
+  check(current == sample, "search-does-not-install-or-request-a-new-snapshot");
+  current = savedSample; selectedTab = savedTab; searchText = savedSearch;
+  return passed;
+}
 bool Application::verifySorting() {
   verifyingSorting = true;
   const int savedTab = selectedTab; const bool savedGrouping = groupByType; const auto savedExpanded = expanded;
@@ -224,6 +301,7 @@ bool Application::verifySorting() {
   check(verifyHistoryPersistence(), "history-persistence");
   check(verifyTrayLifecycle(), "tray-lifecycle");
   check(verifyViewportRefresh(), "viewport-refresh");
+  check(verifySearch(), "scoped-search");
   {
     Row previous; previous.key = L"identity"; previous.cells = {{L"1.0%", 1.01, 0}};
     auto next = previous; next.cells[0].value = 1.04; next.process = 5;
@@ -428,6 +506,12 @@ bool Application::verifySorting() {
       check(std::count_if(fixture.begin(), fixture.end(), [](const Row& row) { return row.depth == 1 && row.kind == RowKind::Process; }) == 6, "process-group-expansion-keeps-members");
       expanded.clear();
     }
+    Process highParent; highParent.id = 0xfffffffcu; highParent.created = 100; highParent.name = L"High PID fixture.exe"; highParent.app = true;
+    Process highChild = highParent; highChild.id = 123456; highChild.parent = highParent.id; highChild.created = 101; highChild.app = false;
+    sample->processes = {highChild, highParent};
+    std::vector<Row> highRows; buildProcesses(highRows);
+    const auto highGroup = std::find_if(highRows.begin(), highRows.end(), [](const Row& row) { return row.kind == RowKind::Group; });
+    check(highGroup != highRows.end() && highGroup->process == 1 && highGroup->key == L"g:4294967292:100" && highGroup->members == std::vector<int>{0, 1}, "process-group-preserves-unsigned-pid-root-with-child-first");
     current = savedSample; selectedTab = originalTab; compact = originalCompact; groupByType = originalGrouping; sortColumn[ProcessesTab] = originalSort; ascending[ProcessesTab] = originalDirection; expanded = std::move(originalExpanded);
     indexedServices.clear(); indexedInventory.reset(); icons->prune(activity);
   }
@@ -609,6 +693,15 @@ bool Application::verifySorting() {
     check(searchRows.data() == storage && current == snapshot && fullRebuilds == builds, "idempotent-search-spam");
     SetWindowTextW(searchBox, std::to_wstring(GetCurrentProcessId()).c_str()); applySearch();
     check(std::any_of(rows.begin(), rows.end(), [&](const Row& row) { return row.process >= 0 && current->processes[size_t(row.process)].id == GetCurrentProcessId(); }), "cached-search-pid");
+    const HWND previousFocus = GetFocus(); searchVisible = true; layout(); SetFocus(searchBox);
+    const auto exactPid = L"pid:" + std::to_wstring(GetCurrentProcessId()); SetWindowTextW(searchBox, exactPid.c_str());
+    ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    MSG enterKey{}; enterKey.hwnd = searchBox; enterKey.message = WM_KEYDOWN; enterKey.wParam = VK_RETURN;
+    check((SendMessageW(searchBox, WM_GETDLGCODE, VK_RETURN, LPARAM(&enterKey)) & DLGC_WANTMESSAGE) != 0, "search-enter-is-not-a-dialog-default-action");
+    SendMessageW(searchBox, WM_KEYDOWN, VK_RETURN, 1);
+    check(!searchQueued && searchText == exactPid && rows.size() == 1 && selectedIndex() == 0 && GetFocus() == list, "search-enter-applies-pending-query-and-selects-result");
+    check(current == snapshot && fullRebuilds == builds, "search-enter-uses-cached-snapshot");
+    searchVisible = savedSearchVisible; layout(); SetFocus(previousFocus);
     sortColumn[DetailsTab] = 5; ascending[DetailsTab] = true; rebuild(true);
     ascending[DetailsTab] = false; SetWindowTextW(searchBox, L""); applySearch();
     check(rows.size() == unfiltered && searchRows.empty() && current == snapshot && fullRebuilds == builds, "cached-search-clear");
@@ -720,6 +813,32 @@ bool Application::verifyHeadingNavigation() {
   if (nativePageSelection > 1 && nativePageSelection + 1 < int(rows.size())) {
     populate(120, false); rows[size_t(nativePageSelection)].kind = RowKind::Heading; press(1, VK_NEXT);
     check(selectedIndex() == nativePageSelection + 1, "heading-native-page-destination-skips-heading");
+  }
+  {
+    populate(7, false); select(1); ListView_SetItemState(list, 1, 0, LVIS_FOCUSED); ListView_SetItemState(list, 2, LVIS_FOCUSED, LVIS_FOCUSED);
+    const bool savedDark = dark, savedContrast = highContrast;
+    const RECT area{0, 0, scale(400), rowHeight()};
+    HDC screen = GetDC(list), memory = screen ? CreateCompatibleDC(screen) : nullptr;
+    HBITMAP bitmap = memory ? CreateCompatibleBitmap(screen, area.right, area.bottom) : nullptr;
+    check(screen && memory && bitmap, "keyboard-focus-render-buffer");
+    if (bitmap) {
+      const auto previous = SelectObject(memory, bitmap);
+      const auto pixels = [&] { std::vector<COLORREF> result; for (int x = scale(40); x < scale(300); ++x) result.push_back(GetPixel(memory, x, 1)); return result; };
+      for (const int appearance : {0, 1, 2}) {
+        dark = appearance == 1; highContrast = appearance == 2;
+        SendMessageW(list, WM_UPDATEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0); drawRow(memory, 2, area); const auto hiddenFocus = pixels();
+        SendMessageW(list, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0); drawRow(memory, 2, area);
+        check(pixels() != hiddenFocus, "keyboard-focus-visible-in-light-dark-and-high-contrast");
+        SendMessageW(list, WM_UPDATEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0); drawRow(memory, 2, area);
+        check(pixels() == hiddenFocus, "keyboard-focus-respects-hidden-focus-cues");
+        SendMessageW(list, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0); SetFocus(tabs); drawRow(memory, 2, area);
+        check(pixels() == hiddenFocus, "keyboard-focus-hidden-when-list-loses-thread-focus"); SetFocus(list);
+      }
+      SelectObject(memory, previous); DeleteObject(bitmap);
+    }
+    if (memory) DeleteDC(memory); if (screen) ReleaseDC(list, screen);
+    dark = savedDark; highContrast = savedContrast;
+    check(selectedIndex() == 1 && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == 2, "keyboard-focus-painting-keeps-native-selection-and-focus");
   }
   populate(7, true); for (auto& row : rows) row.kind = RowKind::Heading;
   ListView_SetItemState(list, 3, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); skipHeading(1);

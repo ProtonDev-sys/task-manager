@@ -136,6 +136,7 @@ private:
   static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM word, LPARAM data);
   static LRESULT CALLBACK performanceProcedure(HWND window, UINT message, WPARAM word, LPARAM data);
   static LRESULT CALLBACK listProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
+  static LRESULT CALLBACK searchProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
   static LRESULT CALLBACK headerProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
   static LRESULT CALLBACK linkProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
   static LRESULT CALLBACK tabsProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
@@ -243,6 +244,7 @@ private:
   bool verifyHistoryPersistence();
   bool verifyTrayLifecycle();
   bool verifyViewportRefresh();
+  bool verifySearch();
   bool verifySorting();
   bool verifyActionSnapshots();
   bool verifyHeadingNavigation();

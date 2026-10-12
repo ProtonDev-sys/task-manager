@@ -123,8 +123,9 @@ void Application::create() {
   end = control(L"BUTTON", L"End task", BS_PUSHBUTTON | WS_TABSTOP, EndId);
   SetWindowSubclass(end, linkProcedure, 3, reinterpret_cast<DWORD_PTR>(this));
   searchBox = control(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, SearchId, WS_EX_CLIENTEDGE);
+  SetWindowSubclass(searchBox, searchProcedure, 4, reinterpret_cast<DWORD_PTR>(this));
   SendMessageW(searchBox, EM_SETLIMITTEXT, 256, 0);
-  SendMessageW(searchBox, EM_SETCUEBANNER, TRUE, LPARAM(L"Search name, PID, publisher or command line"));
+  SendMessageW(searchBox, EM_SETCUEBANNER, TRUE, LPARAM(L"Search text or fields: name:browser pid:1234 -status:suspended"));
 #ifdef TASKMGR_DIAGNOSTICS
   icons = std::make_unique<Icons>(window, scale(16), hidden());
 #else
