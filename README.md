@@ -37,7 +37,7 @@ If you need to restore Windows Task Manager outside the UI, run this from an adm
 - **Performance:** CPU and per-logical-processor graphs, memory usage, disk activity, network throughput and GPU engines. Available hardware details depend on Windows and the device's drivers.
 - **App history:** locally recorded CPU time, with a reset option.
 - **Startup:** Run entries, startup folders, boot/logon scheduled tasks, automatic services and drivers, and packaged startup declarations. Supported Run and folder entries can be enabled or disabled; other sources link to Windows management tools.
-- **Users, Details and Services:** session activity, process metadata and controls, service status and start/stop/restart actions. Windows protection and permissions still apply.
+- **Users, Details and Services:** session activity, process metadata and controls, service status and start/stop/restart actions. Failed service refreshes retain the last known rows and show an unavailable or outdated status with the Windows error code; F5 retries immediately. Windows protection and permissions still apply.
 - **Appearance:** Light, Dark and Use Windows setting; High Contrast follows system colours. Columns and sorting are saved separately for each tab.
 - **Search:** filter table rows by text or combine exact PID, name, publisher, command line, path, account and status fields. Quoted values and field exclusions are supported. Matching groups retain their context. Search does not request a fresh system sample.
 - **Export:** save the currently filtered and sorted table to a UTF-8 CSV file with **File > Export current table** or **Ctrl+Shift+S**. The export includes the displayed columns in their current order, with complete cell text.

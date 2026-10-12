@@ -22,7 +22,8 @@ inline bool sameRowPaint(const Row& previous, const Row& next) {
 struct ColumnDef { const wchar_t* title; int width; bool right, visible, heat; bool numeric = false; };
 struct PerfItem { std::wstring key, title, subtitle, value, description; COLORREF color; };
 struct ActionResult { std::wstring error, report; };
-constexpr int FewerId = 15, EndId = 14, LinkId = 18, HistoryLinkId = 19, ListId = 12, TabsId = 11, PerformanceId = 13;
+constexpr UINT SamplingStatusMessage = WM_APP + 13;
+constexpr int FewerId = 15, EndId = 14, LinkId = 18, HistoryLinkId = 19, ServiceStatusId = 20, ListId = 12, TabsId = 11, PerformanceId = 13;
 constexpr int StartupManageId = 241;
 constexpr int RunId = 100, ExitId = 101, RefreshId = 102, TopmostId = 103, MinimizeOnUseId = 104, HideId = 105, GroupId = 106, ExpandAllId = 107, CollapseAllId = 108;
 constexpr int SpeedHigh = 110, SpeedNormal = 111, SpeedLow = 112, SpeedPause = 113, DefaultTabId = 120, FullNameId = 130, AllHistoryId = 131, ColumnId = 300;
@@ -48,7 +49,7 @@ private:
 #ifdef TASKMGR_DIAGNOSTICS
   RunOptions options;
 #endif
-  HWND window = nullptr, tabs = nullptr, list = nullptr, header = nullptr, performance = nullptr, end = nullptr, fewer = nullptr, link = nullptr, historyLink = nullptr;
+  HWND window = nullptr, tabs = nullptr, list = nullptr, header = nullptr, performance = nullptr, end = nullptr, fewer = nullptr, link = nullptr, historyLink = nullptr, serviceStatus = nullptr;
   HMENU menuBar = nullptr;
   HFONT font = nullptr, percentFont = nullptr, headingFont = nullptr, titleFont = nullptr, subtitleFont = nullptr, labelFont = nullptr, valueFont = nullptr, sidebarFont = nullptr, linkFont = nullptr;
   HIMAGELIST rowSpacer = nullptr;
@@ -96,7 +97,7 @@ private:
   std::atomic<int> interval{250};
   std::atomic<double> displayCost{0};
   std::atomic<bool> fastVisible{true};
-  std::atomic<bool> minimized{false}, stopping{false}, notification{false}, startupVisible{false};
+  std::atomic<bool> minimized{false}, stopping{false}, notification{false}, startupVisible{false}, samplingFailed{false};
   std::mutex workerMutex;
   std::condition_variable wake;
   bool force = false, forceInventory = false;
@@ -114,6 +115,9 @@ private:
   std::thread inputProbe;
   bool measured = false, keyboardPassed = false, sortingPassed = false, sortingChecked = false, verifyingSorting = false, benchmarkRunning = false;
   Time measurementStarted{};
+  std::atomic<uint64_t> samplingFailures{0};
+  uint64_t samplingFailureBaseline = 0;
+  bool samplingHealthyAtStart = false;
   LONGLONG measurementCounter = 0;
   DWORD baselineHandles = 0, baselineGdi = 0, baselineUser = 0;
   std::vector<double> deliveryTimes, updateTimes, paintTimes, samplerTimes, inputTimes, sortTimes;
@@ -129,6 +133,9 @@ private:
   unsigned performancePaints = 0, performanceDetailPaints = 0;
   unsigned headerPaints = 0, columnGeometryCommits = 0, scrollbarPaints = 0;
   std::function<bool(DWORD)> trayNotification;
+  // Owned worker fixtures bypass system inventories without affecting release builds.
+  std::function<Sample()> samplingOverride;
+  std::function<bool(bool)> samplingStatusNotification;
   unsigned tabRequests = 0, tabCommits = 0;
   FILETIME cpuStartKernel{}, cpuStartUser{};
 #else
@@ -248,6 +255,9 @@ private:
   void benchmarkTick();
   bool verifyHistoryPersistence();
   bool verifyTrayLifecycle();
+  bool verifyWorkerRecovery();
+  bool verifyBenchmarkSamplingHealth();
+  bool verifyServiceStatus();
   bool verifyViewportRefresh();
   bool verifySearch();
   bool verifyTableExport();
@@ -259,6 +269,8 @@ private:
   bool verifyTabSwitching();
   bool verifyHighContrast();
   void writeBenchmark();
+  void beginSamplingMeasurement();
+  bool samplingMeasurementHealthy();
   void screenshotTick();
 #endif
 };

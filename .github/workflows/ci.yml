@@ -21,8 +21,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Verify portable tooling and owned-process cleanup
         run: python -m unittest discover -s tests -p 'test_*.py' -v
-      - name: Verify release publication guards
-        run: python -m unittest discover -s .github/scripts -p test_release.py -v
+      - name: Compile and run portable search and CSV regressions
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p artifacts/portable
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -pedantic tests/search_query.cpp -o artifacts/portable/search-query-tests
+          artifacts/portable/search-query-tests
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror -pedantic tests/csv.cpp -o artifacts/portable/csv-tests
+          artifacts/portable/csv-tests
+      - name: Verify release and performance workflow guards
+        run: python -m unittest discover -s .github/scripts -p 'test_*.py' -v
   verify:
     needs: tooling
     runs-on: windows-latest

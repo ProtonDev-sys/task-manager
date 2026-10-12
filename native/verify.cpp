@@ -5,6 +5,77 @@
 #include <iterator>
 
 namespace taskmgr {
+bool Application::verifyBenchmarkSamplingHealth() {
+  bool passed = true;
+  const auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  GUID guid{}; wchar_t identifier[40]{}; std::error_code error;
+  const auto temporary = std::filesystem::temp_directory_path(error);
+  check(!error && SUCCEEDED(CoCreateGuid(&guid)) && StringFromGUID2(guid, identifier, int(std::size(identifier))) > 0, "benchmark-health-fixture-temporary-name");
+  if (error || !*identifier) return false;
+  const auto directory = temporary / (std::wstring(L"TaskManagerBenchmarkHealth-") + identifier);
+  const bool created = CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
+  check(created, "benchmark-health-fixture-directory"); if (!created) return false;
+  struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code error; std::filesystem::remove_all(path, error); } } cleanup{directory};
+  RunOptions settings; settings.hidden = settings.idle = true; settings.output = (directory / L"health.json").wstring();
+  Application fixture(settings); fixture.updates = 1; fixture.keyboardPassed = fixture.sortingPassed = true;
+  fixture.icons = std::make_unique<Icons>(nullptr, scale(16), true, false);
+  const auto report = [&](bool expected, const char* name) {
+    fixture.writeBenchmark();
+    std::ifstream file{std::filesystem::path(settings.output), std::ios::binary};
+    const std::string contents{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    const auto value = expected ? "true" : "false";
+    check((fixture.exitCode == 0) == expected && contents.find(std::string("\"samplingHealthy\":") + value) != contents.npos &&
+      contents.find(std::string("\"passed\":") + value) != contents.npos && contents.find("\"samplingFailure") == contents.npos, name);
+  };
+  report(false, "benchmark-health-requires-measurement-boundary");
+  fixture.samplingFailures = 3; fixture.beginSamplingMeasurement();
+  report(true, "benchmark-health-excludes-recovered-warmup-failures");
+  ++fixture.samplingFailures; fixture.samplingFailed = true;
+  report(false, "benchmark-health-rejects-current-measured-failure");
+  fixture.samplingFailed = false;
+  report(false, "benchmark-health-rejects-recovered-measured-failure");
+  fixture.samplingFailed = true; fixture.beginSamplingMeasurement(); fixture.samplingFailed = false;
+  report(false, "benchmark-health-rejects-unhealthy-measurement-start");
+  fixture.beginSamplingMeasurement(); fixture.samplingFailed = true;
+  report(false, "benchmark-health-requires-healthy-measurement-end");
+  fixture.samplingFailed = false; fixture.interval = 0; fixture.beginSamplingMeasurement();
+  report(true, "benchmark-health-allows-intentional-pause-without-new-samples");
+  fixture.interval = 1000;
+  for (const bool idle : {true, false}) {
+    fixture.options.idle = idle; fixture.beginSamplingMeasurement(); ++fixture.samplingFailures;
+    report(false, idle ? "benchmark-idle-rejects-sampling-failure" : "benchmark-interaction-rejects-sampling-failure");
+  }
+  return passed;
+}
+bool Application::verifyServiceStatus() {
+  bool passed = true;
+  const auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  Application fixture(RunOptions{}); fixture.selectedTab = ServicesTab;
+  const HWND owner = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 420, 300, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+  check(owner != nullptr, "service-status-fixture-owner"); if (!owner) return false;
+  struct WindowCleanup { HWND value; ~WindowCleanup() { DestroyWindow(value); } } cleanup{owner};
+  const auto control = [&](const wchar_t* type) { return CreateWindowExW(0, type, L"", WS_CHILD, 0, 0, 280, 34, owner, nullptr, GetModuleHandleW(nullptr), nullptr); };
+  fixture.end = control(L"BUTTON"); fixture.fewer = control(L"BUTTON"); fixture.link = control(L"BUTTON"); fixture.serviceStatus = control(L"STATIC");
+  check(fixture.end && fixture.fewer && fixture.link && fixture.serviceStatus, "service-status-fixture-controls");
+  if (!fixture.end || !fixture.fewer || !fixture.link || !fixture.serviceStatus) return false;
+  const auto text = [&] { wchar_t value[128]{}; GetWindowTextW(fixture.serviceStatus, value, 128); return std::wstring(value); };
+  const auto visible = [&] { return (GetWindowLongPtrW(fixture.serviceStatus, GWL_STYLE) & WS_VISIBLE) != 0; };
+  auto inventory = std::make_shared<ServiceInventory>(); fixture.current = std::make_shared<Sample>(); fixture.current->inventory = inventory;
+  inventory->servicesError = ERROR_ACCESS_DENIED; fixture.updateFooter();
+  check(visible() && text() == L"Services unavailable (error 5). Press F5 to retry.", "service-initial-failure-exposes-unavailable-status");
+  inventory->services.push_back(Entry{}); fixture.current->services = inventory->services; fixture.updateFooter();
+  check(visible() && text() == L"Services may be outdated (error 5). Press F5 to retry.", "service-retained-rows-expose-stale-status");
+  const auto retained = fixture.current->services.data();
+  inventory->servicesError = ERROR_SUCCESS; fixture.updateFooter();
+  check(!visible() && text().empty() && fixture.current->services.data() == retained, "service-recovery-clears-status-with-unchanged-rows");
+  inventory->servicesError = ERROR_INVALID_DATA; fixture.updateFooter();
+  check(visible() && text().find(std::to_wstring(ERROR_INVALID_DATA)) != std::wstring::npos, "service-status-exposes-current-error-code");
+  fixture.selectedTab = DetailsTab; fixture.updateFooter(); check(!visible() && text().empty(), "service-status-hidden-on-other-tabs");
+  fixture.selectedTab = ServicesTab; fixture.compact = true; fixture.updateFooter(); check(!visible(), "service-status-hidden-in-compact-view");
+  fixture.compact = false; fixture.summary = 1; fixture.updateFooter(); check(!visible(), "service-status-hidden-in-summary-view");
+  fixture.summary = 0; fixture.current.reset(); fixture.updateFooter(); check(!visible() && text().empty(), "service-status-no-snapshot-is-inert");
+  return passed;
+}
 bool Application::verifyTableExport() {
   bool passed = true;
   const auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
@@ -353,6 +424,9 @@ bool Application::verifySorting() {
   benchmarkTick(); check(measured == priorMeasured && tests == priorTests, "benchmark-nested-tick-skipped");
   check(verifyHistoryPersistence(), "history-persistence");
   check(verifyTrayLifecycle(), "tray-lifecycle");
+  check(verifyWorkerRecovery(), "sampler-worker-recovery");
+  check(verifyBenchmarkSamplingHealth(), "benchmark-sampling-health");
+  check(verifyServiceStatus(), "service-inventory-status");
   check(verifyViewportRefresh(), "viewport-refresh");
   check(verifySearch(), "scoped-search");
   check(verifyTableExport(), "table-export");
@@ -1179,6 +1253,33 @@ bool Application::verifyPerformanceHover() {
     if (fullBitmap) DeleteObject(fullBitmap); if (clippedBitmap) DeleteObject(clippedBitmap);
     if (full) DeleteDC(full); if (clipped) DeleteDC(clipped); if (screen) ReleaseDC(performance, screen);
   }
+  {
+    auto fixture = std::make_shared<Sample>(*snapshot);
+    fixture->disks.clear(); fixture->networks.clear(); fixture->gpus.clear();
+    DiskInfo disk; disk.key = L"removable"; disk.title = L"Removable test disk"; fixture->disks.push_back(disk);
+    NetworkInfo network; network.luid = 123; network.type = L"Test network"; fixture->networks.push_back(network);
+    current = fixture; performanceItemsDirty = true; selectedResource = L"disk/removable";
+    check(performanceSummary().starts_with(L"Removable test disk\r\n"), "resource-copy-selected-device");
+    current = std::make_shared<Sample>(*fixture); current->disks.clear(); performanceItemsDirty = true;
+    const auto labelBuilds = performanceItemBuilds;
+    const auto copied = performanceSummary();
+    check(copied.starts_with(L"CPU\r\n") && copied.find(L"\tProcesses:\t") != std::wstring::npos && copied.find(L"\tUp time:\t") != std::wstring::npos, "removed-resource-copy-resolves-before-paint");
+    performanceKey(VK_DOWN);
+    check(selectedResource == L"memory", "removed-resource-down-resolves-before-paint");
+    selectedResource = L"disk/removable"; performanceKey(VK_UP);
+    check(selectedResource == L"cpu", "removed-resource-up-resolves-before-paint");
+    selectedResource = L"disk/removable"; performanceKey(VK_END);
+    check(selectedResource == L"net/123" && performanceSummary().starts_with(L"Test network\r\n"), "removed-resource-end-selects-last");
+    performanceKey(VK_HOME); check(selectedResource == L"cpu", "resource-home-selects-first");
+    selectedResource = L"disk/removable"; sidebarScroll = scale(820);
+    RedrawWindow(performance, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    check(selectedResource == L"cpu" && sidebarScroll == 0, "removed-resource-paint-reveals-fallback");
+    check(performanceItemBuilds == labelBuilds + 1, "resource-fallback-reuses-cached-labels");
+    current.reset(); performanceItemsDirty = true; selectedResource = L"disk/removable";
+    performanceKey(VK_DOWN);
+    check(performanceSummary().empty() && selectedResource == L"disk/removable", "resource-no-sample-is-inert");
+    current = snapshot; performanceItemsDirty = true; selectedResource = L"cpu";
+  }
   setSummary(1); RedrawWindow(performance, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
   const auto paints = performancePaints;
   for (int repeat = 0; repeat < 1000; ++repeat) SendMessageW(performance, WM_MOUSEMOVE, 0, MAKELPARAM(scale(30), scale(30)));
@@ -1204,7 +1305,7 @@ void Application::benchmarkTick() {
   if (keyboardPassed && options.tab >= 0 && !options.tabSpam) selectTab(options.tab);
   if (keyboardPassed && options.minimized && !IsIconic(window)) ShowWindow(window, SW_SHOWMINNOACTIVE);
   if (!measured && keyboardPassed && (!options.minimized || interval == 0 || (minimized && current && current->elapsed >= 3.5)) && std::chrono::duration<double>(Clock::now() - started).count() >= options.warmup) {
-    measured = true; measurementStarted = Clock::now(); LARGE_INTEGER counter{}; QueryPerformanceCounter(&counter); measurementCounter = counter.QuadPart; FILETIME created{}, exited{}; GetProcessTimes(GetCurrentProcess(), &created, &exited, &cpuStartKernel, &cpuStartUser); GetProcessHandleCount(GetCurrentProcess(), &baselineHandles);
+    beginSamplingMeasurement(); LARGE_INTEGER counter{}; QueryPerformanceCounter(&counter); measurementCounter = counter.QuadPart; FILETIME created{}, exited{}; GetProcessTimes(GetCurrentProcess(), &created, &exited, &cpuStartKernel, &cpuStartUser); GetProcessHandleCount(GetCurrentProcess(), &baselineHandles);
     baselineGdi = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS); baselineUser = GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS);
     deliveryTimes.clear(); updateTimes.clear(); paintTimes.clear(); samplerTimes.clear(); inputTimes.clear(); sortTimes.clear(); tests = sortRequests = fullRebuilds = sortPasses = 0; for (auto& times : stageTimes) times.clear();
     sampleCadenceTimes.clear(); partialTableUpdates = invalidatedRows = resourceUpdates = 0;
@@ -1248,15 +1349,27 @@ static void writeMetric(Report& stream, const char* name, std::vector<double> va
   std::sort(values.begin(), values.end()); const double total = std::accumulate(values.begin(), values.end(), 0.0);
   stream << '"' << name << "\":{\"count\":" << values.size() << ",\"meanMilliseconds\":" << (values.empty() ? 0 : total / double(values.size())) << ",\"p95Milliseconds\":" << (values.empty() ? 0 : values[size_t(std::ceil(double(values.size()) * .95)) - 1]) << ",\"maxMilliseconds\":" << (values.empty() ? 0 : values.back()) << '}';
 }
+void Application::beginSamplingMeasurement() {
+  // Publish the boundary and capture failure state together with the worker's
+  // completed iteration, so recovered warmup failures do not taint measurement.
+  std::lock_guard lock(workerMutex);
+  samplingFailureBaseline = samplingFailures.load(); samplingHealthyAtStart = !samplingFailed;
+  measured = true; measurementStarted = Clock::now();
+}
+bool Application::samplingMeasurementHealthy() {
+  std::lock_guard lock(workerMutex);
+  return measured && samplingHealthyAtStart && !samplingFailed && samplingFailures == samplingFailureBaseline;
+}
 void Application::writeBenchmark() {
   const bool coalescingPassed = !options.sortSpam || (sortRequests >= 128 && !sortTimes.empty() && sortTimes.size() * 16 < sortRequests);
   const bool tabSpamPassed = !options.tabSpam || (tabRequests >= 128 && tabCommits > 0 && tabCommits * 16 < tabRequests);
-  exitCode = updates > 0 && keyboardPassed && sortingPassed && coalescingPassed && tabSpamPassed ? 0 : 1;
+  const bool samplingHealthy = samplingMeasurementHealthy();
+  exitCode = updates > 0 && keyboardPassed && sortingPassed && coalescingPassed && tabSpamPassed && samplingHealthy ? 0 : 1;
   if (options.output.empty()) return;
   Report stream{options.output}; FILETIME created{}, exited{}, kernel{}, user{}; GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
   PROCESS_MEMORY_COUNTERS_EX memory{sizeof(memory)}; GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory)); DWORD handles = 0; GetProcessHandleCount(GetCurrentProcess(), &handles);
   const double elapsed = std::max(.001, std::chrono::duration<double>(Clock::now() - (measured ? measurementStarted : started)).count()); const double cpu = double(ticks(kernel) + ticks(user) - ticks(cpuStartKernel) - ticks(cpuStartUser)) / 10000000;
-  stream << "{\"native\":true,\"passed\":" << (exitCode == 0 ? "true" : "false") << ",\"elapsedSeconds\":" << elapsed << ",\"firstSampleMilliseconds\":" << (firstSample == Time{} ? 0 : std::chrono::duration<double, std::milli>(firstSample - started).count()) << ",\"processCpuPercentOneCore\":" << cpu * 100 / elapsed << ",\"privateBytes\":" << memory.PrivateUsage << ",\"handles\":" << handles << ",\"updates\":" << updates << ",\"exercises\":" << tests << ",\"keyboardPassed\":" << (keyboardPassed ? "true" : "false") << ',';
+  stream << "{\"native\":true,\"passed\":" << (exitCode == 0 ? "true" : "false") << ",\"samplingHealthy\":" << (samplingHealthy ? "true" : "false") << ",\"elapsedSeconds\":" << elapsed << ",\"firstSampleMilliseconds\":" << (firstSample == Time{} ? 0 : std::chrono::duration<double, std::milli>(firstSample - started).count()) << ",\"processCpuPercentOneCore\":" << cpu * 100 / elapsed << ",\"privateBytes\":" << memory.PrivateUsage << ",\"handles\":" << handles << ",\"updates\":" << updates << ",\"exercises\":" << tests << ",\"keyboardPassed\":" << (keyboardPassed ? "true" : "false") << ',';
   stream << "\"workingSetBytes\":" << memory.WorkingSetSize << ",\"peakWorkingSetBytes\":" << memory.PeakWorkingSetSize << ',';
   stream << "\"warmupSeconds\":" << options.warmup << ",\"handleDelta\":" << int64_t(handles) - baselineHandles << ",\"gdiDelta\":" << int64_t(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS)) - baselineGdi << ",\"userDelta\":" << int64_t(GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS)) - baselineUser << ',';
   stream << "\"sortingFailure\":"; stream.jsonString(sortingFailure) << ',';

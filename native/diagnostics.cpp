@@ -20,6 +20,18 @@ static bool flag(const std::vector<std::wstring>& arguments, const std::wstring&
 static void jsonString(Report& stream, const std::wstring& value) {
   stream.jsonString(utf8(value));
 }
+static int networkSmokeReport(const std::wstring& output) {
+  const auto result = networkTraceSmoke();
+  Report stream{output};
+  stream << "{\"native\":true,\"passed\":" << (result.passed ? "true" : "false") << ",\"skipped\":" << (result.skipped ? "true" : "false") << ",\"reason\":";
+  stream.jsonString(result.reason) << ",\"traceStatus\":" << result.traceStatus << ",\"socketStatus\":" << result.socketStatus
+    << ",\"sentBytes\":" << result.sentBytes << ",\"receivedBytes\":" << result.receivedBytes
+    << ",\"sentDatagrams\":" << result.sentDatagrams << ",\"receivedDatagrams\":" << result.receivedDatagrams
+    << ",\"samples\":" << result.samples << ",\"peakBytesPerSecond\":" << result.peakBytesPerSecond
+    << ",\"elapsedMilliseconds\":" << result.elapsedMilliseconds << ",\"deliveredEvents\":" << result.deliveredEvents
+    << ",\"decodedEvents\":" << result.decodedEvents << ",\"ownUdpEvents\":" << result.ownUdpEvents << '}';
+  return !stream ? 1 : result.skipped && !result.passed ? 77 : result.passed && !result.skipped ? 0 : 1;
+}
 static int startupReport(const std::wstring& output) {
   const auto began = Clock::now(); double firstEntries = -1; size_t snapshots = 0, previousCount = 0; bool progressive = true, completed = false;
   const auto inventory = readStartup([&](const StartupInventory& snapshot) { ++snapshots; progressive = progressive && snapshot.entries.size() >= previousCount && !completed; previousCount = snapshot.entries.size(); completed = snapshot.complete; if (firstEntries < 0 && !snapshot.entries.empty()) firstEntries = milliseconds(began); });
@@ -449,6 +461,7 @@ int diagnostics(const std::vector<std::wstring>& arguments) {
   if (flag(arguments, L"--test-child")) { Sleep(60000); return 0; }
   const auto output = option(arguments, L"--output", L"native-report.json");
   if (flag(arguments, L"--self-test")) return selfTest(output);
+  if (flag(arguments, L"--network-smoke")) return networkSmokeReport(output);
   if (flag(arguments, L"--startup-inventory")) return startupReport(output);
   if (flag(arguments, L"--component-benchmark")) return components(output);
   if (flag(arguments, L"--ui-benchmark")) { RunOptions options; options.hidden = true; options.theme = flag(arguments, L"--dark") ? 1 : 0; options.benchmarkSeconds = std::clamp(std::stoi(option(arguments, L"--seconds", L"15")), 5, 600); options.output = output; options.interval = std::clamp(std::stoi(option(arguments, L"--interval", L"1000")), 0, 4000); options.tab = std::clamp(std::stoi(option(arguments, L"--tab", L"-1")), -1, 6); options.minimized = flag(arguments, L"--minimized"); options.idle = flag(arguments, L"--idle"); options.sortSpam = flag(arguments, L"--sort-spam"); options.tabSpam = flag(arguments, L"--tab-spam"); options.warmup = std::clamp(std::stoi(option(arguments, L"--warmup", L"2")), 0, 60); return runApplication(options); }

@@ -13,6 +13,7 @@ import platform
 import re
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,16 @@ ARTIFACTS = ROOT / "artifacts"
 DEVELOPER = ARTIFACTS / "native-tests/Release/TaskManager.exe"
 PRODUCTION = ARTIFACTS / "native-build/Release/TaskManager.exe"
 RELEASE_FILES = ("release.json", "SHA256SUMS.txt", "RELEASE_NOTES.md")
+SCREENSHOT_VIEWS = (
+    "processes", "processes-expanded", "processes-background", "processes-ungrouped",
+    "performance-cpu", "performance-cpu-logical", "performance-memory", "performance-disk",
+    "performance-network", "performance-gpu", "app-history", "startup", "users", "details",
+    "services", "compact", "summary", "search-details", "search-no-results",
+)
+NETWORK_SMOKE_SKIP_STATUSES = {
+    "trace_permission": {5, 1314},
+    "trace_session_unavailable": {50, 1450},
+}
 
 
 @dataclass(frozen=True)
@@ -105,16 +116,21 @@ def finite_float(value):
     return result
 
 
-def read_report(path):
+def read_json_report(path):
     path = Path(path)
     if not path.is_file():
-        raise ValueError(f"Benchmark produced no fresh report: {path}")
+        raise ValueError(f"Diagnostic produced no fresh report: {path}")
     try:
         report = json.loads(path.read_text(encoding="utf-8-sig"),
                             object_pairs_hook=unique_object, parse_constant=reject_constant,
                             parse_float=finite_float)
     except (ValueError, UnicodeError) as error:
-        raise ValueError(f"Benchmark returned invalid JSON: {path}: {error}") from error
+        raise ValueError(f"Diagnostic returned invalid JSON: {path}: {error}") from error
+    return report
+
+
+def read_report(path):
+    report = read_json_report(path)
     if type(report) is not dict or report.get("passed") is not True or report.get("error") is not None:
         raise ValueError(f"Benchmark did not report success: {path}")
     return report
@@ -201,6 +217,102 @@ def benchmark(arguments):
         print(f"{case.name}: passed", flush=True)
         results.append({"name": case.name, "passed": True, "report": str(path)})
     write_json(directory / "suite.json", results)
+
+
+def png_identity(path):
+    contents = Path(path).read_bytes()
+    if len(contents) < 33 or contents[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR":
+        raise ValueError(f"Screenshot has no valid PNG header: {path}")
+    width, height = struct.unpack(">II", contents[16:24])
+    if not 0 < width <= 32768 or not 0 < height <= 32768:
+        raise ValueError(f"Screenshot has invalid dimensions: {path}")
+    return {**identity(path), "width": width, "height": height}
+
+
+def screenshots(arguments):
+    names = [f"{index:02d}-{name}.png" for index, name in enumerate(SCREENSHOT_VIEWS)]
+    directory = clear_outputs(arguments.output_dir, ["screenshots.json"])
+    # Clear both themes before starting, so a failed first capture cannot leave
+    # old dark-mode images that appear to belong to this attempt.
+    for theme in ("light", "dark"):
+        clear_outputs(directory / theme, names)
+    executable = identity(arguments.executable)["path"]
+    captures = []
+    for theme in ("light", "dark"):
+        target = directory / theme
+        flags = ["--dark"] if theme == "dark" else []
+        result = subprocess.run([executable, "--screenshots", str(target), *flags],
+                                timeout=120, check=False, **production.process_options())
+        if result.returncode:
+            raise ValueError(f"{theme} screenshot capture failed with exit code {result.returncode}.")
+        for name in names:
+            captures.append({"theme": theme, "view": Path(name).stem, **png_identity(target / name)})
+        print(f"Captured {len(names)} {theme} screenshots; visual review is still required.", flush=True)
+    write_json(directory / "screenshots.json", {"executable": identity(executable), "images": captures})
+
+
+def validate_network_smoke(report, returncode):
+    """Accept verified owned traffic or the native smoke test's exact skip contract."""
+    if type(report) is not dict or report.get("error") is not None:
+        raise ValueError("Network smoke must provide an outcome object without an explicit error.")
+    if type(report.get("passed")) is not bool or type(report.get("skipped")) is not bool \
+            or not isinstance(report.get("reason"), str):
+        raise ValueError("Network smoke requires boolean outcomes and a reason string.")
+    counts = ("sentBytes", "receivedBytes", "sentDatagrams", "receivedDatagrams", "samples",
+              "deliveredEvents", "decodedEvents", "ownUdpEvents")
+    for name in ("traceStatus", "socketStatus", *counts):
+        value = report.get(name)
+        limit = 0xffffffff if name in ("traceStatus", "socketStatus") else 0xffffffffffffffff
+        if type(value) is not int or not 0 <= value <= limit:
+            raise ValueError(f"Network smoke requires a nonnegative integer {name} within its native range.")
+    peak = number(report.get("peakBytesPerSecond"), "peakBytesPerSecond")
+    number(report.get("elapsedMilliseconds"), "elapsedMilliseconds")
+    if not report["deliveredEvents"] >= report["decodedEvents"] >= report["ownUdpEvents"]:
+        raise ValueError("Network smoke event counts are inconsistent.")
+    if type(returncode) is not int:
+        raise ValueError("Network smoke requires the actual native process exit code.")
+    if returncode == 0:
+        if not (report["passed"] and not report["skipped"] and report["reason"] == "" and
+                report["traceStatus"] == report["socketStatus"] == 0 and
+                report["sentDatagrams"] == report["receivedDatagrams"] == 32 and
+                report["sentBytes"] == report["receivedBytes"] == 32768 and
+                report["samples"] >= 2 and report["ownUdpEvents"] > 0 and peak > 0):
+            raise ValueError("Network smoke did not verify the complete owned UDP transfer and attribution.")
+        return "verified"
+    if returncode == 77:
+        allowed = NETWORK_SMOKE_SKIP_STATUSES.get(report["reason"], set())
+        if not (not report["passed"] and report["skipped"] and report["traceStatus"] in allowed and
+                report["socketStatus"] == 0 and peak == 0 and
+                all(report[name] == 0 for name in counts if name not in ("deliveredEvents", "decodedEvents"))):
+            raise ValueError("Network smoke exit 77 did not match a recognized pre-traffic trace limitation.")
+        return "skipped"
+    raise ValueError(f"Network smoke failed with exit code {returncode}; inspect the retained native report.")
+
+
+def network_smoke(arguments):
+    directory = clear_outputs(arguments.output_dir, ["network-smoke.json", "result.json"])
+    path = directory / "network-smoke.json"
+    evidence = {"status": "failed", "exitCode": None, "report": str(path)}
+    try:
+        evidence["executable"] = identity(arguments.executable)
+        try:
+            result = subprocess.run([evidence["executable"]["path"], "--network-smoke", "--output", str(path)],
+                                    timeout=arguments.timeout, check=False, **production.process_options())
+        except subprocess.TimeoutExpired as error:
+            raise ValueError("Network smoke exceeded its deadline; only its owned diagnostic process was stopped.") from error
+        evidence["exitCode"] = result.returncode
+        report = read_json_report(path)
+        evidence["status"] = validate_network_smoke(report, result.returncode)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        evidence["error"] = str(error)
+        write_json(directory / "result.json", evidence)
+        raise
+    write_json(directory / "result.json", evidence)
+    if evidence["status"] == "verified":
+        print("Network smoke verified 32 owned UDP datagrams (32,768 bytes) and positive process attribution.", flush=True)
+    else:
+        print(f"Network smoke explicitly skipped: {report['reason']} (trace status {report['traceStatus']}). "
+              "Live network attribution remains unverified.", flush=True)
 
 
 def comparison_cases(arguments):
@@ -440,6 +552,15 @@ def parser():
     benchmark_parser.add_argument("--output-dir", type=Path, default=ARTIFACTS / "benchmark-suite")
     benchmark_parser.add_argument("--enforce-budgets", action="store_true")
     benchmark_parser.set_defaults(function=benchmark)
+    screenshot_parser = sub.add_parser("screenshots", help="capture all native views in light and dark themes for visual review")
+    screenshot_parser.add_argument("--executable", type=Path, default=DEVELOPER)
+    screenshot_parser.add_argument("--output-dir", type=Path, default=ARTIFACTS / "screenshots")
+    screenshot_parser.set_defaults(function=screenshots)
+    network_parser = sub.add_parser("network-smoke", help="verify owned UDP traffic or report a recognized trace limitation")
+    network_parser.add_argument("--executable", type=Path, default=DEVELOPER)
+    network_parser.add_argument("--output-dir", type=Path, default=ARTIFACTS / "network-smoke")
+    network_parser.add_argument("--timeout", type=bounded_integer(5, 120), default=30)
+    network_parser.set_defaults(function=network_smoke)
     comparison = sub.add_parser("compare", help="run alternating baseline/candidate measurements and summarize medians and ranges")
     comparison.add_argument("--baseline-executable", type=Path, required=True)
     comparison.add_argument("--executable", type=Path, default=DEVELOPER)

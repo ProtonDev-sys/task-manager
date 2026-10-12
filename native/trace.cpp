@@ -19,13 +19,14 @@ struct TraceCounts {
   std::unordered_map<DWORD, Counter> counters;
   Time sampledAt{};
   uint64_t generation = 0;
-  void record(const NetworkEvent& event) {
+  bool record(const NetworkEvent& event) {
     const auto found = counters.find(event.pid);
     // ProcessTrace converts QPC event timestamps to FILETIME unless RAW_TIMESTAMP is set.
     // Late delivery from an old PID must not count against its new owner's creation time.
-    if (found == counters.end() || !found->second.created || event.timestamp < found->second.created) return;
+    if (found == counters.end() || !found->second.created || event.timestamp < found->second.created) return false;
     auto& bytes = found->second.bytes;
     bytes += std::min<uint64_t>(event.bytes, UINT64_MAX - bytes);
+    return true;
   }
   void sample(std::span<Process> processes, Time now) {
     const double elapsed = sampledAt == Time{} ? 0 : std::chrono::duration<double>(now - sampledAt).count();
@@ -76,10 +77,10 @@ std::vector<std::pair<std::string, bool>> traceSamplingTests() {
     checks.emplace_back("trace_reuses_counter_nodes_between_samples", &trace.counters.at(10) == retained && trace.counters.at(10).bytes == 0);
     trace.record({10, 200, 103}); processes[0].created = 1000; trace.sample(processes, initial + std::chrono::seconds(3));
     checks.emplace_back("trace_reused_pid_discards_old_owner_traffic", processes[0].network == 0 && trace.counters.at(10).created == 1000);
-    trace.record({10, 300, 999}); trace.record({10, 400, 1000}); trace.sample(processes, initial + std::chrono::seconds(4));
-    checks.emplace_back("trace_late_old_pid_events_are_rejected", processes[0].network == 400);
-    trace.record({20, 9999, 1001});
-    checks.emplace_back("trace_unknown_process_events_do_not_allocate", trace.counters.size() == 1);
+    const bool rejected = !trace.record({10, 300, 999}), accepted = trace.record({10, 400, 1000}); trace.sample(processes, initial + std::chrono::seconds(4));
+    checks.emplace_back("trace_late_old_pid_events_are_rejected", rejected && accepted && processes[0].network == 400);
+    const bool untracked = !trace.record({20, 9999, 1001});
+    checks.emplace_back("trace_unknown_process_events_do_not_allocate", untracked && trace.counters.size() == 1);
     trace.sample({}, initial + std::chrono::seconds(5)); trace.record({10, 9999, 1001});
     checks.emplace_back("trace_departed_process_counters_are_pruned", trace.counters.empty());
     trace.sample(processes, initial + std::chrono::seconds(6));
@@ -99,6 +100,10 @@ struct NetworkTrace::State {
   std::thread worker;
   std::atomic<bool> consuming = false;
   std::atomic<DWORD> status = ERROR_SUCCESS;
+#ifdef TASKMGR_DIAGNOSTICS
+  const DWORD diagnosticPid = GetCurrentProcessId();
+  std::atomic<uint64_t> deliveredEvents = 0, decodedEvents = 0, ownUdpEvents = 0;
+#endif
   std::mutex gate;
   TraceCounts counts;
   EVENT_TRACE_PROPERTIES* header() { return reinterpret_cast<EVENT_TRACE_PROPERTIES*>(properties.data()); }
@@ -118,17 +123,41 @@ struct NetworkTrace::State {
     if (consumer != INVALID_PROCESSTRACE_HANDLE) CloseTrace(consumer);
     if (worker.joinable()) worker.join();
   }
+  template<bool measure>
   static void WINAPI record(EVENT_RECORD* event) {
-    const auto parsed = networkEvent(*event); if (!parsed || !event->UserContext) return;
-    auto state = static_cast<State*>(event->UserContext); std::lock_guard lock(state->gate); state->counts.record(*parsed);
+    if (!event->UserContext) return;
+    auto state = static_cast<State*>(event->UserContext);
+#ifdef TASKMGR_DIAGNOSTICS
+    if constexpr (measure) state->deliveredEvents.fetch_add(1);
+#endif
+    const auto parsed = networkEvent(*event); if (!parsed) return;
+#ifdef TASKMGR_DIAGNOSTICS
+    if constexpr (measure) state->decodedEvents.fetch_add(1);
+#endif
+    std::lock_guard lock(state->gate);
+    [[maybe_unused]] const bool attributed = state->counts.record(*parsed);
+#ifdef TASKMGR_DIAGNOSTICS
+    if constexpr (measure) if (attributed && parsed->bytes && parsed->pid == state->diagnosticPid && event->EventHeader.ProviderId == UdpIp) state->ownUdpEvents.fetch_add(1);
+#endif
   }
 };
+#ifdef TASKMGR_DIAGNOSTICS
+NetworkTrace::NetworkTrace() : NetworkTrace(false) {}
+NetworkTrace::NetworkTrace(bool measure) : state(std::make_unique<State>()) {
+#else
 NetworkTrace::NetworkTrace() : state(std::make_unique<State>()) {
+#endif
   // Never stop a session by a reusable PID-based name: another live sampler may own it.
   if (!state->initialize()) return;
   const auto started = StartTraceW(&state->session, state->name.c_str(), state->header()); state->status = started;
   if (started != ERROR_SUCCESS) { state->session = 0; return; }
-  EVENT_TRACE_LOGFILEW log{}; log.LoggerName = state->name.data(); log.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD; log.EventRecordCallback = State::record; log.Context = state.get();
+  EVENT_TRACE_LOGFILEW log{}; log.LoggerName = state->name.data(); log.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD; log.Context = state.get();
+#ifdef TASKMGR_DIAGNOSTICS
+  // Compile out the counters from ordinary diagnostic traces used for performance comparisons.
+  log.EventRecordCallback = measure ? State::record<true> : State::record<false>;
+#else
+  log.EventRecordCallback = State::record<false>;
+#endif
   state->consumer = OpenTraceW(&log);
   if (state->consumer == INVALID_PROCESSTRACE_HANDLE) { state->status = GetLastError(); ControlTraceW(state->session, nullptr, state->header(), EVENT_TRACE_CONTROL_STOP); state->session = 0; return; }
   state->consuming = true;
@@ -144,6 +173,112 @@ bool NetworkTrace::sample(std::span<Process> processes) {
 }
 #ifdef TASKMGR_DIAGNOSTICS
 DWORD NetworkTrace::status() const { return state->status.load(); }
+NetworkSmokeResult networkTraceSmoke() {
+  // Run separately from portable self-tests: successful sockets without attributed ETW events fail.
+  // Nothing is sent outside the two loopback endpoints owned by this process.
+  const auto began = Clock::now();
+  NetworkSmokeResult result;
+  NetworkTrace trace(true);
+  auto finish = [&](std::string reason, bool passed = false, bool skipped = false) {
+    result.reason = std::move(reason); result.passed = passed; result.skipped = skipped;
+    if (result.traceStatus == ERROR_SUCCESS) result.traceStatus = trace.status();
+    // Read in reverse pipeline order so these diagnostics remain consistent while callbacks finish.
+    result.ownUdpEvents = trace.state->ownUdpEvents.load();
+    result.decodedEvents = trace.state->decodedEvents.load();
+    result.deliveredEvents = trace.state->deliveredEvents.load();
+    if (passed && (result.traceStatus != ERROR_SUCCESS || !trace.active())) { result.passed = false; result.reason = "trace_consumer_stopped"; }
+    result.elapsedMilliseconds = milliseconds(began);
+    return result;
+  };
+  auto unavailable = [&] {
+    result.traceStatus = trace.status();
+    if (result.traceStatus == ERROR_ACCESS_DENIED || result.traceStatus == ERROR_PRIVILEGE_NOT_HELD) return finish("trace_permission", false, true);
+    if (result.traceStatus == ERROR_NOT_SUPPORTED || result.traceStatus == ERROR_NO_SYSTEM_RESOURCES) return finish("trace_session_unavailable", false, true);
+    return finish("trace_initialization_failed");
+  };
+  if (!trace.active()) return unavailable();
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return finish("owned_process_identity_failed_" + std::to_string(GetLastError()));
+  if (!ticks(created)) return finish("owned_process_identity_missing");
+  std::array<Process, 1> processes; processes[0].id = GetCurrentProcessId(); processes[0].created = ticks(created);
+  if (!trace.sample(processes)) return unavailable();
+  ++result.samples;
+  if (processes[0].network != 0) return finish("owned_process_baseline_not_zero");
+
+  WSADATA data{};
+  const int initialized = WSAStartup(MAKEWORD(2, 2), &data);
+  if (initialized != 0) { result.socketStatus = DWORD(initialized); return finish("winsock_initialization_failed"); }
+  struct SocketRuntime { ~SocketRuntime() { WSACleanup(); } } runtime;
+  struct Socket {
+    SOCKET value = INVALID_SOCKET;
+    Socket() = default;
+    Socket(const Socket&) = delete;
+    Socket& operator=(const Socket&) = delete;
+    ~Socket() { if (value != INVALID_SOCKET) closesocket(value); }
+  } sender, receiver;
+  auto socketFailure = [&](std::string reason) { result.socketStatus = DWORD(WSAGetLastError()); return finish(std::move(reason)); };
+  auto bindLoopback = [&](Socket& owned, sockaddr_in& address) {
+    owned.value = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (owned.value == INVALID_SOCKET) return false;
+    const BOOL exclusive = TRUE; u_long nonblocking = 1;
+    if (setsockopt(owned.value, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) == SOCKET_ERROR ||
+        ioctlsocket(owned.value, FIONBIO, &nonblocking) == SOCKET_ERROR) return false;
+    address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(owned.value, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR) return false;
+    int size = sizeof(address);
+    if (getsockname(owned.value, reinterpret_cast<sockaddr*>(&address), &size) == SOCKET_ERROR) return false;
+    if (size != int(sizeof(address)) || address.sin_family != AF_INET || address.sin_addr.s_addr != htonl(INADDR_LOOPBACK) || !address.sin_port) { WSASetLastError(WSAEINVAL); return false; }
+    return true;
+  };
+  sockaddr_in source{}, destination{};
+  if (!bindLoopback(sender, source) || !bindLoopback(receiver, destination)) return socketFailure("udp_loopback_bind_failed");
+  // Both sockets bind exclusively to ephemeral loopback ports; connect filters unrelated datagrams.
+  if (connect(sender.value, reinterpret_cast<const sockaddr*>(&destination), sizeof(destination)) == SOCKET_ERROR ||
+      connect(receiver.value, reinterpret_cast<const sockaddr*>(&source), sizeof(source)) == SOCKET_ERROR) return socketFailure("udp_loopback_connect_failed");
+  constexpr unsigned datagrams = 32;
+  std::array<char, 1024> expected{}, received{};
+  for (size_t index = 0; index < expected.size(); ++index) expected[index] = char(index % 113);
+  const auto transferDeadline = Clock::now() + std::chrono::seconds(1);
+  for (unsigned sequence = 0; sequence < datagrams; ++sequence) {
+    memcpy(expected.data(), &sequence, sizeof(sequence));
+    for (;;) {
+      if (Clock::now() >= transferDeadline) { result.socketStatus = WSAETIMEDOUT; return finish("udp_loopback_send_timed_out"); }
+      const int sent = send(sender.value, expected.data(), int(expected.size()), 0);
+      if (sent == int(expected.size())) { ++result.sentDatagrams; result.sentBytes += unsigned(sent); break; }
+      if (sent != SOCKET_ERROR) return finish("udp_loopback_partial_datagram");
+      const int error = WSAGetLastError();
+      if (error != WSAEWOULDBLOCK) { result.socketStatus = DWORD(error); return finish("udp_loopback_send_failed"); }
+      Sleep(1);
+    }
+    for (;;) {
+      if (Clock::now() >= transferDeadline) { result.socketStatus = WSAETIMEDOUT; return finish("udp_loopback_receive_timed_out"); }
+      const int count = recv(receiver.value, received.data(), int(received.size()), 0);
+      if (count >= 0) {
+        if (count != int(expected.size()) || received != expected) return finish("udp_loopback_payload_mismatch");
+        ++result.receivedDatagrams; result.receivedBytes += unsigned(count); break;
+      }
+      const int error = WSAGetLastError();
+      if (error != WSAEWOULDBLOCK) { result.socketStatus = DWORD(error); return finish("udp_loopback_receive_failed"); }
+      Sleep(1);
+    }
+  }
+  // ControlTrace supersedes FlushTrace. Flush only the private session this diagnostic owns.
+  result.traceStatus = ControlTraceW(trace.state->session, nullptr, trace.state->header(), EVENT_TRACE_CONTROL_FLUSH);
+  if (result.traceStatus != ERROR_SUCCESS) return finish("trace_flush_failed");
+  const auto deliveryDeadline = Clock::now() + std::chrono::seconds(3);
+  do {
+    if (!trace.sample(processes)) return finish("trace_consumer_stopped");
+    ++result.samples;
+    if (!std::isfinite(processes[0].network) || processes[0].network < 0) return finish("owned_process_rate_invalid");
+    result.peakBytesPerSecond = std::max(result.peakBytesPerSecond, processes[0].network);
+    if (result.peakBytesPerSecond > 0 && trace.state->ownUdpEvents.load() > 0) {
+      if (!trace.active() || trace.status() != ERROR_SUCCESS) return finish("trace_consumer_stopped");
+      return finish("", true);
+    }
+    Sleep(25);
+  } while (Clock::now() < deliveryDeadline);
+  return finish("no_owned_udp_attribution");
+}
 std::vector<std::pair<std::string, bool>> traceLifecycleTests() {
   std::vector<std::pair<std::string, bool>> checks;
   NetworkTrace first;

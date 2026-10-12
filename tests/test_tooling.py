@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -148,6 +149,138 @@ class ToolingTests(unittest.TestCase):
         self.assertEqual(len(processes), 1)
         self.assertIsNotNone(processes[0].poll())
         self.assertFalse((self.directory / "timeout.json").exists())
+
+    def test_screenshot_capture_requires_fresh_complete_light_and_dark_pngs(self):
+        arguments = taskmgr.parser().parse_args([
+            "screenshots", "--executable", str(self.executable), "--output-dir", str(self.directory)])
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 800, 600) + b"\x00" * 9
+        names = [f"{index:02d}-{view}.png" for index, view in enumerate(taskmgr.SCREENSHOT_VIEWS)]
+
+        def capture(command, **options):
+            directory = Path(command[2])
+            self.assertEqual(directory.name == "dark", "--dark" in command)
+            for name in names:
+                self.assertFalse((directory / name).exists())
+                (directory / name).write_bytes(png)
+            self.assertEqual(options["timeout"], 120)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(taskmgr.subprocess, "run", side_effect=capture):
+            taskmgr.screenshots(arguments)
+        report = json.loads((self.directory / "screenshots.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(report["images"]), 38)
+        self.assertEqual({item["theme"] for item in report["images"]}, {"light", "dark"})
+        self.assertTrue(all(item["width"] == 800 and item["height"] == 600 for item in report["images"]))
+        with patch.object(taskmgr.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaises(OSError):
+                taskmgr.screenshots(arguments)
+        self.assertFalse((self.directory / "screenshots.json").exists())
+        self.assertEqual(list((self.directory / "dark").glob("*.png")), [])
+
+    def test_invalid_screenshot_header_or_dimensions_are_rejected(self):
+        path = self.directory / "invalid.png"
+        for contents in (b"", b"not an image", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 17):
+            with self.subTest(contents=contents):
+                path.write_bytes(contents)
+                with self.assertRaises(ValueError):
+                    taskmgr.png_identity(path)
+
+    def network_arguments(self):
+        return taskmgr.parser().parse_args([
+            "network-smoke", "--executable", str(self.executable), "--output-dir", str(self.directory)])
+
+    def network_report(self, reason="", trace_status=0):
+        skipped = bool(reason)
+        return {"passed": not skipped, "skipped": skipped, "reason": reason,
+                "traceStatus": trace_status, "socketStatus": 0,
+                "sentBytes": 0 if skipped else 32768, "receivedBytes": 0 if skipped else 32768,
+                "sentDatagrams": 0 if skipped else 32, "receivedDatagrams": 0 if skipped else 32,
+                "samples": 0 if skipped else 2, "peakBytesPerSecond": 0 if skipped else 15000.5,
+                "deliveredEvents": 0 if skipped else 100, "decodedEvents": 0 if skipped else 80,
+                "ownUdpEvents": 0 if skipped else 64, "elapsedMilliseconds": 10.5}
+
+    def test_network_smoke_retains_fresh_verified_evidence_and_bounded_timeout(self):
+        for name in ("network-smoke.json", "result.json"):
+            (self.directory / name).write_text('{"status":"stale"}', encoding="utf-8")
+        fake = self.fake_run(json.dumps(self.network_report()))
+
+        def run(command, **options):
+            self.assertFalse((self.directory / "result.json").exists())
+            self.assertEqual(options["timeout"], 30)
+            self.assertEqual(command[1], "--network-smoke")
+            return fake(command, **options)
+
+        with patch.object(taskmgr.subprocess, "run", side_effect=run):
+            taskmgr.network_smoke(self.network_arguments())
+        evidence = json.loads((self.directory / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(evidence["status"], "verified")
+        self.assertEqual(evidence["exitCode"], 0)
+        self.assertEqual(evidence["executable"]["sha256"], taskmgr.digest(self.executable))
+        self.assertIs(taskmgr.read_json_report(evidence["report"])["passed"], True)
+        self.assertIn("32 owned UDP datagrams", self.output.getvalue())
+
+    def test_network_smoke_accepts_only_documented_pre_traffic_trace_skips(self):
+        for reason, trace_status in (("trace_permission", 5), ("trace_permission", 1314),
+                                     ("trace_session_unavailable", 50), ("trace_session_unavailable", 1450)):
+            with self.subTest(reason=reason, status=trace_status), \
+                    patch.object(taskmgr.subprocess, "run", side_effect=self.fake_run(
+                        json.dumps(self.network_report(reason, trace_status)), returncode=77)):
+                taskmgr.network_smoke(self.network_arguments())
+            evidence = json.loads((self.directory / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(evidence["status"], "skipped")
+            self.assertEqual(evidence["exitCode"], 77)
+            self.assertNotIn("error", evidence)
+        self.assertIn("Live network attribution remains unverified", self.output.getvalue())
+
+    def test_network_smoke_rejects_forged_skips_and_incomplete_or_nonfinite_traffic(self):
+        invalid = []
+        for changes in ({"traceStatus": 0}, {"reason": "no_events"}, {"traceStatus": 50},
+                        {"socketStatus": 10013}, {"samples": 1}, {"sentBytes": 1},
+                        {"receivedDatagrams": 1}, {"ownUdpEvents": 1}, {"peakBytesPerSecond": 1},
+                        {"passed": True}, {"skipped": "true"}):
+            invalid.append(({**self.network_report("trace_permission", 5), **changes}, 77))
+        for changes in ({"passed": 1}, {"skipped": True}, {"reason": "no_events"},
+                        {"sentDatagrams": 31}, {"receivedBytes": 32767}, {"samples": 1},
+                        {"samples": True}, {"socketStatus": 1}, {"traceStatus": 1},
+                        {"ownUdpEvents": 0}, {"decodedEvents": 101}, {"ownUdpEvents": 81},
+                        {"deliveredEvents": -1}, {"receivedBytes": "32768"},
+                        {"peakBytesPerSecond": 0}, {"peakBytesPerSecond": float("nan")},
+                        {"elapsedMilliseconds": float("inf")}, {"error": "failure"}):
+            invalid.append(({**self.network_report(), **changes}, 0))
+        invalid += [(self.network_report(), 77), (self.network_report("trace_permission", 5), 0),
+                    (self.network_report(), 1), (self.network_report(), True), ({}, 77)]
+        for report, code in invalid:
+            with self.subTest(report=report, code=code), self.assertRaises(ValueError):
+                taskmgr.validate_network_smoke(report, code)
+
+    def test_network_smoke_failures_invalidate_old_success_and_retain_failure(self):
+        for options in ({"payload": None}, {"payload": "invalid JSON"},
+                        {"payload": '{"passed":false,"passed":true}'},
+                        {"payload": json.dumps(self.network_report()), "returncode": 1},
+                        {"payload": json.dumps(self.network_report()), "returncode": 77},
+                        {"payload": None, "timeout": True}):
+            with self.subTest(options=options):
+                for name in ("network-smoke.json", "result.json"):
+                    (self.directory / name).write_text('{"status":"stale"}', encoding="utf-8")
+                with patch.object(taskmgr.subprocess, "run", side_effect=self.fake_run(**options)):
+                    with self.assertRaises(ValueError):
+                        taskmgr.network_smoke(self.network_arguments())
+                evidence = json.loads((self.directory / "result.json").read_text(encoding="utf-8"))
+                self.assertEqual(evidence["status"], "failed")
+                self.assertIn("error", evidence)
+                self.assertNotIn("stale", json.dumps(evidence))
+        self.assertFalse((self.directory / "network-smoke.json").exists())
+
+    def test_network_smoke_missing_executable_removes_stale_native_report(self):
+        (self.directory / "network-smoke.json").write_text(json.dumps(self.network_report()), encoding="utf-8")
+        self.executable.unlink()
+        with patch.object(taskmgr.subprocess, "run") as run, self.assertRaises(OSError):
+            taskmgr.network_smoke(self.network_arguments())
+        run.assert_not_called()
+        self.assertFalse((self.directory / "network-smoke.json").exists())
+        evidence = json.loads((self.directory / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(evidence["status"], "failed")
+        self.assertIsNone(evidence["exitCode"])
 
     def ui_report(self):
         report = {"passed": True, "firstSampleMilliseconds": 100}
