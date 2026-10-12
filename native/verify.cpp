@@ -230,9 +230,9 @@ bool Application::verifyHistoryPersistence() {
     const auto bytes = read(path);
     check(bytes.find("\xe5\xb7\xa5\xe5\x85\xb7.exe") != std::string::npos && bytes.find("\xf0\x9f\x9a\x80") != std::string::npos, "history-explicit-utf8-bytes");
     check(std::count(bytes.begin(), bytes.end(), '\n') == 3, "history-metadata-newlines-escaped");
-    const std::string header = "# TaskManagerNative history UTF-8 v1\n", emptyRow = "empty.exe\t0\t\t\t0\n";
+    const std::string historyHeader = "# TaskManagerNative history UTF-8 v1\n", emptyRow = "empty.exe\t0\t\t\t0\n";
     const std::string unicodeRow = "\xe5\xb7\xa5\xe5\x85\xb7.exe\t123456789\tCaf\xc3\xa9 \xf0\x9f\x9a\x80\\tTabbed\\r\\nsecond line\\\\literal\tC:\\\\\xe7\x94\xa8\xe6\x88\xb7\\\\M\xc3\xbcnchen\\\\\xe5\xb7\xa5\xe5\x85\xb7.exe\t1\n";
-    check(bytes == header + emptyRow + unicodeRow || bytes == header + unicodeRow + emptyRow, "history-serialization-preserves-exact-format-bytes");
+    check(bytes == historyHeader + emptyRow + unicodeRow || bytes == historyHeader + unicodeRow + emptyRow, "history-serialization-preserves-exact-format-bytes");
   }
   check(read(neighbor) == sentinel && stagingFiles() == 0, "history-success-preserves-preexisting-temporary-neighbor");
   usage.clear(); readHistoryFile(path);
