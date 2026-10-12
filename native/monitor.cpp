@@ -190,19 +190,104 @@ Counter::Counter() { PdhOpenQueryW(nullptr, 0, &query); }
 Counter::~Counter() { if (query) PdhCloseQuery(query); }
 void Counter::add(const std::wstring& key, const std::wstring& path) { PDH_HCOUNTER counter = nullptr; if (query && PdhAddEnglishCounterW(query, path.c_str(), 0, &counter) == ERROR_SUCCESS) counters.emplace(key, counter); }
 void Counter::collect() { if (query) PdhCollectQueryData(query); }
-std::vector<std::pair<std::wstring, double>> Counter::values(const std::wstring& key) const {
+template <typename Read> static std::vector<std::pair<std::wstring, double>> formattedCounterValues(std::vector<std::byte>& data, Read read) {
   std::vector<std::pair<std::wstring, double>> result;
-  auto found = counters.find(key);
-  if (found == counters.end()) return result;
-  DWORD size = 0, count = 0;
-  if (PdhGetFormattedCounterArrayW(found->second, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &size, &count, nullptr) != PDH_MORE_DATA || size > 16 * 1024 * 1024) return result;
-  std::vector<std::byte> data(size);
-  auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(data.data());
-  if (PdhGetFormattedCounterArrayW(found->second, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &size, &count, items) != ERROR_SUCCESS) return result;
-  result.reserve(count);
-  for (DWORD index = 0; index < count; ++index) if (items[index].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || items[index].FmtValue.CStatus == PDH_CSTATUS_NEW_DATA) result.emplace_back(items[index].szName, std::max(0.0, items[index].FmtValue.doubleValue));
+  constexpr DWORD limit = 16 * 1024 * 1024;
+  const auto resize = [&] {
+    DWORD size = 0, count = 0;
+    if (read(&size, &count, nullptr) != PDH_MORE_DATA || size == 0 || size > limit) return false;
+    if (data.size() < size) data.resize(size);
+    return true;
+  };
+  if (data.empty() && !resize()) return result;
+  for (unsigned attempt = 0; attempt < 3; ++attempt) {
+    DWORD size = DWORD(data.size()), count = 0;
+    auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(data.data());
+    const auto status = read(&size, &count, items);
+    if (status == ERROR_SUCCESS) {
+      if (size > data.size() || count > size / sizeof(*items)) return result;
+      result.reserve(count);
+      for (DWORD index = 0; index < count; ++index) {
+        const auto& item = items[index];
+        if (item.szName && (item.FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || item.FmtValue.CStatus == PDH_CSTATUS_NEW_DATA) && std::isfinite(item.FmtValue.doubleValue))
+          result.emplace_back(item.szName, std::max(0.0, item.FmtValue.doubleValue));
+      }
+      return result;
+    }
+    // PDH does not guarantee the required size after a failed nonempty-buffer call.
+    // Probe again, then retry the read; live wildcard instances can grow in between.
+    if ((status != PDH_MORE_DATA && status != PDH_INVALID_ARGUMENT) || attempt == 2 || !resize()) return result;
+  }
   return result;
 }
+std::vector<std::pair<std::wstring, double>> Counter::values(const std::wstring& key) {
+  const auto found = counters.find(key);
+  if (found == counters.end()) return {};
+  // One retained buffer serves every counter; returned names and values own their storage.
+  return formattedCounterValues(valuesBuffer, [&](DWORD* size, DWORD* count, PDH_FMT_COUNTERVALUE_ITEM_W* items) {
+    return PdhGetFormattedCounterArrayW(found->second, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, size, count, items);
+  });
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> counterSamplingTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  std::vector<std::byte> data;
+  unsigned probes = 0, reads = 0;
+  const auto read = [&](DWORD* size, DWORD* count, PDH_FMT_COUNTERVALUE_ITEM_W* items) {
+    if (!items) { ++probes; *size = sizeof(*items); return LONG(PDH_MORE_DATA); }
+    ++reads; *size = sizeof(*items); *count = 1; items[0] = {}; items[0].szName = const_cast<wchar_t*>(L"example"); items[0].FmtValue.CStatus = PDH_CSTATUS_VALID_DATA; items[0].FmtValue.doubleValue = 42;
+    return LONG(ERROR_SUCCESS);
+  };
+  const auto first = formattedCounterValues(data, read); const auto allocation = data.data();
+  const auto second = formattedCounterValues(data, read);
+  checks.emplace_back("counter_reuses_buffer_and_avoids_repeated_size_probe", probes == 1 && reads == 2 && data.data() == allocation && first == second && second == std::vector<std::pair<std::wstring, double>>{{L"example", 42}});
+  {
+    unsigned calls = 0;
+    const auto grown = formattedCounterValues(data, [&](DWORD* size, DWORD* count, PDH_FMT_COUNTERVALUE_ITEM_W* items) {
+      ++calls;
+      if (calls == 1) { *size = UINT32_MAX; return LONG(PDH_MORE_DATA); }
+      if (!items) { *size = 2 * sizeof(*items); return LONG(PDH_MORE_DATA); }
+      *size = 2 * sizeof(*items); *count = 1; items[0] = {}; items[0].szName = const_cast<wchar_t*>(L"grown"); items[0].FmtValue.CStatus = PDH_CSTATUS_NEW_DATA; items[0].FmtValue.doubleValue = 7;
+      return LONG(ERROR_SUCCESS);
+    });
+    checks.emplace_back("counter_growth_reprobes_unreliable_required_size", calls == 3 && grown == std::vector<std::pair<std::wstring, double>>{{L"grown", 7}});
+    checks.emplace_back("counter_reused_buffer_does_not_change_prior_values", first == std::vector<std::pair<std::wstring, double>>{{L"example", 42}});
+  }
+  {
+    unsigned calls = 0;
+    const auto recovered = formattedCounterValues(data, [&](DWORD* size, DWORD* count, PDH_FMT_COUNTERVALUE_ITEM_W* items) {
+      if (++calls == 1) return LONG(PDH_INVALID_ARGUMENT);
+      return read(size, count, items);
+    });
+    checks.emplace_back("counter_legacy_small_buffer_error_retries", calls == 3 && recovered == first);
+  }
+  {
+    unsigned calls = 0;
+    const auto failed = formattedCounterValues(data, [&](DWORD* size, DWORD*, PDH_FMT_COUNTERVALUE_ITEM_W* items) { ++calls; *size = items ? UINT32_MAX : DWORD(data.size()); return LONG(PDH_MORE_DATA); });
+    checks.emplace_back("counter_churning_instances_have_bounded_retries", calls == 5 && failed.empty());
+    calls = 0;
+    const auto oversized = formattedCounterValues(data, [&](DWORD* size, DWORD*, PDH_FMT_COUNTERVALUE_ITEM_W*) { ++calls; *size = 16 * 1024 * 1024 + 1; return LONG(PDH_MORE_DATA); });
+    checks.emplace_back("counter_bounds_required_allocation", calls == 2 && oversized.empty() && data.size() < 16 * 1024 * 1024);
+    calls = 0;
+    const auto unavailable = formattedCounterValues(data, [&](DWORD*, DWORD*, PDH_FMT_COUNTERVALUE_ITEM_W*) { ++calls; return LONG(PDH_INVALID_HANDLE); });
+    checks.emplace_back("counter_unavailable_data_is_not_reused", calls == 1 && unavailable.empty());
+  }
+  {
+    data.resize(6 * sizeof(PDH_FMT_COUNTERVALUE_ITEM_W));
+    const auto filtered = formattedCounterValues(data, [&](DWORD* size, DWORD* count, PDH_FMT_COUNTERVALUE_ITEM_W* items) {
+      *size = DWORD(data.size()); *count = 6;
+      for (DWORD index = 0; index < *count; ++index) { items[index] = {}; items[index].szName = const_cast<wchar_t*>(L"finite"); items[index].FmtValue.CStatus = PDH_CSTATUS_VALID_DATA; }
+      items[0].FmtValue.doubleValue = -1; items[1].FmtValue.doubleValue = std::numeric_limits<double>::quiet_NaN(); items[2].FmtValue.doubleValue = std::numeric_limits<double>::infinity();
+      items[3].FmtValue.CStatus = PDH_CSTATUS_INVALID_DATA; items[4].szName = nullptr; items[5].FmtValue.doubleValue = 150;
+      return LONG(ERROR_SUCCESS);
+    });
+    checks.emplace_back("counter_filters_invalid_values_without_capping_valid_usage", filtered == std::vector<std::pair<std::wstring, double>>{{L"finite", 0}, {L"finite", 150}});
+    const auto invalid = formattedCounterValues(data, [&](DWORD* size, DWORD* count, PDH_FMT_COUNTERVALUE_ITEM_W*) { *size = DWORD(data.size()); *count = 7; return LONG(ERROR_SUCCESS); });
+    checks.emplace_back("counter_rejects_invalid_array_extent", invalid.empty());
+  }
+  return checks;
+}
+#endif
 template <typename Read> static std::vector<std::byte> readAdapterAddressBuffer(Read read) {
   ULONG size = 32768; std::vector<std::byte> addresses;
   for (int attempt = 0; attempt < 3; ++attempt) {

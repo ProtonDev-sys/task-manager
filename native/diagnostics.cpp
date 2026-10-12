@@ -134,6 +134,7 @@ static int selfTest(const std::wstring& output) {
     check("process_tree_root_without_snapshot", processTree({}, root) == std::vector<Identity>{{root.id, root.created}});
   }
   for (auto& test : networkSamplingTests()) checks.push_back(std::move(test));
+  for (auto& test : counterSamplingTests()) checks.push_back(std::move(test));
   for (auto& test : cacheTimingTests()) checks.push_back(std::move(test));
   for (auto& test : servicePermissionTests()) checks.push_back(std::move(test));
   for (auto& test : processorGroupTests()) checks.push_back(std::move(test));
