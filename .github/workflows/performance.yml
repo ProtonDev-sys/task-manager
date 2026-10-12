@@ -1,0 +1,86 @@
+name: Paired performance study
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: Exact 40-character baseline commit SHA
+        type: string
+        required: true
+        default: 062797ecd367c638b56d25ca061d287a3d8d5354
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: task-manager-performance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  study:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'performance-study')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      TASKMGR_BASELINE_SHA: ${{ inputs.baseline_sha || '062797ecd367c638b56d25ca061d287a3d8d5354' }}
+    steps:
+      - name: Check out the exact candidate tested by this workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require an immutable baseline reference
+        id: baseline
+        run: python .github/scripts/performance.py validate-baseline
+      - name: Check out the validated baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.baseline.outputs.sha }}
+          path: artifacts/baseline-source
+          persist-credentials: false
+      - name: Record the exact source identities
+        run: python .github/scripts/performance.py record --baseline-source artifacts/baseline-source --output-dir artifacts/performance-study
+      - name: Build the baseline with production and diagnostic configurations
+        run: |
+          cmake -S artifacts/baseline-source -B artifacts/performance-builds/baseline-production -A x64 -DTASKMGR_DIAGNOSTICS=OFF
+          cmake --build artifacts/performance-builds/baseline-production --config Release --parallel 4
+          cmake -S artifacts/baseline-source -B artifacts/performance-builds/baseline-diagnostics -A x64 -DTASKMGR_DIAGNOSTICS=ON
+          cmake --build artifacts/performance-builds/baseline-diagnostics --config Release --parallel 4
+      - name: Build the candidate with the same runner and compiler
+        run: |
+          cmake -S . -B artifacts/native-build -A x64 -DTASKMGR_DIAGNOSTICS=OFF
+          cmake --build artifacts/native-build --config Release --parallel 4
+          cmake -S . -B artifacts/native-tests -A x64 -DTASKMGR_DIAGNOSTICS=ON
+          cmake --build artifacts/native-tests --config Release --parallel 4
+      - name: Validate both native baselines and production exclusions
+        run: |
+          ctest --test-dir artifacts/performance-builds/baseline-diagnostics -C Release -R '^native-self-test$' --no-tests=error --output-on-failure
+          ctest --test-dir artifacts/native-tests -C Release -R '^native-self-test$' --no-tests=error --output-on-failure
+          python tools/taskmgr.py check-production --executable artifacts/performance-builds/baseline-production/Release/TaskManager.exe
+          python tools/taskmgr.py check-production --executable artifacts/native-build/Release/TaskManager.exe
+      - name: Measure three alternating pairs serially
+        run: >-
+          python tools/taskmgr.py compare
+          --baseline-executable artifacts/performance-builds/baseline-diagnostics/Release/TaskManager.exe
+          --baseline-production-executable artifacts/performance-builds/baseline-production/Release/TaskManager.exe
+          --production-executable artifacts/native-build/Release/TaskManager.exe
+          --output-dir artifacts/performance-study/reports
+          --repetitions 3 --samples 500 --seconds 15 --warmup-seconds 5
+      - name: Capture native light and dark views after measurement
+        run: python tools/taskmgr.py screenshots --output-dir artifacts/performance-study/screenshots
+      - name: Verify owned UDP traffic attribution after measurements and screenshots
+        run: python tools/taskmgr.py network-smoke --output-dir artifacts/performance-study/network-smoke
+      - name: Summarize medians, ranges and verification limits
+        if: always()
+        run: python .github/scripts/performance.py summary --output-dir artifacts/performance-study
+      - name: Retain raw comparison evidence and native screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: paired-performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/performance-study/
+            artifacts/performance-builds/baseline-diagnostics/self-test.json
+            artifacts/native-tests/self-test.json
+          if-no-files-found: warn

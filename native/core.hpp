@@ -135,9 +135,15 @@ public:
   void collect();
   std::vector<std::pair<std::wstring, double>> values(const std::wstring& key);
 };
+#ifdef TASKMGR_DIAGNOSTICS
+struct NetworkSmokeResult;
+#endif
 class NetworkTrace {
   struct State;
   std::unique_ptr<State> state;
+#ifdef TASKMGR_DIAGNOSTICS
+  explicit NetworkTrace(bool measure);
+#endif
 public:
   NetworkTrace();
   ~NetworkTrace();
@@ -145,6 +151,7 @@ public:
   bool sample(std::span<Process> processes);
 #ifdef TASKMGR_DIAGNOSTICS
   DWORD status() const;
+  friend NetworkSmokeResult networkTraceSmoke();
 #endif
 };
 class Sampler {
@@ -210,6 +217,15 @@ std::vector<std::pair<std::string, bool>> counterSamplingTests();
 std::vector<std::pair<std::string, bool>> processSamplingTests();
 std::vector<std::pair<std::string, bool>> traceSamplingTests();
 std::vector<std::pair<std::string, bool>> traceLifecycleTests();
+struct NetworkSmokeResult {
+  bool passed = false, skipped = false;
+  std::string reason;
+  DWORD traceStatus = ERROR_SUCCESS, socketStatus = ERROR_SUCCESS;
+  uint64_t sentBytes = 0, receivedBytes = 0, deliveredEvents = 0, decodedEvents = 0, ownUdpEvents = 0;
+  unsigned sentDatagrams = 0, receivedDatagrams = 0, samples = 0;
+  double peakBytesPerSecond = 0, elapsedMilliseconds = 0;
+};
+NetworkSmokeResult networkTraceSmoke();
 std::vector<std::pair<std::string, bool>> iconCacheTests();
 std::vector<std::pair<std::string, bool>> serviceInventoryTests();
 std::vector<std::pair<std::string, bool>> memoryHardwareTests();

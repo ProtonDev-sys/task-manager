@@ -126,6 +126,12 @@ const std::vector<PerfItem>& Application::perfItems() const {
   for (const auto& gpu : current->gpus) result.push_back({L"gpu/" + gpu.key, L"GPU " + std::to_wstring(gpu.index), gpu.name, number(gpu.usage, 0) + L"%" + (gpu.temperature >= 0 ? L" (" + number(gpu.temperature, 0) + L" °C)" : L""), gpu.name, GpuColor});
   return result;
 }
+static size_t selectedResourceIndex(const std::vector<PerfItem>& items, std::wstring_view key) {
+  const auto found = std::find_if(items.begin(), items.end(), [&](const PerfItem& item) { return item.key == key; });
+  // Hotplug can remove the selection before the next paint. Copy and keyboard
+  // navigation must resolve that case exactly as rendering does.
+  return found == items.end() ? 0 : size_t(found - items.begin());
+}
 void Application::recordHistories(double now) {
   histories[L"cpu"].add(now, current->cpu);
   for (size_t index = 0; index < current->cores.size(); ++index) histories[L"core/" + std::to_wstring(index)].add(now, current->cores[index]);
@@ -147,8 +153,8 @@ void Application::paintPerformance(HDC dc, RECT bounds) {
   FillRect(dc, &bounds, backgroundBrush); SetBkMode(dc, TRANSPARENT);
   const auto& items = perfItems();
   if (items.empty()) { text(dc, L"Collecting performance data…", font, themeColor(LabelColor), {scale(250), scale(30), bounds.right, scale(60)}); return; }
-  if (std::none_of(items.begin(), items.end(), [&](const PerfItem& item) { return item.key == selectedResource; })) selectedResource = items.front().key;
-  const auto& selected = *std::find_if(items.begin(), items.end(), [&](const PerfItem& item) { return item.key == selectedResource; });
+  const auto& selected = items[selectedResourceIndex(items, selectedResource)];
+  if (selectedResource != selected.key) { selectedResource = selected.key; sidebarScroll = 0; }
   if (summary == 1) { paintDetail(dc, {bounds.left + scale(8), bounds.top, bounds.right - scale(8), bounds.bottom - scale(8)}, selected); return; }
   if (summary == 2) { paintSidebar(dc, bounds, items); return; }
   const int sidebar = scale(222);
@@ -322,9 +328,10 @@ void Application::paintDetail(HDC dc, RECT bounds, const PerfItem& item) {
 }
 std::wstring Application::performanceSummary() const {
   if (!current) return L"";
-  const auto& items = perfItems(); std::wstring result;
-  for (const auto& item : items) if (item.key == selectedResource) { result = item.title + L"\r\n\r\n\t" + item.description + L"\r\n\r\n\t" + item.value + L"\r\n"; break; }
-  if (selectedResource == L"cpu") result += L"\tProcesses:\t" + std::to_wstring(current->processes.size()) + L"\r\n\tThreads:\t" + std::to_wstring(current->threads) + L"\r\n\tHandles:\t" + std::to_wstring(current->handles) + L"\r\n\tUp time:\t" + duration(current->uptime) + L"\r\n";
+  const auto& items = perfItems(); if (items.empty()) return L"";
+  const auto& item = items[selectedResourceIndex(items, selectedResource)];
+  std::wstring result = item.title + L"\r\n\r\n\t" + item.description + L"\r\n\r\n\t" + item.value + L"\r\n";
+  if (item.key == L"cpu") result += L"\tProcesses:\t" + std::to_wstring(current->processes.size()) + L"\r\n\tThreads:\t" + std::to_wstring(current->threads) + L"\r\n\tHandles:\t" + std::to_wstring(current->handles) + L"\r\n\tUp time:\t" + duration(current->uptime) + L"\r\n";
   return result;
 }
 void Application::performanceClick(POINT point, bool right, bool twice) {
@@ -343,11 +350,12 @@ void Application::performanceClick(POINT point, bool right, bool twice) {
 void Application::performanceKey(WPARAM key) {
   if ((GetKeyState(VK_CONTROL) & 0x8000) && key == 'C') { copy(); return; }
   const auto& items = perfItems(); if (items.empty()) return;
-  int index = int(std::find_if(items.begin(), items.end(), [&](const PerfItem& item) { return item.key == selectedResource; }) - items.begin());
+  int index = int(selectedResourceIndex(items, selectedResource));
   if (key == VK_UP) --index; else if (key == VK_DOWN) ++index; else if (key == VK_HOME) index = 0; else if (key == VK_END) index = int(items.size()) - 1; else return;
   index = std::clamp(index, 0, int(items.size()) - 1); selectedResource = items[size_t(index)].key;
   RECT client{}; GetClientRect(performance, &client); const int pitch = scale(hideGraphs ? 60 : 82);
-  if (index * pitch < sidebarScroll) sidebarScroll = index * pitch; if ((index + 1) * pitch + scale(24) > sidebarScroll + client.bottom) sidebarScroll = (index + 1) * pitch + scale(24) - client.bottom;
+  if (index * pitch < sidebarScroll) sidebarScroll = index * pitch;
+  if ((index + 1) * pitch + scale(24) > sidebarScroll + client.bottom) sidebarScroll = (index + 1) * pitch + scale(24) - client.bottom;
   InvalidateRect(performance, nullptr, FALSE);
 }
 RECT Application::performanceRowRect(int index) const {

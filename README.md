@@ -37,9 +37,10 @@ If you need to restore Windows Task Manager outside the UI, run this from an adm
 - **Performance:** CPU and per-logical-processor graphs, memory usage, disk activity, network throughput and GPU engines. Available hardware details depend on Windows and the device's drivers.
 - **App history:** locally recorded CPU time, with a reset option.
 - **Startup:** Run entries, startup folders, boot/logon scheduled tasks, automatic services and drivers, and packaged startup declarations. Supported Run and folder entries can be enabled or disabled; other sources link to Windows management tools.
-- **Users, Details and Services:** session activity, process metadata and controls, service status and start/stop/restart actions. Windows protection and permissions still apply.
+- **Users, Details and Services:** session activity, process metadata and controls, service status and start/stop/restart actions. Failed service refreshes retain the last known rows and show an unavailable or outdated status with the Windows error code; F5 retries immediately. Windows protection and permissions still apply.
 - **Appearance:** Light, Dark and Use Windows setting; High Contrast follows system colours. Columns and sorting are saved separately for each tab.
 - **Search:** filter table rows by text or combine exact PID, name, publisher, command line, path, account and status fields. Quoted values and field exclusions are supported. Matching groups retain their context. Search does not request a fresh system sample.
+- **Export:** save the currently filtered and sorted table to a UTF-8 CSV file with **File > Export current table** or **Ctrl+Shift+S**. The export includes the displayed columns in their current order, with complete cell text.
 
 Right-click a column heading to choose visible columns. **Ctrl+F** opens search; **Enter** applies it immediately and focuses the results; **Esc** clears it. **F5** refreshes. **Ctrl+Tab** cycles tabs, and **Alt+1** through **Alt+7** selects one directly. Double-click a Performance graph or its sidebar to enter a summary view.
 
@@ -64,6 +65,12 @@ Plain text remains a case-insensitive substring, including spaces: `Orbit Browse
 | `user:alice status:"not responding"` | A process associated with an account containing `alice` that is not responding. |
 
 Fields are `name`, `pid`, `publisher`, `command`, `path`, `user` and `status`. They use the current snapshot and available metadata; an unavailable field cannot satisfy a positive term. Startup, service and history entries use the corresponding fields where available. User rows can also match the session account and status. For process groups, one member must satisfy the whole query. The group and its visible children remain together, so some context rows may not match individually. Group headings retain their unfiltered totals. Performance resources are not filtered.
+
+### Exporting a table
+
+Export captures the rows and displayed values when you invoke it, including expanded group rows. Category headings and hidden columns are omitted. Refreshes while the Save dialog is open do not change that snapshot. Saving runs in the background; the existing destination is replaced only after the new file has been completely written.
+
+CSV files use UTF-8 with an encoding marker, quoted fields, and CRLF record endings. Quotes and embedded newlines are preserved. Formula-like cell text is prefixed with an apostrophe for spreadsheet import; embedded NUL characters are replaced with the Unicode replacement character. These are display-value exports rather than a raw numeric data feed. Export is available on table tabs with results in the full view.
 
 ## Differences from Windows Task Manager
 

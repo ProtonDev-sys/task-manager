@@ -15,7 +15,8 @@ static const wchar_t* tabNames[] = {L"Processes", L"Performance", L"App history"
 Application::Application(RunOptions value) : options(std::move(value)) {}
 #endif
 Application::~Application() {
-  stopping = true; wake.notify_all(); if (sampler.joinable()) sampler.join();
+  { std::lock_guard lock(workerMutex); stopping = true; }
+  wake.notify_all(); if (sampler.joinable()) sampler.join();
 #ifdef TASKMGR_DIAGNOSTICS
   if (inputProbe.joinable()) inputProbe.join();
 #endif
@@ -90,6 +91,7 @@ int Application::run() {
     if (message.message == WM_KEYDOWN && control && message.wParam == VK_TAB && !compact && !summary) { requestTab(((pendingTab >= 0 ? pendingTab : TabCtrl_GetCurSel(tabs)) + (shift ? TabCount - 1 : 1)) % TabCount); continue; }
     if (message.message == WM_SYSKEYDOWN && alt && message.wParam >= '1' && message.wParam <= '7' && !compact && !summary) { requestTab(int(message.wParam - '1')); continue; }
     if (message.message == WM_KEYDOWN && control && shift && message.wParam == 'N') { command(RunId); continue; }
+    if (message.message == WM_KEYDOWN && control && shift && message.wParam == 'S') { command(ExportId); continue; }
     if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE && summary) { setSummary(0); continue; }
     if (!IsDialogMessageW(window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
   }
@@ -100,7 +102,7 @@ void Application::createFonts() {
   for (auto object : {font, percentFont, headingFont, titleFont, subtitleFont, labelFont, valueFont, sidebarFont, linkFont}) if (object) DeleteObject(object);
   auto make = [&](int size, bool underline = false) { return CreateFontW(-scale(size), 0, 0, 0, FW_NORMAL, FALSE, underline, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI"); };
   font = make(12); percentFont = make(16); headingFont = make(16); titleFont = make(28); subtitleFont = make(15); labelFont = make(12); valueFont = make(24); sidebarFont = make(16); linkFont = make(12, true);
-  for (const auto control : {tabs, list, end, fewer, link, historyLink, searchBox}) if (control) SendMessageW(control, WM_SETFONT, WPARAM(font), TRUE);
+  for (const auto control : {tabs, list, end, fewer, link, historyLink, serviceStatus, searchBox}) if (control) SendMessageW(control, WM_SETFONT, WPARAM(font), TRUE);
 }
 void Application::create() {
   createFonts();
@@ -119,6 +121,7 @@ void Application::create() {
   fewer = control(L"BUTTON", L"Fewer details", BS_OWNERDRAW | WS_TABSTOP, FewerId);
   link = control(L"BUTTON", L"Open Resource Monitor", BS_OWNERDRAW | WS_TABSTOP, LinkId);
   historyLink = control(L"BUTTON", L"Delete usage history", BS_OWNERDRAW | WS_TABSTOP, HistoryLinkId);
+  serviceStatus = control(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, ServiceStatusId);
   for (const auto button : {fewer, link, historyLink}) SetWindowSubclass(button, linkProcedure, 3, reinterpret_cast<DWORD_PTR>(this));
   end = control(L"BUTTON", L"End task", BS_PUSHBUTTON | WS_TABSTOP, EndId);
   SetWindowSubclass(end, linkProcedure, 3, reinterpret_cast<DWORD_PTR>(this));
@@ -132,7 +135,7 @@ void Application::create() {
   icons = std::make_unique<Icons>(window, scale(16));
 #endif
   menuBar = CreateMenu(); const auto file = CreatePopupMenu(), options_ = CreatePopupMenu(), view = CreatePopupMenu(), speed = CreatePopupMenu(), defaults = CreatePopupMenu();
-  AppendMenuW(file, MF_STRING, RunId, L"&Run new task"); AppendMenuW(file, MF_SEPARATOR, 0, nullptr); AppendMenuW(file, MF_STRING, ExitId, L"E&xit");
+  AppendMenuW(file, MF_STRING, RunId, L"&Run new task"); AppendMenuW(file, MF_STRING, ExportId, L"&Export current table...\tCtrl+Shift+S"); AppendMenuW(file, MF_SEPARATOR, 0, nullptr); AppendMenuW(file, MF_STRING, ExitId, L"E&xit");
   AppendMenuW(options_, MF_STRING, TopmostId, L"&Always on top"); AppendMenuW(options_, MF_STRING, MinimizeOnUseId, L"&Minimize on use"); AppendMenuW(options_, MF_STRING, HideId, L"&Hide when minimized");
   AppendMenuW(options_, MF_STRING, ReplaceDefaultId, L"&Replace default Task Manager");
   const auto themes = CreatePopupMenu();
@@ -163,7 +166,7 @@ void Application::layout() {
   RECT area{}; GetClientRect(window, &area); const int width = area.right, height = area.bottom;
   const int footer = scale(50);
   if (summary) {
-    for (const auto control : {tabs, list, end, fewer, link, historyLink, searchBox}) show(control, false);
+    for (const auto control : {tabs, list, end, fewer, link, historyLink, serviceStatus, searchBox}) show(control, false);
     show(performance, true); place(performance, 0, 0, width, height); InvalidateRect(performance, nullptr, FALSE); return;
   }
   updateFooter();
@@ -179,16 +182,26 @@ void Application::layout() {
   place(perf ? performance : list, 0, top, width, bottom - top);
   if (compact) ListView_SetColumnWidth(list, 0, std::max(scale(100), width - GetSystemMetrics(SM_CXVSCROLL) - scale(4)));
   HDC dc = GetDC(window); SelectObject(dc, font); SIZE text{}; auto measure = [&](HWND control) { wchar_t value[128]{}; GetWindowTextW(control, value, 128); GetTextExtentPoint32W(dc, value, int(wcslen(value)), &text); return int(text.cx); };
-  const int fewerWidth = measure(fewer) + scale(34), linkWidth = measure(link) + scale(8), historyWidth = measure(historyLink) + scale(4);
-  std::wstring since = L"Resource usage since " + [&] { SYSTEMTIME now{}; GetLocalTime(&now); FILETIME file{}; SystemTimeToFileTime(&now, &file); ULARGE_INTEGER value{file.dwLowDateTime, file.dwHighDateTime}; value.QuadPart -= ULONGLONG(std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - historySince).count()) * 10000000ULL; file = {value.LowPart, value.HighPart}; SYSTEMTIME local{}; FileTimeToSystemTime(&file, &local); wchar_t date[64]{}; GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &local, nullptr, date, 64, nullptr); return std::wstring(date); }() + L" for current user account.";
-  GetTextExtentPoint32W(dc, since.c_str(), int(since.size()), &text); const int sinceWidth = text.cx; ReleaseDC(window, dc);
+  const int fewerWidth = measure(fewer) + scale(34), linkWidth = measure(link) + scale(8);
+  const bool showHistory = selectedTab == HistoryTab && !compact;
+  int historyWidth = 0, sinceWidth = 0;
+  if (showHistory) {
+    historyWidth = measure(historyLink) + scale(4);
+    const std::wstring since = L"Resource usage since " + [&] { SYSTEMTIME now{}; GetLocalTime(&now); FILETIME file{}; SystemTimeToFileTime(&now, &file); ULARGE_INTEGER value{file.dwLowDateTime, file.dwHighDateTime}; value.QuadPart -= ULONGLONG(std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - historySince).count()) * 10000000ULL; file = {value.LowPart, value.HighPart}; SYSTEMTIME local{}; FileTimeToSystemTime(&file, &local); wchar_t date[64]{}; GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &local, nullptr, date, 64, nullptr); return std::wstring(date); }() + L" for current user account.";
+    GetTextExtentPoint32W(dc, since.c_str(), int(since.size()), &text); sinceWidth = text.cx;
+  }
+  ReleaseDC(window, dc);
   const int middle = height - footer / 2;
   place(fewer, scale(8), middle - scale(12), fewerWidth, scale(24));
   const bool showFewer = compact || selectedTab == ProcessesTab;
   place(link, showFewer ? scale(8) + fewerWidth + scale(12) : scale(10), middle - scale(12), linkWidth, scale(24));
+  if (selectedTab == ServicesTab && !compact) {
+    const int left = scale(10) + linkWidth + scale(16);
+    place(serviceStatus, left, middle - scale(16), std::max(1, width - left - scale(10)), scale(34));
+  }
   place(end, width - scale(10) - scale(82), middle - scale(12), scale(82), scale(23));
-  if (selectedTab == HistoryTab && !compact) place(historyLink, scale(9) + sinceWidth + scale(8), tabBottom + scale(8), historyWidth, scale(20));
-  show(historyLink, selectedTab == HistoryTab && !compact);
+  if (showHistory) place(historyLink, scale(9) + sinceWidth + scale(8), tabBottom + scale(8), historyWidth, scale(20));
+  show(historyLink, showHistory);
   show(fewer, showFewer);
   InvalidateRect(window, nullptr, TRUE);
   if (perf) InvalidateRect(performance, nullptr, FALSE);
@@ -209,6 +222,17 @@ void Application::updateFooter() {
   if (linkText && !compact) { wchar_t current_[64]{}; GetWindowTextW(link, current_, 64); if (wcscmp(current_, linkText)) SetWindowTextW(link, linkText); ShowWindow(link, SW_SHOWNA); } else ShowWindow(link, SW_HIDE);
   const auto fewerText = compact ? L"More details" : L"Fewer details";
   GetWindowTextW(fewer, existing, 64); if (wcscmp(existing, fewerText)) SetWindowTextW(fewer, fewerText);
+  if (serviceStatus) {
+    std::wstring status;
+    if (selectedTab == ServicesTab && !compact && !summary && current && current->inventory && current->inventory->servicesError != ERROR_SUCCESS) {
+      status = current->services.empty() ? L"Services unavailable" : L"Services may be outdated";
+      status += L" (error " + std::to_wstring(current->inventory->servicesError) + L"). Press F5 to retry.";
+    }
+    wchar_t previous[128]{}; GetWindowTextW(serviceStatus, previous, 128);
+    if (status != previous) SetWindowTextW(serviceStatus, status.c_str());
+    const bool statusVisible = !status.empty();
+    if (((GetWindowLongPtrW(serviceStatus, GWL_STYLE) & WS_VISIBLE) != 0) != statusVisible) ShowWindow(serviceStatus, statusVisible ? SW_SHOWNA : SW_HIDE);
+  }
 }
 void Application::paintWindow(HDC dc) {
   RECT area{}; GetClientRect(window, &area);
@@ -297,6 +321,7 @@ void Application::updateMenu(HMENU popup) {
   CheckMenuRadioItem(popup, ThemeLightId, ThemeSystemId, UINT(ThemeLightId + theme), MF_BYCOMMAND);
   check(SearchId, searchVisible); EnableMenuItem(popup, SearchId, MF_BYCOMMAND | ((compact || summary || selectedTab == PerformanceTab) ? MF_GRAYED : MF_ENABLED));
   EnableMenuItem(popup, ReplaceDefaultId, MF_BYCOMMAND | (actionBusy ? MF_GRAYED : MF_ENABLED));
+  EnableMenuItem(popup, ExportId, MF_BYCOMMAND | (canExportTable() && !actionBusy ? MF_ENABLED : MF_GRAYED));
   const int speed = interval == 250 ? SpeedAdaptive : interval == 500 ? SpeedHigh : interval == 4000 ? SpeedLow : interval == 0 ? SpeedPause : SpeedNormal;
   CheckMenuRadioItem(popup, SpeedHigh, SpeedAdaptive, UINT(speed), MF_BYCOMMAND);
   CheckMenuRadioItem(popup, DefaultTabId, DefaultTabId + TabCount - 1, UINT(DefaultTabId + defaultTab), MF_BYCOMMAND);
@@ -467,37 +492,204 @@ void Application::readHistoryFile(const std::wstring& path) {
 }
 void Application::saveHistory() { if (persistent() && !historyFile.empty()) writeHistoryFile(historyFile); }
 void Application::loadHistory() { readHistoryFile(historyFile); }
+static int nextSamplingRetry(int previous) { return previous <= 0 ? 250 : previous >= 2000 ? 4000 : previous * 2; }
 void Application::worker() {
-  try {
-    const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    Sampler source(!hidden(), [this] { wake.notify_all(); });
-    double samplingCost = 0;
-    while (!stopping) {
-      const auto sampleStarted = Clock::now();
-      auto sample = std::make_shared<Sample>(source.sample(startupVisible.load()));
-      const double cost = milliseconds(sampleStarted); samplingCost = samplingCost == 0 ? cost : samplingCost * .8 + cost * .2;
-      { std::lock_guard lock(workerMutex); pending = std::move(sample);
+  struct Apartment {
+    HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    ~Apartment() { if (SUCCEEDED(initialized)) CoUninitialize(); }
+  } apartment;
+  // COM must outlive the sampler, including constructor failures and shutdown.
+  std::optional<Sampler> source;
+  double samplingCost = 0;
+  int retry = 0;
+  bool postedFailure = false;
+  const auto startupReady = [&] { return source && source->startupReady(); };
+  const auto postStatus = [&](bool failed) {
 #ifdef TASKMGR_DIAGNOSTICS
-        published = Clock::now();
+    if (samplingStatusNotification) return samplingStatusNotification(failed);
 #endif
+    return window && PostMessageW(window, SamplingStatusMessage, 0, 0) != FALSE;
+  };
+  while (!stopping) {
+    Time sampleStarted{};
+    std::shared_ptr<Sample> sample;
+    try {
+#ifdef TASKMGR_DIAGNOSTICS
+      if (samplingOverride) { sampleStarted = Clock::now(); sample = std::make_shared<Sample>(samplingOverride()); }
+      else
+#endif
+      {
+        if (!source) source.emplace(!hidden(), [this] { wake.notify_all(); });
+        sampleStarted = Clock::now(); sample = std::make_shared<Sample>(source->sample(startupVisible.load()));
       }
-      if (!notification.exchange(true)) PostMessageW(window, SampleMessage, 0, 0);
-      std::unique_lock lock(workerMutex); const int delay = interval.load();
+      const double cost = milliseconds(sampleStarted); samplingCost = samplingCost == 0 ? cost : samplingCost * .8 + cost * .2;
+    } catch (...) {
+      // Keep the last published snapshot and the sampler's owned inventories.
+      // An interrupted sample never reaches the UI, and startup work can finish
+      // while this thread waits to retry instead of being destroyed on failure.
+    }
+    std::unique_lock lock(workerMutex);
+    if (stopping) break;
+    const bool failed = !sample;
+#ifdef TASKMGR_DIAGNOSTICS
+    if (failed) ++samplingFailures;
+#endif
+    if (!failed) {
+      pending = std::move(sample); retry = 0;
+#ifdef TASKMGR_DIAGNOSTICS
+      published = Clock::now();
+#endif
+      if (!notification.exchange(true) && window && !PostMessageW(window, SampleMessage, 0, 0)) notification = false;
+    }
+    samplingFailed = failed;
+    // Advance only after Windows accepts the message. A full queue must not
+    // permanently lose a failure or recovery transition on later iterations.
+    if (failed != postedFailure && postStatus(failed)) postedFailure = failed;
+#ifdef TASKMGR_DIAGNOSTICS
+    if (samplingOverride) wake.notify_all();
+#endif
+    const int delay = interval.load();
+    if (failed) {
+      retry = nextSamplingRetry(retry);
+      // Startup-ready notifications cannot bypass the retry bound. Refresh,
+      // cadence changes and shutdown can always interrupt it, including pause.
+      wake.wait_for(lock, std::chrono::milliseconds(retry), [&] { return stopping || force || interval.load() != delay; });
+    } else {
       if (!delay) {
-        while (source.startupPending() && !source.startupReady() && !stopping && !force && interval.load() == 0) wake.wait_for(lock, std::chrono::milliseconds(100));
-        if (!source.startupReady()) wake.wait(lock, [&] { return stopping || force || interval.load() != 0; });
+        while (source && source->startupPending() && !startupReady() && !stopping && !force && interval.load() == 0) wake.wait_for(lock, std::chrono::milliseconds(100));
+        if (!startupReady()) wake.wait(lock, [&] { return stopping || force || interval.load() != 0; });
       }
       else {
         const int requested = delay == 250 ? (fastVisible ? adaptiveRefreshInterval(samplingCost, displayCost.load()) : 1000) : delay;
         const auto cadence = std::chrono::milliseconds(minimized ? std::max(requested, 4000) : requested);
         const auto deadline = std::max(sampleStarted + cadence, Clock::now() + std::chrono::milliseconds(25));
-        wake.wait_until(lock, deadline, [&] { return stopping || force || source.startupReady() || interval.load() != delay; });
+        wake.wait_until(lock, deadline, [&] { return stopping || force || startupReady() || interval.load() != delay; });
       }
-      if (forceInventory) source.invalidateInventory(); force = forceInventory = false;
     }
-    if (SUCCEEDED(initialized)) CoUninitialize();
-  } catch (const std::exception& exception) { std::lock_guard lock(actionMutex); actionResults.push_back({fromUtf8(exception.what()), L""}); PostMessageW(window, ActionMessage, 0, 0); }
+    if (forceInventory && source) source->invalidateInventory();
+    force = forceInventory = false;
+  }
 }
+#ifdef TASKMGR_DIAGNOSTICS
+bool Application::verifyWorkerRecovery() {
+  bool passed = true;
+  const auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  int retry = 0;
+  for (const int expected : {250, 500, 1000, 2000, 4000, 4000}) { retry = nextSamplingRetry(retry); check(retry == expected, "worker-retry-bounded-backoff"); }
+  check(nextSamplingRetry(0) == 250 && nextSamplingRetry(INT_MAX) == 4000, "worker-retry-reset-and-no-overflow");
+  struct ApartmentState {
+    HRESULT result; APTTYPE type; APTTYPEQUALIFIER qualifier;
+    bool operator==(const ApartmentState&) const = default;
+  };
+  const auto apartmentState = [] {
+    ApartmentState state{S_OK, APTTYPE_CURRENT, APTTYPEQUALIFIER_NONE};
+    state.result = CoGetApartmentType(&state.type, &state.qualifier); return state;
+  };
+  {
+    std::promise<bool> completed; auto completion = completed.get_future();
+    std::atomic<unsigned> attempts{0}; std::atomic<bool> recover{false}, apartmentActive{true};
+    Application fixture(RunOptions{}); fixture.interval = 0;
+    fixture.pending = std::make_shared<Sample>(); fixture.pending->cpu = 99;
+    const auto retained = fixture.pending;
+    fixture.samplingOverride = [&] {
+      const auto apartment = apartmentState();
+      if (FAILED(apartment.result) || apartment.type != APTTYPE_MTA || apartment.qualifier == APTTYPEQUALIFIER_IMPLICIT_MTA) apartmentActive = false;
+      const unsigned attempt = ++attempts;
+      if (!recover) { if (attempt == 1) throw std::runtime_error("owned transient sample failure"); throw 1; }
+      Sample result; result.cpu = double(attempt); return result;
+    };
+    fixture.sampler = std::thread([&] { const auto before = apartmentState(); fixture.worker(); completed.set_value(apartmentState() == before); });
+    const auto waitFor = [&](auto predicate) { std::unique_lock lock(fixture.workerMutex); return fixture.wake.wait_for(lock, std::chrono::seconds(3), predicate); };
+    check(waitFor([&] { return fixture.samplingFailed.load(); }), "worker-exception-enters-retry-state");
+    { std::lock_guard lock(fixture.workerMutex); check(fixture.pending == retained && fixture.actionResults.empty(), "worker-failure-retains-last-good-snapshot-without-dialogs"); }
+    check(waitFor([&] { return fixture.samplingFailures >= 2u && fixture.samplingFailed; }), "worker-retries-standard-and-unknown-exceptions");
+    fixture.beginSamplingMeasurement();
+    check(!fixture.samplingHealthyAtStart && !fixture.samplingMeasurementHealthy(), "worker-measurement-rejects-failure-at-start");
+    recover = true;
+    check(waitFor([&] { return fixture.pending != retained && !fixture.samplingFailed; }), "worker-recovers-with-fresh-snapshot-and-clears-status");
+    check(!fixture.samplingMeasurementHealthy(), "worker-recovery-cannot-repair-unhealthy-measurement-start");
+    fixture.beginSamplingMeasurement();
+    const auto failures = fixture.samplingFailureBaseline;
+    check(failures >= 2u && fixture.samplingMeasurementHealthy(), "worker-recovered-warmup-can-start-healthy-measurement");
+    unsigned recovered = attempts.load();
+    {
+      std::unique_lock lock(fixture.workerMutex);
+      check(fixture.pending && fixture.pending->cpu == double(recovered) && fixture.notification && apartmentActive, "worker-publishes-only-complete-sample-inside-apartment");
+      check(!fixture.wake.wait_for(lock, std::chrono::milliseconds(50), [&] { return attempts.load() != recovered; }), "worker-recovery-respects-paused-cadence");
+    }
+    fixture.refresh(false);
+    check(waitFor([&] { return fixture.pending && fixture.pending->cpu == double(recovered + 1); }), "worker-paused-manual-refresh-publishes-once");
+    {
+      std::unique_lock lock(fixture.workerMutex);
+      check(!fixture.wake.wait_for(lock, std::chrono::milliseconds(50), [&] { return attempts.load() != recovered + 1; }), "worker-manual-refresh-remains-paused");
+      fixture.stopping = true;
+    }
+    fixture.wake.notify_all();
+    const bool stopped = completion.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    check(stopped, "worker-shutdown-interrupts-paused-wait");
+    if (!stopped) fixture.wake.notify_all();
+    fixture.sampler.join();
+    check(fixture.samplingFailures == failures && fixture.samplingMeasurementHealthy(), "worker-success-does-not-add-sampling-failures");
+    check(completion.get(), "worker-balances-new-com-apartment-on-exit");
+    check(fixture.actionResults.empty(), "worker-recovery-never-queues-modal-errors");
+
+    // Exercise the actual status-message route on an invisible owned window.
+    fixture.window = CreateWindowExW(0, L"STATIC", L"Task Manager", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(fixture.window != nullptr, "worker-status-fixture-window");
+    if (fixture.window) {
+      SetWindowLongPtrW(fixture.window, GWLP_USERDATA, LONG_PTR(&fixture));
+      fixture.samplingFailed = true; procedure(fixture.window, SamplingStatusMessage, 0, 0);
+      wchar_t title[128]{}; GetWindowTextW(fixture.window, title, 128);
+      check(std::wstring_view(title).find(L"retrying") != std::wstring_view::npos, "worker-failure-title-is-nonmodal");
+      fixture.samplingFailed = false; procedure(fixture.window, SamplingStatusMessage, 0, 0); GetWindowTextW(fixture.window, title, 128);
+      check(std::wstring_view(title) == L"Task Manager", "worker-recovery-clears-title-without-row-changes");
+      DestroyWindow(fixture.window); fixture.window = nullptr;
+    }
+  }
+  for (const DWORD model : {DWORD(COINIT_MULTITHREADED), DWORD(COINIT_APARTMENTTHREADED)}) {
+    std::promise<bool> completed; auto completion = completed.get_future();
+    Application fixture(RunOptions{}); fixture.interval = 0;
+    fixture.samplingOverride = []() -> Sample { throw std::runtime_error("owned persistent sample failure"); };
+    fixture.sampler = std::thread([&] {
+      const auto baseline = apartmentState(); const auto initialized = CoInitializeEx(nullptr, model); const auto inherited = apartmentState();
+      fixture.worker(); const bool retained = apartmentState() == inherited;
+      if (SUCCEEDED(initialized)) CoUninitialize();
+      completed.set_value(SUCCEEDED(initialized) && retained && apartmentState() == baseline);
+    });
+    {
+      std::unique_lock lock(fixture.workerMutex);
+      check(fixture.wake.wait_for(lock, std::chrono::seconds(3), [&] { return fixture.samplingFailed.load(); }), "worker-persistent-failure-reaches-backoff");
+      fixture.stopping = true;
+    }
+    fixture.wake.notify_all();
+    const bool stopped = completion.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    check(stopped, "worker-shutdown-interrupts-error-backoff");
+    if (!stopped) fixture.wake.notify_all();
+    fixture.sampler.join();
+    check(completion.get(), model == DWORD(COINIT_MULTITHREADED) ? "worker-balances-s-false-com-initialization" : "worker-preserves-apartment-after-failed-com-initialization");
+  }
+  {
+    std::atomic<bool> recover{false}; std::vector<std::pair<bool, bool>> messages;
+    Application fixture(RunOptions{}); fixture.interval = 25;
+    fixture.samplingOverride = [&]() -> Sample { if (!recover) throw std::runtime_error("owned status notification failure"); return {}; };
+    fixture.samplingStatusNotification = [&](bool failed) { const bool accepted = messages.size() % 2 != 0; messages.emplace_back(failed, accepted); return accepted; };
+    fixture.beginSamplingMeasurement();
+    fixture.sampler = std::thread([&] { fixture.worker(); });
+    {
+      std::unique_lock lock(fixture.workerMutex);
+      check(fixture.wake.wait_for(lock, std::chrono::seconds(3), [&] { return messages.size() >= 2; }), "worker-retries-failed-error-status-post");
+      recover = true;
+      check(fixture.wake.wait_for(lock, std::chrono::seconds(3), [&] { return messages.size() >= 4; }), "worker-retries-failed-recovery-status-post");
+      check(messages == std::vector<std::pair<bool, bool>>{{true, false}, {true, true}, {false, false}, {false, true}}, "worker-status-advances-only-after-successful-post");
+      check(!fixture.wake.wait_for(lock, std::chrono::milliseconds(50), [&] { return messages.size() > 4; }), "worker-unchanged-status-does-not-post-again");
+      fixture.stopping = true;
+    }
+    fixture.wake.notify_all(); fixture.sampler.join();
+    check(!fixture.samplingFailed && fixture.samplingFailures >= 2u && !fixture.samplingMeasurementHealthy(), "worker-recovered-failure-inside-measurement-remains-unhealthy");
+  }
+  return passed;
+}
+#endif
 void Application::consume() {
   if (rebuilding || verifyingSorting) return;
   if (!hidden() && (GetKeyState(VK_CONTROL) & 0x8000)) return;
@@ -573,7 +765,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
   case WM_CREATE: app->create(); return 0;
   case WM_SETTINGCHANGE: case WM_THEMECHANGED: app->indexedServices.clear(); app->indexedInventory.reset(); app->applyTheme(); return 0;
   case WM_ERASEBKGND: { RECT bounds{}; GetClientRect(target, &bounds); FillRect(HDC(word), &bounds, app->backgroundBrush ? app->backgroundBrush : GetStockBrush(WHITE_BRUSH)); return 1; }
-  case WM_CTLCOLOREDIT: { const HDC dc = HDC(word); SetTextColor(dc, app->themeColor(RGB(0, 0, 0))); SetBkColor(dc, app->themeColor(RGB(255, 255, 255))); return LRESULT(app->backgroundBrush); }
+  case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: { const HDC dc = HDC(word); SetTextColor(dc, app->themeColor(RGB(0, 0, 0))); SetBkColor(dc, app->themeColor(RGB(255, 255, 255))); return LRESULT(app->backgroundBrush); }
   case WM_APP + 11:
     if (app->persistent() && !GetPrivateProfileIntW(L"Window", L"ReplacementPrompted", 0, app->preferences.c_str())) {
       const bool enabled = replacementEnabled();
@@ -594,6 +786,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     return 0;
   }
   case SampleMessage: app->consume(); return 0;
+  case SamplingStatusMessage: SetWindowTextW(target, app->samplingFailed ? L"Task Manager - Live updates unavailable; retrying..." : L"Task Manager"); return 0;
   case IconMessage: app->icons->consume(); if (!app->iconRefreshQueued) app->iconRefreshQueued = SetTimer(target, 2, app->hidden() ? 10 : 120, nullptr) != 0; return 0;
   case ActionMessage: { std::deque<ActionResult> results; { std::lock_guard lock(app->actionMutex); results.swap(app->actionResults); } for (const auto& result : results) { if (!app->hidden() && !result.error.empty()) MessageBoxW(target, result.error.c_str(), L"Task Manager", MB_OK | MB_ICONERROR); if (!app->hidden() && !result.report.empty()) DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(103), target, [](HWND dialog, UINT code, WPARAM parameter, LPARAM value) -> INT_PTR { if (code == WM_INITDIALOG) { SetDlgItemTextW(dialog, 1001, reinterpret_cast<const wchar_t*>(value)); return TRUE; } if (code == WM_COMMAND && (LOWORD(parameter) == IDOK || LOWORD(parameter) == IDCANCEL)) { EndDialog(dialog, IDOK); return TRUE; } return FALSE; }, LPARAM(result.report.c_str())); } app->refresh(); return 0; }
   case TrayMessage:
@@ -724,7 +917,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     break;
   }
   case WM_PAINT: { PAINTSTRUCT paint{}; HDC dc = BeginPaint(target, &paint); app->paintWindow(dc); EndPaint(target, &paint); return 0; }
-  case WM_CLOSE: app->closing = true; app->saveSettings(); app->saveHistory(); app->stopping = true; app->wake.notify_all(); if (app->trayAdded) Shell_NotifyIconW(NIM_DELETE, &app->tray); DestroyWindow(target); return 0;
+  case WM_CLOSE: app->closing = true; app->saveSettings(); app->saveHistory(); { std::lock_guard lock(app->workerMutex); app->stopping = true; } app->wake.notify_all(); if (app->trayAdded) Shell_NotifyIconW(NIM_DELETE, &app->tray); DestroyWindow(target); return 0;
   case WM_DESTROY: PostQuitMessage(0); return 0;
   }
   return DefWindowProcW(target, message, word, data);
