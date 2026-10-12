@@ -26,6 +26,41 @@ PowerPolicy powerPolicy(const Process& process) {
   Handle handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process.id)); verify(handle.value, process, false);
   return readPowerPolicy(handle.value);
 }
+static PowerPolicy requestedPowerPolicy(const PowerPolicy& original, bool enabled, const PowerPolicy* saved) {
+  PowerPolicy requested = original;
+  const DWORD execution = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+  if (enabled) {
+    requested.priority = IDLE_PRIORITY_CLASS; requested.control |= execution; requested.state |= execution;
+  } else if (saved) {
+    if (original.priority == IDLE_PRIORITY_CLASS) requested.priority = saved->priority;
+    requested.control = (original.control & ~execution) | (saved->control & execution);
+    requested.state = (original.state & ~execution) | (saved->state & execution);
+  } else {
+    // Without a saved policy, another application enabled EcoQoS. Its priority
+    // is not ours to restore; explicitly disable only execution throttling.
+    requested.control |= execution; requested.state &= ~execution;
+  }
+  return requested;
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> powerPolicyTests() {
+  const DWORD execution = PROCESS_POWER_THROTTLING_EXECUTION_SPEED, unrelated = 0x80000000u;
+  const PowerPolicy baseline{BELOW_NORMAL_PRIORITY_CLASS, unrelated, unrelated};
+  const auto enabled = requestedPowerPolicy(baseline, true, nullptr);
+  const auto restored = requestedPowerPolicy(enabled, false, &baseline);
+  auto externallyChanged = enabled; externallyChanged.priority = NORMAL_PRIORITY_CLASS;
+  const auto external = requestedPowerPolicy(externallyChanged, false, &baseline);
+  const auto unmanaged = requestedPowerPolicy({BELOW_NORMAL_PRIORITY_CLASS, execution | unrelated, execution | unrelated}, false, nullptr);
+  return {
+    {"efficiency_enabling_preserves_unrelated_policy", enabled.priority == IDLE_PRIORITY_CLASS && enabled.control == (unrelated | execution) && enabled.state == (unrelated | execution)},
+    {"efficiency_restores_owned_priority_and_policy", restored.priority == baseline.priority && restored.control == baseline.control && restored.state == baseline.state},
+    {"efficiency_preserves_externally_changed_priority", external.priority == NORMAL_PRIORITY_CLASS && external.control == baseline.control && external.state == baseline.state},
+    {"efficiency_unmanaged_disable_preserves_priority", unmanaged.priority == BELOW_NORMAL_PRIORITY_CLASS},
+    {"efficiency_unmanaged_disable_is_explicit", (unmanaged.control & execution) && !(unmanaged.state & execution)},
+    {"efficiency_unmanaged_disable_preserves_other_mechanisms", (unmanaged.control & unrelated) && (unmanaged.state & unrelated)}
+  };
+}
+#endif
 void efficiencyAction(const Process& process, bool enabled) {
   static std::mutex gate;
   static std::unordered_map<Identity, PowerPolicy, IdentityHash> previous;
@@ -44,21 +79,14 @@ void efficiencyAction(const Process& process, bool enabled) {
   // Another actor can clear EcoQoS before a queued disable runs. Our priority
   // change still needs restoring, even when execution throttling is already off.
   if (active == enabled && (enabled || !hadSaved)) return;
-  PowerPolicy requested = original;
-  if (enabled) {
-    if (previous.size() >= 256 && !hadSaved) throw std::runtime_error("Efficiency mode restoration limit reached. Disable some managed processes first.");
-    requested.priority = IDLE_PRIORITY_CLASS; requested.control |= execution; requested.state |= execution;
-  } else if (hadSaved) {
-    if (original.priority == IDLE_PRIORITY_CLASS) requested.priority = saved->second.priority;
-    requested.control = (original.control & ~execution) | (saved->second.control & execution);
-    requested.state = (original.state & ~execution) | (saved->second.state & execution);
-  }
-  else { requested.priority = NORMAL_PRIORITY_CLASS; requested.control &= ~execution; requested.state &= ~execution; }
+  if (enabled && previous.size() >= 256 && !hadSaved) throw std::runtime_error("Efficiency mode restoration limit reached. Disable some managed processes first.");
+  const auto requested = requestedPowerPolicy(original, enabled, hadSaved ? &saved->second : nullptr);
   PROCESS_POWER_THROTTLING_STATE policy{}; policy.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION; policy.ControlMask = requested.control; policy.StateMask = requested.state;
   if (enabled && !hadSaved) previous.emplace(identity, original);
-  if (!SetPriorityClass(handle.value, requested.priority)) { const auto error = winerror(); if (enabled && !hadSaved) previous.erase(identity); throw std::runtime_error(utf8(error)); }
+  const bool priorityChanged = requested.priority != original.priority;
+  if (priorityChanged && !SetPriorityClass(handle.value, requested.priority)) { const auto error = winerror(); if (enabled && !hadSaved) previous.erase(identity); throw std::runtime_error(utf8(error)); }
   if (!SetProcessInformation(handle.value, ProcessPowerThrottling, &policy, sizeof(policy))) {
-    const auto error = winerror(); const bool restored = SetPriorityClass(handle.value, original.priority) != FALSE;
+    const auto error = winerror(); const bool restored = !priorityChanged || SetPriorityClass(handle.value, original.priority) != FALSE;
     if (enabled && !hadSaved) previous.erase(identity);
     throw std::runtime_error(utf8(error + (restored ? L"" : L" Priority rollback also failed; inspect the process priority.")));
   }
@@ -132,15 +160,19 @@ std::vector<Identity> processTree(std::span<const Process> processes, const Proc
 }
 std::wstring waitChain(const Process& process) {
   Handle handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process.id)); verify(handle.value, process, false);
-  auto session = OpenThreadWaitChainSession(0, nullptr); if (!session) throw std::runtime_error(utf8(winerror()));
+  struct Session { HWCT value; ~Session() { if (value) CloseThreadWaitChainSession(value); } } session{OpenThreadWaitChainSession(0, nullptr)};
+  if (!session.value) throw std::runtime_error(utf8(winerror()));
   std::wstring result;
   Handle threads(CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)); THREADENTRY32 thread{sizeof(thread)}; unsigned inspected = 0;
-  if (threads.value != INVALID_HANDLE_VALUE && Thread32First(threads.value, &thread)) do {
+  if (threads.value == INVALID_HANDLE_VALUE) throw std::runtime_error(utf8(winerror()));
+  const bool found = Thread32First(threads.value, &thread) != FALSE;
+  if (!found && GetLastError() != ERROR_NO_MORE_FILES) throw std::runtime_error(utf8(winerror()));
+  if (found) do {
     if (thread.th32OwnerProcessID != process.id) continue;
     if (++inspected > 128) { result += L"Additional threads omitted (128-thread bound).\r\n"; break; }
     std::array<WAITCHAIN_NODE_INFO, WCT_MAX_NODE_COUNT> nodes{}; DWORD count = DWORD(nodes.size()); BOOL cycle = FALSE;
     result += L"Thread " + std::to_wstring(thread.th32ThreadID) + L": ";
-    if (!GetThreadWaitChain(session, 0, 0, thread.th32ThreadID, &count, nodes.data(), &cycle)) { result += L"Unavailable: " + winerror() + L"\r\n"; continue; }
+    if (!GetThreadWaitChain(session.value, 0, 0, thread.th32ThreadID, &count, nodes.data(), &cycle)) { result += L"Unavailable: " + winerror() + L"\r\n"; continue; }
     if (count > nodes.size()) { result += L"Chain exceeds safety bound\r\n"; continue; }
     bool stale = false;
     for (DWORD index = 0; index < count; ++index) if (nodes[index].ObjectType == WctThreadType && nodes[index].ThreadObject.ThreadId == thread.th32ThreadID && nodes[index].ThreadObject.ProcessId != process.id) stale = true;
@@ -149,7 +181,7 @@ std::wstring waitChain(const Process& process) {
     if (cycle) result += L" — possible deadlock";
     result += L"\r\n";
   } while (Thread32Next(threads.value, &thread));
-  CloseThreadWaitChainSession(session); return result.empty() ? L"No accessible threads." : result;
+  return result.empty() ? L"No accessible threads." : result;
 }
 DWORD serviceActionAccess(int action) {
   switch (action) {

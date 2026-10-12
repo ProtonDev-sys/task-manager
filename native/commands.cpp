@@ -237,9 +237,14 @@ void Application::command(int id) {
   }
   case CreateDump: {
     if (!process) return; const auto target = *process;
-    wchar_t temporary[MAX_PATH]{}; GetTempPathW(MAX_PATH, temporary); std::wstring stem = target.name; if (lower(stem).ends_with(L".exe")) stem.resize(stem.size() - 4);
-    const auto path = std::wstring(temporary) + stem + L".DMP";
-    asynchronous([target, path] { processAction(target, Action::Dump, path); return L"The file has been successfully created.\r\n\r\n" + path + L"\r\n\r\nMemory dumps may contain passwords and private data; delete it when you are finished."; });
+    asynchronous([target] {
+      // Resolve the complete temp path on the action worker and report failures.
+      // Process identity keeps separate instances and recycled PIDs from overwriting each other.
+      const auto filename = L"TaskManager-" + std::to_wstring(target.id) + L"-" + hexadecimal(target.created) + L".DMP";
+      const auto path = (std::filesystem::temp_directory_path() / filename).wstring();
+      processAction(target, Action::Dump, path);
+      return L"The file has been successfully created.\r\n\r\n" + path + L"\r\n\r\nMemory dumps may contain passwords and private data; delete it when you are finished.";
+    });
     return;
   }
   case WaitChainId: { if (!process) return; const auto target = *process; asynchronous([target] { return waitChain(target); }); return; }
