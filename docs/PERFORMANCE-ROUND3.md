@@ -4,7 +4,7 @@
 
 The changes remove repeated counter-buffer allocation, redundant Windows queries, quadratic startup-token replacement, repeated search work and unnecessary filtered-table repainting. They also add scoped search, CSV export and recovery from failed live sampling. The integrated Windows build passes the functional and responsiveness checks below.
 
-The paired experiment shows modest favorable CPU medians, slightly higher diagnostic private memory and a 22,016-byte larger production executable. **The observed timing ranges overlap, so this experiment does not establish a general whole-application speedup.** Keep the adverse and inconclusive results alongside the favorable measurements.
+The paired experiment shows modest favorable CPU medians, slightly higher diagnostic private memory and a 22,016-byte larger production executable at that study revision. **The observed timing ranges overlap, so this experiment does not establish a general whole-application speedup.** The later verified v1.3.0 release candidate is smaller than the original executable; its separate evidence is recorded below. Keep the adverse and inconclusive results alongside the favorable measurements.
 
 ## Reproducible evidence
 
@@ -66,6 +66,8 @@ Private bytes measure committed private memory, not resident RAM. The observed m
 
 The measured candidate adds 22,016 bytes (21.5 KiB), or 2.27%, while adding search, export and recovery behavior. Both production executables passed the administrator-manifest and diagnostic-exclusion checks. This table identifies the exact performance-study builds; subsequent persistence and GPU feedback fixes and release version metadata produce a different release binary and checksum.
 
+The later [v1.3.0 candidate verification](https://github.com/ProtonDev-sys/task-manager/actions/runs/38210815567), after the persistence and GPU corrections, produced a **966,144-byte** executable: **4,096 bytes (4 KiB, 0.42%) smaller than the original 970,240-byte build**. Its tested source is `4f57bc78c4aaa47f232b57d92abb945bedf562f2`, and executable SHA-256 is `fc21c6d38b8459fcba59509d6997ad39d7823abdbf18573bb3139ca2ada229ef`. The package's checksum matches the actual executable. This is the pre-merge release candidate; publication rebuilds the merged commit and provides that binary's checksum. No new paired timing or production-memory result is inferred from the final size.
+
 ## Work removed and correctness retained
 
 - **PDH arrays:** retain the bounded array buffer between reads. A stable counter set can be read in one API call, instead of allocating and doing a size probe on every read. Bounded retries handle changing instances; truncated, invalid and non-finite results are rejected.
@@ -125,6 +127,25 @@ This is a hosted Windows Server VM with a software graphics adapter. It does not
 The [history and export correction](https://github.com/ProtonDev-sys/task-manager/pull/40) passed [Windows verification run 38209554455](https://github.com/ProtonDev-sys/task-manager/actions/runs/38209554455): all 12 CTests, all 21 suite cases, production checks and packaging. Its artifact SHA-256 is `02fd1620c36853d68fa7c95ebdd49068e6c582080668f46b629b9a4881280047`.
 
 All 25 fixture-bearing UI reports (7 CTest and 18 suite) report successful history and CSV checks with no failure label. They exercise a 244-character CSV basename, complete concurrent history snapshots, exact escaped UTF-8 and full-width unsigned timestamps, preservation of locked or directory destinations and an unrelated `.tmp` neighbor, and cleanup of owned staging files after failures. Individual successful assertion counts are not emitted, so source check labels are not counted as extra independent runtime tests. The persistence correction is later than the paired measurements; no new speedup is inferred from these functional checks.
+
+### Complete release-candidate validation
+
+The [complete v1.3.0 candidate](https://github.com/ProtonDev-sys/task-manager/actions/runs/38210815567) passed all 12 CTests in 188.58 seconds and all 21 suite scenarios. Both native self-test reports contain the same 357 passing named checks. All 31 diagnostic reports pass; all 25 UI reports have healthy sampling and successful sorting, keyboard, coalescing and tab-stress gates, with no failure label. Windows passed 31 Python tooling and 19 workflow-guard tests; Linux passed 29 tooling tests with two explicit Windows-only skips, the same 19 guards and the portable search/CSV checks. These are overlapping verification layers, not counts to add together.
+
+All 300 retained PNGs decode successfully. The 75 GPU availability fixtures (25 per appearance) exactly match the three light/dark/High Contrast images visually reviewed for #41. The verification artifact SHA-256 is `fc14aed02c670669ad382fca2e290580d9c47880509825d1189b513c74dd2ef5`; the production package artifact SHA-256 is `6b5b7833301dc60aecb21c17ef3e99ec1dedf40735fbff43522d7ff236a7e105`.
+
+All 18 retained UI reports passed the existing responsiveness budgets in a separate offline check, without rerunning scenarios:
+
+| Metric | Largest release-candidate value | Existing budget |
+| --- | ---: | ---: |
+| UI update p95 | 3.9816 ms | 50 ms |
+| Cached sort p95 | 1.3657 ms | 50 ms |
+| Tab switch p95 | 17.8035 ms | 50 ms |
+| Message queue p95 | 56.7074 ms | 100 ms |
+| Letter navigation p95 | 0.5755 ms | 100 ms |
+| First sample | 421.961 ms | 2,000 ms |
+
+These final functional checks and budgets apply to the complete release-candidate code. They do not replace or alter the earlier paired before/after measurements.
 
 ## Run the study again
 
