@@ -3,20 +3,40 @@
 #include <appmodel.h>
 
 namespace taskmgr {
-static std::wstring kernelImagePath(DWORD pid) {
-  struct UnicodeText { USHORT length, maximum; wchar_t* buffer; };
-  struct Request { HANDLE pid; UnicodeText name; };
-  using QuerySystem = LONG (WINAPI*)(ULONG, void*, ULONG, ULONG*);
-  static const auto query = reinterpret_cast<QuerySystem>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation"));
-  if (!query) return L"";
-  std::array<wchar_t, 1024> text{}; Request request{reinterpret_cast<HANDLE>(ULONG_PTR(pid)), {0, USHORT(text.size() * sizeof(wchar_t)), text.data()}};
-  if (query(88, &request, sizeof(request), nullptr) < 0 || !request.name.length) return L"";
-  const std::wstring native(text.data(), request.name.length / sizeof(wchar_t));
-  static std::vector<std::pair<std::wstring, std::wstring>> devices; static std::mutex gate; std::lock_guard lock(gate);
-  if (devices.empty()) for (wchar_t letter = L'A'; letter <= L'Z'; ++letter) { const wchar_t drive[3]{letter, L':', 0}; wchar_t target[512]{}; if (QueryDosDeviceW(drive, target, 512)) devices.emplace_back(target, drive); }
-  for (const auto& [device, drive] : devices) if (native.size() > device.size() && native.compare(0, device.size(), device) == 0 && native[device.size()] == L'\\') return drive + native.substr(device.size());
-  return L"";
+template <typename Read> static std::wstring processImagePath(Read read) {
+  // Most image paths fit here; only long paths need the maximum-size temporary allocation.
+  std::array<wchar_t, 512> buffer{}; DWORD length = DWORD(buffer.size());
+  const auto status = read(buffer.data(), &length);
+  if (status == ERROR_SUCCESS) return length <= buffer.size() ? std::wstring(buffer.data(), length) : L"";
+  if (status != ERROR_INSUFFICIENT_BUFFER) return L"";
+  std::wstring path(32768, L'\0'); length = DWORD(path.size());
+  if (read(path.data(), &length) != ERROR_SUCCESS || length > path.size()) return L"";
+  path.resize(length); return path;
 }
+#ifdef TASKMGR_DIAGNOSTICS
+static std::vector<std::pair<std::string, bool>> processImagePathTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  unsigned calls = 0; DWORD firstSize = 0, secondSize = 0;
+  const auto read = [&](const std::wstring& expected) {
+    calls = 0; firstSize = secondSize = 0;
+    return processImagePath([&](wchar_t* output, DWORD* size) {
+      if (++calls == 1) firstSize = *size; else secondSize = *size;
+      if (expected.size() >= *size) { *size = UINT32_MAX; return DWORD(ERROR_INSUFFICIENT_BUFFER); }
+      std::copy(expected.begin(), expected.end(), output); *size = DWORD(expected.size()); return DWORD(ERROR_SUCCESS);
+    });
+  };
+  const std::wstring shortPath = L"C:\\Example\\Example.exe", longPath = L"C:\\" + std::wstring(3000, L'x') + L".exe";
+  checks.emplace_back("icon_short_process_path_avoids_large_temporary", read(shortPath) == shortPath && calls == 1 && firstSize == 512);
+  checks.emplace_back("icon_long_process_path_retries_within_windows_limit", read(longPath) == longPath && calls == 2 && firstSize == 512 && secondSize == 32768);
+  checks.emplace_back("icon_oversized_process_path_stops_after_bounded_retry", read(std::wstring(32768, L'x')).empty() && calls == 2);
+  calls = 0;
+  const auto denied = processImagePath([&](wchar_t*, DWORD*) { ++calls; return DWORD(ERROR_ACCESS_DENIED); });
+  checks.emplace_back("icon_unavailable_process_path_is_not_retried_by_pid", denied.empty() && calls == 1);
+  const auto invalid = processImagePath([](wchar_t*, DWORD* length) { ++*length; return DWORD(ERROR_SUCCESS); });
+  checks.emplace_back("icon_process_path_rejects_invalid_returned_length", invalid.empty());
+  return checks;
+}
+#endif
 static std::pair<std::wstring, std::wstring> versionStrings(const std::wstring& path) {
   std::pair<std::wstring, std::wstring> result; DWORD unused = 0; const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &unused);
   if (!size || size > 4 * 1024 * 1024) return result;
@@ -42,7 +62,7 @@ static std::wstring commandLine(HANDLE process) {
   return text->buffer && text->length ? std::wstring(text->buffer, text->length / sizeof(wchar_t)) : L"";
 }
 #ifdef TASKMGR_DIAGNOSTICS
-Icons::Icons(HWND window, int iconSize, bool measure) : target(window), size(iconSize), measured(measure) {
+Icons::Icons(HWND window, int iconSize, bool measure, bool startWorkers) : target(window), size(iconSize), measured(measure) {
 #else
 Icons::Icons(HWND window, int iconSize) : target(window), size(iconSize) {
 #endif
@@ -50,8 +70,18 @@ Icons::Icons(HWND window, int iconSize) : target(window), size(iconSize) {
   // Stock rows borrow Windows' own Task Manager icons: generic window, service, service host and user.
   const auto taskmgr = windowsDirectory() + L"\\System32\\Taskmgr.exe";
   for (const int index : {1, 2, 3, 5}) { HICON icon = nullptr; if (index == 1 || FAILED(SHDefExtractIconW(taskmgr.c_str(), index, 0, &icon, nullptr, MAKELONG(size, size))) || !icon) icon = CopyIcon(LoadIconW(nullptr, IDI_APPLICATION)); ImageList_AddIcon(images, icon); DestroyIcon(icon); }
-  for (auto& worker : workers) worker = std::thread([this] { run(); });
-  enricher = std::thread([this] { enrich(); });
+#ifdef TASKMGR_DIAGNOSTICS
+  if (!startWorkers) return;
+#endif
+  try {
+    for (auto& worker : workers) worker = std::thread([this] { run(); });
+    enricher = std::thread([this] { enrich(); });
+  } catch (...) {
+    { std::lock_guard lock(mutex); stopping = true; } signal.notify_all();
+    for (auto& worker : workers) if (worker.joinable()) worker.join();
+    if (images) ImageList_Destroy(images); images = nullptr;
+    throw;
+  }
 }
 Icons::~Icons() {
   { std::lock_guard lock(mutex); stopping = true; } signal.notify_all();
@@ -102,12 +132,13 @@ void Icons::run() {
     if (!result.file) {
       Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, request.pid));
       FILETIME created{}, exited{}, kernel{}, user{};
-      if (process.value && (!GetProcessTimes(process.value, &created, &exited, &kernel, &user) || ticks(created) != request.created)) continue;
-      std::wstring path(32768, L'\0'); DWORD length = DWORD(path.size());
-      if (process.value && QueryFullProcessImageNameW(process.value, 0, path.data(), &length)) path.resize(length); else path = kernelImagePath(request.pid);
-      if (path.empty()) continue;
-      result.path = path; result.metadata.path = path;
+      if (!process.value || !GetProcessTimes(process.value, &created, &exited, &kernel, &user) || ticks(created) != request.created) continue;
+      // An unverified PID-only fallback can resolve a replacement process after PID reuse.
+      result.path = processImagePath([&](wchar_t* path, DWORD* length) { return QueryFullProcessImageNameW(process.value, 0, path, length) ? DWORD(ERROR_SUCCESS) : GetLastError(); });
+      if (result.path.empty()) continue;
+      result.metadata.path = result.path;
     }
+    { std::lock_guard lock(mutex); if (stopping) return; if (!accepts(result)) continue; }
     const auto key = lower(result.path);
     std::pair<std::wstring, std::wstring> strings; bool cached = false;
     { std::lock_guard lock(mutex); if (auto found = versionCache.find(key); found != versionCache.end()) { strings = found->second; cached = true; } }
@@ -118,7 +149,7 @@ void Icons::run() {
     result.latency = milliseconds(request.queued);
 #endif
     bool notify = false;
-    { std::lock_guard lock(mutex); if (stopping) { if (result.icon) DestroyIcon(result.icon); return; } notify = results.empty(); if (!result.file && enrichment.size() < 8192) enrichment.push_back({result.pid, result.created, result.path, result.metadata}); results.push_back(std::move(result)); }
+    { std::lock_guard lock(mutex); if (stopping || !accepts(result)) { if (result.icon) DestroyIcon(result.icon); if (stopping) return; continue; } notify = results.empty(); if (!result.file && enrichment.size() < 8192) enrichment.push_back({result.pid, result.created, result.path, result.metadata}); results.push_back(std::move(result)); }
     signal.notify_all();
     if (notify) PostMessageW(target, IconMessage, 0, 0);
   }
@@ -127,7 +158,7 @@ void Icons::run() {
 void Icons::enrich() {
   for (;;) {
     Result request;
-    { std::unique_lock lock(mutex); signal.wait(lock, [&] { return stopping || !enrichment.empty(); }); if (stopping) return; request = std::move(enrichment.front()); enrichment.pop_front(); }
+    { std::unique_lock lock(mutex); signal.wait(lock, [&] { return stopping || !enrichment.empty(); }); if (stopping) return; request = std::move(enrichment.front()); enrichment.pop_front(); if (!accepts(request)) continue; }
     Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, request.pid)); FILETIME created{}, exited{}, kernel{}, user{};
     if (!process.value || !GetProcessTimes(process.value, &created, &exited, &kernel, &user) || ticks(created) != request.created) continue;
     auto metadata = std::move(request.metadata);
@@ -148,7 +179,7 @@ void Icons::enrich() {
     }
     metadata.resolved = true;
     bool notify = false;
-    { std::lock_guard lock(mutex); if (stopping) return; notify = results.empty(); results.push_back({request.pid, request.created, std::move(request.path), std::move(metadata)}); }
+    { std::lock_guard lock(mutex); if (stopping) return; if (!accepts(request)) continue; notify = results.empty(); results.push_back({request.pid, request.created, std::move(request.path), std::move(metadata)}); }
     if (notify) PostMessageW(target, IconMessage, 0, 0);
   }
 }
@@ -186,4 +217,38 @@ bool Icons::draw(HDC dc, int index, int left, int top, int pixels) const {
   if (ImageList_DrawIndirect(&draw)) return true;
   draw.i = DefaultIcon; return ImageList_DrawIndirect(&draw) != FALSE;
 }
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> iconCacheTests() {
+  auto checks = processImagePathTests();
+  // No worker threads or unrelated processes: inject the exact stages of an icon request.
+  Icons icons(nullptr, 16, false, false);
+  Process old, current; old.id = current.id = 10; old.created = 100; current.created = 200;
+  const Identity oldIdentity{old.id, old.created}, currentIdentity{current.id, current.created};
+  icons.entries[oldIdentity].description = L"Old process"; icons.entries[currentIdentity].description = L"Current process";
+  icons.requested = {oldIdentity, currentIdentity}; icons.requestedFiles.insert(L"example.exe");
+  icons.requests = {{old.id, old.created}, {current.id, current.created}, {0, 0, L"example.exe"}};
+  icons.enrichment = {{old.id, old.created}, {current.id, current.created}};
+  const HICON obsoleteIcon = CopyIcon(LoadIconW(nullptr, IDI_APPLICATION));
+  checks.emplace_back("icon_pruning_fixture_owns_icon", obsoleteIcon != nullptr);
+  Icons::Result stale{old.id, old.created}; stale.icon = obsoleteIcon;
+  Icons::Result fresh{current.id, current.created}; fresh.metadata.description = L"Fresh metadata";
+  Icons::Result file{0, 0, L"example.exe"}; file.file = true; file.metadata.description = L"File metadata";
+  icons.results = {stale, fresh, file};
+  const std::unordered_set<Identity, IdentityHash> live{currentIdentity}; icons.prune(live);
+  checks.emplace_back("icon_pruning_preserves_only_live_process_metadata", icons.entries.size() == 1 && icons.get(old).description.empty() && icons.get(current).description == L"Current process");
+  checks.emplace_back("icon_pruning_discards_old_identity_requests", icons.requested.size() == 1 && icons.requested.contains(currentIdentity) && icons.requests.size() == 2 && icons.requests.front().created == current.created && icons.requests.back().pid == 0);
+  checks.emplace_back("icon_pruning_discards_queued_enrichment", icons.enrichment.size() == 1 && icons.enrichment.front().created == current.created);
+  checks.emplace_back("icon_pruning_discards_completed_stale_results", icons.results.size() == 2 && icons.results.front().created == current.created && icons.results.back().file);
+  ICONINFO information{}; const bool retainedIcon = obsoleteIcon && GetIconInfo(obsoleteIcon, &information);
+  if (information.hbmColor) DeleteObject(information.hbmColor); if (information.hbmMask) DeleteObject(information.hbmMask);
+  checks.emplace_back("icon_pruning_releases_owned_stale_icon", obsoleteIcon && !retainedIcon);
+  checks.emplace_back("icon_workers_reject_late_old_identity_completion", !icons.accepts(stale) && icons.accepts(fresh) && icons.accepts(file));
+  icons.consume();
+  checks.emplace_back("icon_live_result_is_consumed_without_resurrection", icons.entries.size() == 1 && icons.get(current).description == L"Fresh metadata" && icons.get(old).description.empty());
+  checks.emplace_back("icon_pruning_keeps_file_metadata_requests", icons.file(L"EXAMPLE.EXE").description == L"File metadata" && icons.requestedFiles.contains(L"example.exe"));
+  icons.prune(std::unordered_set<Identity, IdentityHash>{});
+  checks.emplace_back("icon_empty_process_snapshot_clears_all_process_work", icons.entries.empty() && icons.requested.empty() && icons.enrichment.empty() && icons.results.empty() && icons.requests.size() == 1 && icons.requests.front().pid == 0);
+  return checks;
+}
+#endif
 }

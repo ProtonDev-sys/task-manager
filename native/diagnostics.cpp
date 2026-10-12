@@ -144,6 +144,12 @@ static int selfTest(const std::wstring& output) {
   }
   for (auto& test : networkSamplingTests()) checks.push_back(std::move(test));
   for (auto& test : counterSamplingTests()) checks.push_back(std::move(test));
+  for (auto& test : processSamplingTests()) checks.push_back(std::move(test));
+  for (auto& test : traceSamplingTests()) checks.push_back(std::move(test));
+  for (auto& test : traceLifecycleTests()) checks.push_back(std::move(test));
+  for (auto& test : iconCacheTests()) checks.push_back(std::move(test));
+  for (auto& test : serviceInventoryTests()) checks.push_back(std::move(test));
+  for (auto& test : memoryHardwareTests()) checks.push_back(std::move(test));
   for (auto& test : cacheTimingTests()) checks.push_back(std::move(test));
   for (auto& test : servicePermissionTests()) checks.push_back(std::move(test));
   for (auto& test : processorGroupTests()) checks.push_back(std::move(test));

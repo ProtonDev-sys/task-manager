@@ -11,7 +11,7 @@ The sampler, process identity checks, inventory, sorting, history and update sch
 - Dark list scrollbars require additional nonclient painting while preserving native scrolling and accessibility.
 - Both themes custom-paint table headers, but the light separator is a per-pixel gradient while the dark separator is a solid fill.
 
-Consequently, bit-identical timings are not expected. Forcing all controls through custom drawing merely to equalize timings could make the faster path slower and introduce accessibility or visual regressions. `performance.ps1 -ThemeComparison` measures both themes on the process and performance tabs and under tab-switch bursts, without changing sampling intervals.
+Consequently, bit-identical timings are not expected. Forcing all controls through custom drawing merely to equalize timings could make the faster path slower and introduce accessibility or visual regressions. `python tools/taskmgr.py compare --baseline-executable <before.exe> --theme-comparison` measures both themes on the process and performance tabs and under tab-switch bursts, without changing sampling intervals.
 
 ## Accepted changes
 
@@ -29,7 +29,7 @@ The retained-buffer implementation was removed from production and the source AP
 
 ## Compiler experiments
 
-`compiler-study.ps1` builds production and diagnostic executables for four configurations, then runs self-tests, component tests and saturated sampler benchmarks serially. It records executable hashes, actual byte lengths and raw reports, reversing variant order on alternating repetitions. All configurations keep exceptions, security checks and the static runtime. Diagnostic sizes are not substitutes for production sizes.
+`python tools/taskmgr.py compiler-study` builds production and diagnostic executables for four configurations, then runs self-tests, component tests and saturated sampler benchmarks serially. It records executable hashes, actual byte lengths and raw reports, reversing variant order on alternating repetitions. All configurations keep exceptions, security checks and the static runtime. Diagnostic sizes are not substitutes for production sizes.
 
 - Balanced: `/O2 /Os /Oi`, existing `/Ot` overrides on table/graph code, `/Ob2`, LTO.
 - Speed: `/O2 /Ob2`, LTO, without the size preference.
@@ -81,10 +81,10 @@ Reviewed performance-sensitive areas include sample stage timings and inventory 
 ## Final validation and build location
 
 - All nine CTest cases pass on the final balanced diagnostic build (197.78 seconds). Service-index regression checks execute within the UI verification suite.
-- All 21 `benchmark.ps1 -Seconds 5` scenarios pass functional checks, including every tab, both themes, sort/tab bursts, paused and minimized behaviour. Applying the unchanged responsiveness thresholds to all saved reports finds one violation: light `tab-spam` message-queue p95 **143.827 ms**, above 100 ms. The suite was not run with its early-aborting `-EnforceBudgets` switch so every scenario could be measured; this is not a strict budget pass. The retained violations are in `final-suite/budget-exceedances.json`.
+- All 21 benchmark scenarios pass functional checks, including every tab, both themes, sort/tab bursts, paused and minimized behaviour. The current equivalent command is `python tools/taskmgr.py benchmark --seconds 5`. Applying the unchanged responsiveness thresholds to all saved reports finds one violation: light `tab-spam` message-queue p95 **143.827 ms**, above 100 ms. The original suite was run without budget enforcement so every scenario could be measured; this is not a strict budget pass. The retained violations are in `final-suite/budget-exceedances.json`.
 - The final compiler matrix has 36 passing reports; the theme comparison has 32. All compiler reports were verified newer than their corresponding final diagnostic binary. Failed/stale reports cannot be reused by the compiler script.
 - Production administrator-manifest and diagnostic-exclusion checks pass. Windows refuses unelevated launch with error 740. Elevated runtime diagnostic-command rejection was not tested from this unelevated shell.
-- Both new PowerShell scripts parse successfully, and `git diff --check` passes.
+- The original comparison and compiler-study runners passed syntax validation, and `git diff --check` passed. Those runners have since been replaced by the standard-library Python CLI; the measurements above describe the original investigation.
 - Hash-verified final binaries are staged at `artifacts/native-build/Release/TaskManager.exe` and `artifacts/native-tests/Release/TaskManager.exe`; the study copies remain under `artifacts/performance-round2/compiler/`. The running application at `artifacts/app/TaskManager.exe` was not overwritten or stopped.
 
 ## References
