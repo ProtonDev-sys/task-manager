@@ -142,11 +142,14 @@ public:
   NetworkTrace();
   ~NetworkTrace();
   bool active() const;
-  std::unordered_map<DWORD, double> rates(double elapsed);
+  bool sample(std::span<Process> processes);
+#ifdef TASKMGR_DIAGNOSTICS
+  DWORD status() const;
+#endif
 };
 class Sampler {
   std::vector<std::byte> buffer;
-  struct Previous { uint64_t created = 0, cpuTicks = 0, readBytes = 0, writeBytes = 0, seen = 0; };
+  struct Previous { uint64_t created = 0, cpuTicks = 0, readBytes = 0, writeBytes = 0, seen = 0; Time sampledAt{}; };
   std::unordered_map<DWORD, Previous> previous;
   uint64_t generation = 0;
   Time last{};
@@ -204,6 +207,10 @@ std::vector<std::pair<std::string, bool>> startupTests();
 std::vector<std::pair<std::string, bool>> gpuEngineTests();
 std::vector<std::pair<std::string, bool>> networkSamplingTests();
 std::vector<std::pair<std::string, bool>> counterSamplingTests();
+std::vector<std::pair<std::string, bool>> processSamplingTests();
+std::vector<std::pair<std::string, bool>> traceSamplingTests();
+std::vector<std::pair<std::string, bool>> traceLifecycleTests();
+std::vector<std::pair<std::string, bool>> iconCacheTests();
 std::vector<std::pair<std::string, bool>> processorGroupTests();
 std::vector<std::pair<std::string, bool>> accountNameTests();
 std::vector<std::pair<std::string, bool>> sessionIdentityTests();
@@ -248,6 +255,7 @@ class Icons {
   void run();
   void enrich();
   HICON extract(const std::wstring& path);
+  bool accepts(const Result& result) const { return result.file || requested.contains(Identity{result.pid, result.created}); }
 public:
   static constexpr int DefaultIcon = 0, ServiceIcon = 1, ServiceHostIcon = 2, UserIcon = 3;
   HIMAGELIST images = nullptr;
@@ -255,7 +263,8 @@ public:
   std::vector<double> latencies;
   std::vector<double> displayLatencies;
   void setTestMetadata(const Process& process, Metadata metadata) { entries[{process.id, process.created}] = std::move(metadata); }
-  Icons(HWND window, int iconSize, bool measure = false);
+  Icons(HWND window, int iconSize, bool measure = false, bool startWorkers = true);
+  friend std::vector<std::pair<std::string, bool>> iconCacheTests();
 #else
   Icons(HWND window, int iconSize);
 #endif
@@ -269,7 +278,10 @@ public:
     std::erase_if(entries, [&](const auto& item) { return !live.contains(item.first); });
     std::lock_guard lock(mutex);
     std::erase_if(requested, [&](const auto& item) { return !live.contains(item); });
-    std::erase_if(requests, [&](const auto& request) { return request.pid != 0 && !live.contains(Identity{request.pid, request.created}); });
+    const auto obsolete = [&](const auto& work) { return work.pid != 0 && !live.contains(Identity{work.pid, work.created}); };
+    std::erase_if(requests, obsolete);
+    std::erase_if(enrichment, obsolete);
+    std::erase_if(results, [&](const auto& result) { if (!obsolete(result)) return false; if (result.icon) DestroyIcon(result.icon); return true; });
   }
 };
 struct GraphPoint { double time = 0, value = 0, secondary = -1; };

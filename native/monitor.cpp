@@ -385,6 +385,90 @@ struct NativeProcess {
 static_assert(sizeof(NativeProcess) == 256);
 struct NativeThread { int64_t kernel, user, created; ULONG wait; void* start; HANDLE process, thread; LONG priority, basePriority; ULONG switches, state, reason; };
 static_assert(sizeof(NativeThread) == 80);
+template <typename Visit> static void visitNativeProcesses(std::span<const std::byte> data, Visit visit) {
+  size_t offset = 0;
+  for (;;) {
+    if (data.size() - offset < sizeof(NativeProcess) || reinterpret_cast<uintptr_t>(data.data() + offset) % alignof(NativeProcess)) throw std::runtime_error("Invalid process inventory extent");
+    const auto& native = *reinterpret_cast<const NativeProcess*>(data.data() + offset);
+    const size_t extent = native.next ? native.next : data.size() - offset;
+    if (extent < sizeof(NativeProcess) || extent > data.size() - offset || (native.next && native.next % alignof(NativeProcess))) throw std::runtime_error("Invalid process inventory link");
+    if (native.threads > (extent - sizeof(NativeProcess)) / sizeof(NativeThread)) throw std::runtime_error("Invalid process thread extent");
+    std::wstring_view name;
+    if (native.name.length) {
+      const auto address = reinterpret_cast<uintptr_t>(native.name.buffer), begin = reinterpret_cast<uintptr_t>(data.data());
+      if (!native.name.buffer || native.name.length % sizeof(wchar_t) || native.name.maximum < native.name.length || address < begin || address - begin > data.size() || native.name.length > data.size() - (address - begin) || address % alignof(wchar_t))
+        throw std::runtime_error("Invalid process name extent");
+      name = {native.name.buffer, native.name.length / sizeof(wchar_t)};
+    }
+    visit(native, std::span<const NativeThread>{reinterpret_cast<const NativeThread*>(data.data() + offset + sizeof(NativeProcess)), native.threads}, name);
+    if (!native.next) return;
+    offset += native.next;
+  }
+}
+template <typename Previous> static void applyProcessRates(Process& process, const Previous& previous, Time sampledAt, unsigned logical, bool topologyChanged) {
+  const double elapsed = previous.sampledAt == Time{} ? 0 : std::chrono::duration<double>(sampledAt - previous.sampledAt).count();
+  if (previous.created != process.created || elapsed <= 0) return;
+  process.cpu = !topologyChanged && process.cpuTicks >= previous.cpuTicks ? std::clamp(double(process.cpuTicks - previous.cpuTicks) / (elapsed * 100000 * std::max(1u, logical)), 0.0, 100.0) : 0;
+  const double readRate = process.readBytes >= previous.readBytes ? double(process.readBytes - previous.readBytes) / elapsed : 0;
+  const double writeRate = process.writeBytes >= previous.writeBytes ? double(process.writeBytes - previous.writeBytes) / elapsed : 0;
+  process.ioRate = readRate + writeRate;
+}
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> processSamplingTests() {
+  std::vector<std::pair<std::string, bool>> checks;
+  {
+    constexpr size_t firstExtent = sizeof(NativeProcess) + sizeof(NativeThread) + 16;
+    std::vector<std::byte> data(firstExtent + sizeof(NativeProcess));
+    auto& first = *reinterpret_cast<NativeProcess*>(data.data());
+    auto& thread = *reinterpret_cast<NativeThread*>(data.data() + sizeof(NativeProcess));
+    first.next = ULONG(firstExtent); first.threads = 1; first.pid = reinterpret_cast<HANDLE>(ULONG_PTR(10)); thread.state = thread.reason = 5;
+    const wchar_t name[] = L"app"; auto* nameBuffer = reinterpret_cast<wchar_t*>(data.data() + sizeof(NativeProcess) + sizeof(NativeThread)); memcpy(nameBuffer, name, sizeof(name));
+    first.name = {USHORT(3 * sizeof(wchar_t)), USHORT(sizeof(name)), nameBuffer};
+    unsigned visited = 0;
+    visitNativeProcesses(data, [&](const NativeProcess& process, std::span<const NativeThread> threads, std::wstring_view text) { if (visited++ == 0) checks.emplace_back("process_inventory_preserves_name_and_thread_extent", process.pid == first.pid && threads.size() == 1 && threads[0].state == 5 && text == L"app"); });
+    checks.emplace_back("process_inventory_visits_complete_chain", visited == 2);
+    const auto rejected = [&](std::span<const std::byte> bytes) { try { visitNativeProcesses(bytes, [](const auto&, auto, auto) {}); return false; } catch (const std::runtime_error&) { return true; } };
+    checks.emplace_back("process_inventory_rejects_truncated_returned_length", rejected(std::span<const std::byte>(data).first(data.size() - 1)));
+    first.threads = 2;
+    checks.emplace_back("process_threads_cannot_cross_next_process_record", rejected(data)); first.threads = 1;
+    first.next = ULONG(firstExtent - 1);
+    checks.emplace_back("process_inventory_rejects_unaligned_record_link", rejected(data)); first.next = ULONG(firstExtent);
+    first.next = ULONG(data.size() + 1);
+    checks.emplace_back("process_inventory_rejects_link_beyond_returned_length", rejected(data)); first.next = ULONG(firstExtent);
+    first.name.buffer = reinterpret_cast<wchar_t*>(data.data() + data.size());
+    checks.emplace_back("process_name_cannot_escape_returned_buffer", rejected(data)); first.name.buffer = nameBuffer;
+    ++first.name.length;
+    checks.emplace_back("process_name_requires_complete_characters", rejected(data)); --first.name.length;
+    first.name.maximum = 0;
+    checks.emplace_back("process_name_rejects_inconsistent_length", rejected(data)); first.name.maximum = USHORT(sizeof(name));
+    first.name.buffer = nullptr;
+    checks.emplace_back("process_name_rejects_missing_buffer", rejected(data));
+    checks.emplace_back("process_inventory_rejects_empty_success", rejected({}));
+  }
+  {
+    const Time initial = Time{} + std::chrono::seconds(1);
+    struct Baseline { uint64_t created, cpuTicks, readBytes, writeBytes; Time sampledAt; } previous{100, 10000000, 100, 50, initial};
+    const auto process = [&] { Process value; value.created = previous.created; value.cpuTicks = previous.cpuTicks + 10000000; value.readBytes = 300; value.writeBytes = 150; return value; };
+    auto current = process(); applyProcessRates(current, previous, initial + std::chrono::seconds(2), 4, false);
+    checks.emplace_back("process_rates_use_matching_counter_timestamp", current.cpu == 12.5 && current.ioRate == 150);
+    // The process baseline may advance even if a later resource query fails.
+    previous = {current.created, current.cpuTicks, current.readBytes, current.writeBytes, initial + std::chrono::seconds(2)};
+    current = process(); current.readBytes += 300; current.writeBytes += 150; applyProcessRates(current, previous, initial + std::chrono::seconds(3), 4, false);
+    checks.emplace_back("process_rates_recover_after_later_stage_failure", current.cpu == 25 && current.ioRate == 450);
+    current = process(); ++current.created; applyProcessRates(current, previous, initial + std::chrono::seconds(3), 4, false);
+    checks.emplace_back("process_rates_reject_reused_pid", current.cpu == 0 && current.ioRate == 0);
+    current = process(); current.cpuTicks = current.readBytes = current.writeBytes = 0; applyProcessRates(current, previous, initial + std::chrono::seconds(3), 4, false);
+    checks.emplace_back("process_counter_resets_do_not_underflow", current.cpu == 0 && current.ioRate == 0);
+    current = process(); applyProcessRates(current, previous, initial, 4, false);
+    checks.emplace_back("process_rates_reject_nonpositive_elapsed", current.cpu == 0 && current.ioRate == 0);
+    current = process(); applyProcessRates(current, previous, initial + std::chrono::seconds(3), 4, true);
+    checks.emplace_back("process_topology_change_discards_cpu_interval", current.cpu == 0);
+    previous.sampledAt = {}; current = process(); applyProcessRates(current, previous, initial, 4, false);
+    checks.emplace_back("process_first_sample_starts_new_baseline", current.cpu == 0 && current.ioRate == 0);
+  }
+  return checks;
+}
+#endif
 struct NativeProcessor { int64_t idle, kernel, user, dpc, interrupt; ULONG interrupts; };
 static_assert(sizeof(NativeProcessor) == 48);
 using QuerySystem = LONG (WINAPI*)(ULONG, void*, ULONG, ULONG*);
@@ -621,39 +705,25 @@ Sample Sampler::sample(bool startupVisible) {
     buffer.resize(std::min<size_t>(64 * 1024 * 1024, std::max<size_t>(required + 65536, buffer.size() * 2)));
   }
   if (status < 0) throw std::runtime_error("Native process query failed");
+  if (required > buffer.size()) throw std::runtime_error("Invalid process inventory size");
+  const auto processesSampledAt = Clock::now();
   ++generation; result.processes.reserve(previous.size() + 64);
   const unsigned logical = std::max(1u, cpuInfo.logical);
-  size_t offset = 0;
-  for (;;) {
-    if (offset + sizeof(NativeProcess) > buffer.size()) throw std::runtime_error("Invalid process inventory extent");
-    const auto& native = *reinterpret_cast<const NativeProcess*>(buffer.data() + offset);
+  visitNativeProcesses(std::span<const std::byte>(buffer).first(required), [&](const NativeProcess& native, std::span<const NativeThread> threads, std::wstring_view name) {
     Process process; process.id = DWORD(reinterpret_cast<ULONG_PTR>(native.pid)); process.parent = DWORD(reinterpret_cast<ULONG_PTR>(native.parent));
     process.session = native.session; process.created = native.created; process.cpuTicks = native.user + native.kernel; process.priority = native.priority;
     process.threads = native.threads; process.handles = native.handles; process.working = native.working; process.privateBytes = native.privateBytes; process.peakWorking = native.peakWorking; process.pageFaults = native.faults;
     process.privateWorking = uint64_t(std::max<int64_t>(0, native.privateWorking));
     process.readBytes = uint64_t(std::max<int64_t>(0, native.readBytes)); process.writeBytes = uint64_t(std::max<int64_t>(0, native.writeBytes));
-    process.name = native.name.buffer && native.name.length ? std::wstring(native.name.buffer, native.name.length / sizeof(wchar_t)) : process.id == 0 ? L"System Idle Process" : L"System";
+    process.name = !name.empty() ? std::wstring(name) : process.id == 0 ? L"System Idle Process" : L"System";
     // A process whose every thread waits in the Suspended state is shown as suspended, as UWP apps in the background are.
-    if (native.threads && offset + sizeof(NativeProcess) + size_t(native.threads) * sizeof(NativeThread) <= buffer.size()) {
-      const auto threads = reinterpret_cast<const NativeThread*>(buffer.data() + offset + sizeof(NativeProcess)); bool suspended = process.id > 4;
-      for (ULONG index = 0; index < native.threads && suspended; ++index) suspended = threads[index].state == 5 && threads[index].reason == 5;
-      process.suspended = suspended;
-    }
+    process.suspended = process.id > 4 && !threads.empty() && std::all_of(threads.begin(), threads.end(), [](const NativeThread& thread) { return thread.state == 5 && thread.reason == 5; });
     result.threads += native.threads; result.handles += native.handles;
     auto [found, inserted] = previous.try_emplace(process.id);
-    if (!inserted && found->second.created == process.created && result.elapsed > 0) {
-      const auto& old = found->second;
-      process.cpu = !topologyChanged && process.cpuTicks >= old.cpuTicks ? std::clamp(double(process.cpuTicks - old.cpuTicks) / (result.elapsed * 100000 * logical), 0.0, 100.0) : 0;
-      const double readRate = process.readBytes >= old.readBytes ? double(process.readBytes - old.readBytes) / result.elapsed : 0;
-      const double writeRate = process.writeBytes >= old.writeBytes ? double(process.writeBytes - old.writeBytes) / result.elapsed : 0;
-      process.ioRate = readRate + writeRate;
-    }
+    if (!inserted) applyProcessRates(process, found->second, processesSampledAt, logical, topologyChanged);
     if (process.name == L"Memory Compression") result.memory.compressed = process.working;
-    found->second = {process.created, process.cpuTicks, process.readBytes, process.writeBytes, generation}; result.processes.push_back(std::move(process));
-    if (!native.next) break;
-    if (native.next < sizeof(NativeProcess) || native.next > buffer.size() - offset) throw std::runtime_error("Invalid process inventory link");
-    offset += native.next;
-  }
+    found->second = {process.created, process.cpuTicks, process.readBytes, process.writeBytes, generation, processesSampledAt}; result.processes.push_back(std::move(process));
+  });
   struct Windows { std::unordered_set<DWORD> apps, hung; std::vector<AppWindow> list; } visible;
   EnumWindows([](HWND window, LPARAM context) -> BOOL {
     if (IsWindowVisible(window) && GetWindow(window, GW_OWNER) == nullptr && GetWindowTextLengthW(window) > 0 && !(GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) {
@@ -760,7 +830,7 @@ Sample Sampler::sample(bool startupVisible) {
   if (refreshResources) {
   readNetworkInterfaces(started, networkAt, networkPrevious, adapterAddresses, result.networks, GetIfTable2, FreeMibTable);
   }
-  if (trace && trace->active()) { result.networkAttribution = true; const auto rates = trace->rates(result.elapsed); for (auto& process : result.processes) { const auto found = rates.find(process.id); process.network = found == rates.end() ? 0 : found->second; } }
+  if (trace) result.networkAttribution = trace->sample(result.processes);
 #ifdef TASKMGR_DIAGNOSTICS
   result.stages[3] = milliseconds(phase); phase = Clock::now();
 #endif
