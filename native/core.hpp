@@ -293,6 +293,9 @@ void drawGraph(HDC dc, RECT bounds, const History& history, double now, double m
 enum class Action { End, Realtime, High, AboveNormal, Normal, BelowNormal, Idle, Dump, Affinity };
 struct PowerPolicy { DWORD priority = 0, control = 0, state = 0; };
 PowerPolicy powerPolicy(const Process& process);
+#ifdef TASKMGR_DIAGNOSTICS
+std::vector<std::pair<std::string, bool>> powerPolicyTests();
+#endif
 void efficiencyAction(const Process& process, bool enabled);
 void processAction(const Process& process, Action action, const std::wstring& argument = L"");
 std::vector<Identity> processTree(std::span<const Process> processes, const Process& root);

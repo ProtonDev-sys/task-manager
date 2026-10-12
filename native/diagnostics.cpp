@@ -2,6 +2,7 @@
 #include "report.hpp"
 #include <sddl.h>
 #include <iterator>
+#include <limits>
 
 namespace taskmgr {
 static int findNext(std::span<const std::wstring> names, std::wstring_view prefix, int start) {
@@ -100,6 +101,14 @@ static std::vector<std::pair<std::string, bool>> reportEncodingTests() {
   checks.emplace_back("report_error_escapes_controls_quotes_paths_and_keeps_utf8", contents() == expected);
   checks.emplace_back("report_empty_error_write_succeeds", writeDiagnosticError(path, ""));
   checks.emplace_back("report_empty_error_is_quoted", contents() == "{\"native\":true,\"passed\":false,\"error\":\"\"}");
+  bool nonfiniteRejected = false;
+  {
+    Report stream{path};
+    stream << '[' << 1.25 << ',' << std::numeric_limits<double>::infinity() << ',' << -std::numeric_limits<double>::infinity() << ',' << std::numeric_limits<double>::quiet_NaN() << ',' << 42.5 << ']';
+    nonfiniteRejected = !stream;
+  }
+  checks.emplace_back("report_nonfinite_metrics_fail_validation", nonfiniteRejected);
+  checks.emplace_back("report_nonfinite_metrics_keep_valid_json_tokens", contents() == "[1.25,null,null,null,42.5]");
   return checks;
 }
 static int selfTest(const std::wstring& output) {
@@ -141,6 +150,7 @@ static int selfTest(const std::wstring& output) {
   for (auto& test : sessionIdentityTests()) checks.push_back(std::move(test));
   for (auto& test : reportEncodingTests()) checks.push_back(std::move(test));
   for (auto& test : hardwareInventoryTests()) checks.push_back(std::move(test));
+  for (auto& test : powerPolicyTests()) checks.push_back(std::move(test));
   check("hexadecimal_bounds", hexadecimal(0) == L"0" && hexadecimal(UINT64_MAX) == L"ffffffffffffffff");
   check("counter_integer_decimal", counterInteger(L"0", 10) == 0u && counterInteger(L"0042", 10) == 42u && counterInteger(L"4294967295", 10) == UINT32_MAX);
   check("counter_integer_hexadecimal", counterInteger(L"0000002a", 16) == 42u && counterInteger(L"FFFFFFFF", 16) == UINT32_MAX);
@@ -358,6 +368,16 @@ static int selfTest(const std::wstring& output) {
       }
       auto stalePower = owned; ++stalePower.created; bool rejected = false; try { efficiencyAction(stalePower, true); } catch (...) { rejected = true; }
       check("efficiency_stale_identity_refused", rejected);
+      processAction(owned, Action::BelowNormal);
+      PROCESS_POWER_THROTTLING_STATE unmanaged{}; unmanaged.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+      unmanaged.ControlMask = before.control | PROCESS_POWER_THROTTLING_EXECUTION_SPEED; unmanaged.StateMask = before.state | PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+      const bool unmanagedEnabled = SetProcessInformation(childHandle.value, ProcessPowerThrottling, &unmanaged, sizeof(unmanaged)) != FALSE;
+      check("owned_child_external_efficiency_setup", unmanagedEnabled);
+      if (unmanagedEnabled) {
+        efficiencyAction(owned, false); const auto unmanagedDisabled = powerPolicy(owned);
+        check("owned_child_external_efficiency_preserves_priority", unmanagedDisabled.priority == BELOW_NORMAL_PRIORITY_CLASS);
+        check("owned_child_external_efficiency_explicitly_disabled", (unmanagedDisabled.control & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) && !(unmanagedDisabled.state & PROCESS_POWER_THROTTLING_EXECUTION_SPEED));
+      }
       processAction(owned, Action::Normal);
     } catch (...) { check("owned_child_efficiency", false); }
     try { processAction(owned, Action::Idle); check("owned_child_priority_idle", GetPriorityClass(childHandle.value) == IDLE_PRIORITY_CLASS); processAction(owned, Action::BelowNormal); check("owned_child_priority_below", GetPriorityClass(childHandle.value) == BELOW_NORMAL_PRIORITY_CLASS); processAction(owned, Action::Normal); check("owned_child_priority_restore", GetPriorityClass(childHandle.value) == NORMAL_PRIORITY_CLASS); DWORD_PTR affinity = 0, system = 0; GetProcessAffinityMask(childHandle.value, &affinity, &system); processAction(owned, Action::Affinity, hexadecimal(affinity & (~affinity + 1))); DWORD_PTR selected = 0; GetProcessAffinityMask(childHandle.value, &selected, &system); check("owned_child_affinity", selected == (affinity & (~affinity + 1))); processAction(owned, Action::Affinity, hexadecimal(affinity)); check("owned_child_wait_chain", !waitChain(owned).empty()); { std::vector<Process> family(3); family[0] = owned; family[1].id = 900001; family[1].parent = owned.id; family[1].created = owned.created + 1; family[2].id = 900002; family[2].parent = owned.id; family[2].created = owned.created - 1; const auto tree = processTree(family, owned); check("process_tree_descendants", tree.size() == 2 && tree.back().pid == owned.id && tree.front().pid == 900001); } auto stale = owned; ++stale.created; bool refused = false; try { processAction(stale, Action::Idle); } catch (...) { refused = true; } check("stale_identity_refused", refused); processAction(owned, Action::End); check("owned_child_end", WaitForSingleObject(childHandle.value, 5000) == WAIT_OBJECT_0); }

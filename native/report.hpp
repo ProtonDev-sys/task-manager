@@ -1,5 +1,6 @@
 #pragma once
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -33,15 +34,18 @@ public:
   }
   Report& operator<<(double value) {
     char buffer[64]{};
-    const int count = _snprintf_s(buffer, sizeof(buffer), _TRUNCATE, "%.6g", value);
-    if (count < 0) healthy = false;
-    else *this << std::string_view(buffer, size_t(count));
+    // JSON numbers always use a period, regardless of the calling thread's locale.
+    // Keep invalid metrics syntactically valid while failing the report operation.
+    if (!std::isfinite(value)) { *this << "null"; validNumbers = false; return *this; }
+    const auto converted = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general, 6);
+    if (converted.ec != std::errc{}) healthy = false;
+    else *this << std::string_view(buffer, size_t(converted.ptr - buffer));
     return *this;
   }
-  explicit operator bool() { if (!file || fflush(file) != 0) healthy = false; return healthy; }
+  explicit operator bool() { if (!file || fflush(file) != 0) healthy = false; return healthy && validNumbers; }
 private:
   FILE* file = nullptr;
-  bool healthy = true;
+  bool healthy = true, validNumbers = true;
 };
 inline bool writeDiagnosticError(const std::wstring& path, std::string_view message) {
   Report stream{path};
