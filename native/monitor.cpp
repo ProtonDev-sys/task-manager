@@ -69,6 +69,15 @@ std::vector<std::pair<std::string, bool>> gpuEngineTests() {
   const std::wstring firstKey = L"luid_0x00000000_0x00000001", secondKey = L"luid_0x00000000_0x00000002";
   const auto name = [](DWORD pid, const std::wstring& key, unsigned engine, const wchar_t* type, unsigned physical = 0) { return L"pid_" + std::to_wstring(pid) + L"_" + key + L"_phys_" + std::to_wstring(physical) + L"_eng_" + std::to_wstring(engine) + L"_engtype_" + type; };
   {
+    GpuInfo idle; idle.key = firstKey; GpuInfo missing; missing.key = secondKey; GpuInfo empty; empty.key = firstKey;
+    std::unordered_map<DWORD, ProcessGpu> processes;
+    const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 0}, {name(10, firstKey, 1, L"Copy"), 0}};
+    aggregateGpuEngines(idle, engines, processes); aggregateGpuEngines(missing, engines, processes); aggregateGpuEngines(empty, {}, processes);
+    checks.emplace_back("gpu_available_zero_engine_counters_remain_present", idle.usage == 0 && idle.engines == std::vector<std::pair<std::wstring, double>>{{L"3D", 0}, {L"Copy", 0}});
+    checks.emplace_back("gpu_other_adapter_counters_do_not_establish_availability", missing.engines.empty());
+    checks.emplace_back("gpu_missing_engine_counters_remain_distinct_from_zero", empty.engines.empty());
+  }
+  {
     GpuInfo gpu; gpu.key = firstKey;
     std::unordered_map<DWORD, ProcessGpu> processes;
     const std::vector<std::pair<std::wstring, double>> engines{{name(10, firstKey, 0, L"3D"), 40}, {name(10, firstKey, 1, L"3D"), 50}};

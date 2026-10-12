@@ -57,6 +57,7 @@ jobs:
           name: verification-reports
           path: |
             artifacts/native-tests/*.json
+            artifacts/native-tests/*.png
             artifacts/benchmark-suite/
   release:
     needs: verify
