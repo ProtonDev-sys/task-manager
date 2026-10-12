@@ -5,6 +5,59 @@
 #include <iterator>
 
 namespace taskmgr {
+bool Application::verifyTableExport() {
+  bool passed = true;
+  const auto check = [&](bool result, const char* name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  Application fixture(RunOptions{}); fixture.selectedTab = DetailsTab;
+  const HWND owner = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+  check(owner != nullptr, "export-fixture-owner"); if (!owner) return false;
+  struct WindowCleanup { HWND value; ~WindowCleanup() { DestroyWindow(value); } } windowCleanup{owner};
+  fixture.list = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | LVS_REPORT, 0, 0, 300, 200, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+  check(fixture.list != nullptr, "export-fixture-table"); if (!fixture.list) return false;
+  fixture.header = ListView_GetHeader(fixture.list); fixture.shown[DetailsTab] = {0, 1, 2};
+  const auto defs = definitions(DetailsTab);
+  for (int index = 0; index < 3; ++index) { LVCOLUMNW column{}; column.mask = LVCF_TEXT | LVCF_WIDTH; column.pszText = const_cast<wchar_t*>(defs[size_t(index)].title); column.cx = 100; check(ListView_InsertColumn(fixture.list, index, &column) == index, "export-fixture-column"); }
+  const int order[] = {2, 0, 1}; check(ListView_SetColumnOrderArray(fixture.list, 3, order) != FALSE, "export-fixture-dragged-column-order");
+  Row heading; heading.kind = RowKind::Heading; heading.cells = {{L"Category heading"}};
+  Row first; first.key = L"first"; first.cells = {{L"alpha,\"quoted\"\n\u5de5\u5177 \U0001f680.exe"}, {L"42"}, {L"Running"}, {L"Hidden account"}};
+  Row second; second.key = L"second"; second.cells = {{L"=1+1"}, {L"7"}, {L"Suspended"}};
+  fixture.rows = {heading, second, first};
+  const auto captured = fixture.tableCsv();
+  const auto expected = std::string("\xef\xbb\xbf") + "\"Status\",\"Name\",\"PID\"\r\n\"Suspended\",\"'=1+1\",\"7\"\r\n\"Running\",\"alpha,\"\"quoted\"\"\n" + utf8(L"\u5de5\u5177 \U0001f680.exe") + "\",\"42\"\r\n";
+  check(captured == expected, "export-visible-order-unicode-quotes-and-formula-text");
+  check(captured.find("Category heading") == captured.npos && captured.find("Hidden account") == captured.npos, "export-omits-category-headings-and-hidden-columns");
+  fixture.rows = {first}; fixture.shown[DetailsTab] = {2, 1, 0};
+  check(captured == expected && fixture.tableCsv() != captured, "export-snapshot-survives-rows-and-columns-changing");
+  fixture.compact = true; check(!fixture.canExportTable() && fixture.tableCsv().empty(), "export-unavailable-in-compact-view"); fixture.compact = false;
+  fixture.selectedTab = PerformanceTab; check(!fixture.canExportTable(), "export-unavailable-for-performance-graphs"); fixture.selectedTab = DetailsTab;
+  fixture.rows = {heading}; check(!fixture.canExportTable() && fixture.tableCsv().empty(), "export-unavailable-with-no-result-rows");
+  GUID guid{}; wchar_t identifier[40]{}; std::error_code error;
+  const auto temporary = std::filesystem::temp_directory_path(error);
+  check(!error && SUCCEEDED(CoCreateGuid(&guid)) && StringFromGUID2(guid, identifier, int(std::size(identifier))) > 0, "export-fixture-temporary-name");
+  if (error || !*identifier) return false;
+  const auto directory = temporary / (std::wstring(L"TaskManagerExport-") + identifier);
+  const bool created = CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
+  check(created, "export-fixture-directory"); if (!created) return false;
+  struct DirectoryCleanup { std::filesystem::path path; ~DirectoryCleanup() { std::error_code error; std::filesystem::remove_all(path, error); } } directoryCleanup{directory};
+  const auto path = (directory / L"\u5de5\u5177.csv").wstring();
+  const auto read = [&]() { std::ifstream file{std::filesystem::path(path), std::ios::binary}; return std::string{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()}; };
+  try {
+    writeExportFile(path, captured); check(read() == captured, "export-writes-exact-utf8-snapshot");
+    const std::string large(1024 * 1024 + 17, 'x');
+    writeExportFile(path, large); check(read() == large, "export-replaces-existing-file-across-write-chunks");
+    bool failed = false;
+    { Handle lock(CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+      check(lock.value != INVALID_HANDLE_VALUE, "export-fixture-locks-existing-destination");
+      if (lock.value != INVALID_HANDLE_VALUE) { try { writeExportFile(path, "replacement"); } catch (const std::exception&) { failed = true; } }
+    }
+    check(failed && read() == large, "export-failed-replacement-preserves-existing-destination");
+    failed = false; try { writeExportFile((directory / L"missing" / L"file.csv").wstring(), captured); } catch (const std::exception&) { failed = true; }
+    check(failed, "export-missing-parent-reported");
+    size_t files = 0; for (const auto& entry : std::filesystem::directory_iterator(directory)) { static_cast<void>(entry); ++files; }
+    check(files == 1, "export-failure-cleans-only-owned-temporary-files");
+  } catch (const std::exception&) { check(false, "export-native-file-operations"); }
+  return passed;
+}
 bool Application::verifyActionSnapshots() {
   const auto savedSample = current; const int savedTab = selectedTab, savedSelection = selectedIndex(), savedTop = ListView_GetTopIndex(list);
   const bool savedRebuilding = rebuilding, wasVisible = (GetWindowLongPtrW(list, GWL_STYLE) & WS_VISIBLE) != 0;
@@ -302,6 +355,7 @@ bool Application::verifySorting() {
   check(verifyTrayLifecycle(), "tray-lifecycle");
   check(verifyViewportRefresh(), "viewport-refresh");
   check(verifySearch(), "scoped-search");
+  check(verifyTableExport(), "table-export");
   {
     Row previous; previous.key = L"identity"; previous.cells = {{L"1.0%", 1.01, 0}};
     auto next = previous; next.cells[0].value = 1.04; next.process = 5;

@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "csv.hpp"
 #include <commdlg.h>
 #include <shlobj.h>
 #include <windowsx.h>
@@ -89,12 +90,15 @@ void Application::asynchronous(std::function<std::wstring()> operation) {
   if (!persistent()) return;
   if (actionBusy.exchange(true)) { MessageBoxW(window, L"An action is already in progress. Try again when it finishes.", L"Task Manager", MB_OK); return; }
   if (actionWorker.joinable()) actionWorker.join();
-  actionWorker = std::thread([this, operation = std::move(operation)] {
+  try { actionWorker = std::thread([this, operation = std::move(operation)] {
     ActionResult result; const auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     try { result.report = operation(); } catch (const std::exception& error) { result.error = fromUtf8(error.what()); }
     if (SUCCEEDED(initialized)) CoUninitialize();
     { std::lock_guard lock(actionMutex); actionResults.push_back(std::move(result)); } actionBusy = false; if (!stopping) PostMessageW(window, ActionMessage, 0, 0);
-  });
+  }); } catch (const std::exception& error) {
+    actionBusy = false;
+    MessageBoxW(window, fromUtf8(error.what()).c_str(), L"Unable to start action", MB_OK | MB_ICONERROR);
+  }
 }
 HWND Application::appWindow(const Process& process) const {
   struct Search { DWORD pid; HWND found = nullptr; } search{process.id};
@@ -112,6 +116,72 @@ void Application::runTask() {
   if (launch.file.empty()) return;
   SHELLEXECUTEINFOW execute{sizeof(execute)}; execute.fMask = SEE_MASK_FLAG_NO_UI; execute.hwnd = window; execute.lpVerb = input.elevated ? L"runas" : nullptr; execute.lpFile = launch.file.c_str(); execute.lpParameters = launch.parameters.empty() ? nullptr : launch.parameters.c_str(); execute.nShow = SW_SHOWNORMAL;
   if (!ShellExecuteExW(&execute)) { const DWORD error = GetLastError(); if (error != ERROR_CANCELLED) MessageBoxW(window, (L"Windows cannot find '" + launch.file + L"'. Make sure you typed the name correctly, and then try again.\n\n" + winerror(error)).c_str(), L"Create new task", MB_OK | MB_ICONERROR); }
+}
+bool Application::canExportTable() const {
+  return !compact && !summary && selectedTab >= 0 && selectedTab < TabCount && selectedTab != PerformanceTab &&
+    std::any_of(rows.begin(), rows.end(), [](const Row& row) { return row.kind != RowKind::Heading; });
+}
+std::string Application::tableCsv() const {
+  if (!canExportTable()) return {};
+  const auto defs = definitions(selectedTab);
+  const int count = Header_GetItemCount(header);
+  if (count <= 0 || count > 32) return {};
+  std::vector<int> order(size_t(count), 0), columns;
+  for (int index = 0; index < count; ++index) order[size_t(index)] = index;
+  if (!ListView_GetColumnOrderArray(list, count, order.data())) throw std::runtime_error("Unable to read the table's column order.");
+  columns.reserve(size_t(count));
+  Csv csv;
+  for (const auto position : order) {
+    if (position < 0 || position >= count) throw std::runtime_error("The table's column order is invalid.");
+    const int column = columnAt(position);
+    if (column < 0 || size_t(column) >= defs.size()) throw std::runtime_error("The table's columns changed while preparing the export.");
+    columns.push_back(column); csv.field(utf8(defs[size_t(column)].title));
+  }
+  csv.endRow();
+  for (const auto& row : rows) {
+    if (row.kind == RowKind::Heading) continue;
+    for (const auto column : columns) csv.field(utf8(cell(row, column)));
+    csv.endRow();
+  }
+  return csv.take();
+}
+void Application::writeExportFile(const std::wstring& path, std::string_view contents) {
+  GUID guid{}; wchar_t identifier[40]{};
+  if (FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid, identifier, int(std::size(identifier)))) throw std::runtime_error("Unable to create a temporary export file name.");
+  const auto temporary = path + L".tmp-" + identifier;
+  struct Cleanup { const std::wstring& path; bool owned = false; ~Cleanup() { if (owned) DeleteFileW(path.c_str()); } } cleanup{temporary};
+  {
+    Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (file.value == INVALID_HANDLE_VALUE) throw std::runtime_error(utf8(winerror()));
+    cleanup.owned = true;
+    while (!contents.empty()) {
+      const DWORD count = DWORD(std::min<size_t>(contents.size(), 1024 * 1024)); DWORD written = 0;
+      if (!WriteFile(file.value, contents.data(), count, &written, nullptr)) throw std::runtime_error(utf8(winerror()));
+      if (!written || written > count) throw std::runtime_error("The export file could not be completely written.");
+      contents.remove_prefix(written);
+    }
+    if (!FlushFileBuffers(file.value)) throw std::runtime_error(utf8(winerror()));
+  }
+  if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) throw std::runtime_error(utf8(winerror()));
+  cleanup.owned = false;
+}
+void Application::exportTable() {
+  if (!persistent() || actionBusy) return;
+  try {
+    if (searchQueued) applySearch();
+    if (!canExportTable()) return;
+    // The Save dialog runs a nested message loop. Freeze visible rows, values,
+    // and dragged column order before it can deliver another sampler update.
+    auto contents = tableCsv(); if (contents.empty()) return;
+    static constexpr const wchar_t* names[] = {L"Processes", L"Performance", L"App-history", L"Startup", L"Users", L"Details", L"Services"};
+    const auto name = std::wstring(L"TaskManager-") + names[selectedTab] + L".csv";
+    std::vector<wchar_t> path(32768); std::copy(name.begin(), name.end(), path.begin());
+    OPENFILENAMEW file{sizeof(file)}; file.hwndOwner = window; file.lpstrFile = path.data(); file.nMaxFile = DWORD(path.size());
+    file.lpstrFilter = L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0"; file.lpstrDefExt = L"csv"; file.lpstrTitle = L"Export current table";
+    file.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&file)) { const auto error = CommDlgExtendedError(); if (error) throw std::runtime_error("The export file dialog could not be opened (" + std::to_string(error) + ")."); return; }
+    asynchronous([path = std::wstring(path.data()), contents = std::move(contents)] { writeExportFile(path, contents); return std::wstring{}; });
+  } catch (const std::exception& error) { MessageBoxW(window, fromUtf8(error.what()).c_str(), L"Export current table", MB_OK | MB_ICONERROR); }
 }
 void Application::endSelected(bool tree) {
   const auto row = selectedRow(); if (!row || !current) return;
@@ -140,6 +210,7 @@ void Application::command(int id) {
   switch (id) {
   case ThemeLightId: case ThemeDarkId: case ThemeSystemId: if (theme == id - ThemeLightId) return; theme = id - ThemeLightId; applyTheme(); saveSettings(); return;
   case SearchId: toggleSearch(); return;
+  case ExportId: exportTable(); return;
   case ReplaceDefaultId: {
     const bool enable = !replacementEnabled();
     if (enable && !confirm(L"Replace Windows Task Manager?", L"Ctrl+Shift+Esc and Windows Task Manager launch commands will open this app for all Windows accounts. Windows will ask for administrator approval and install one protected executable in Program Files. Turn this option off to restore Windows Task Manager.", L"Replace Task Manager")) return;

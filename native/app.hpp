@@ -30,6 +30,7 @@ constexpr int SpeedAdaptive = 114;
 constexpr int ReplaceDefaultId = 132;
 constexpr int ThemeLightId = 133, ThemeDarkId = 134, ThemeSystemId = 135, SearchId = 136;
 constexpr int EfficiencyId = 137;
+constexpr int ExportId = 138;
 enum Command { EndTask = 200, EndTree, RestartExplorer, SwitchTo, BringToFront, MinimizeWindow, MaximizeWindow, Toggle, GoToDetails, GoToServices, OpenLocation, SearchOnline, Properties, CreateDump, WaitChainId, AffinityId, CopyId,
   PriorityRealtime = 220, PriorityHigh, PriorityAbove, PriorityNormal, PriorityBelow, PriorityLow, ServiceStart = 230, ServiceStop, ServiceRestart, OpenServices, StartupToggle = 240, Disconnect = 250, SignOff, ManageAccounts,
   MemoryValues = 260, MemoryPercents, NetworkValues, NetworkPercents, DeleteHistory, SummaryView = 400, OverallView, LogicalView, CopyPerformance, HideGraphs, SidebarSummary, ViewResource = 410, TrayRestore = 500 };
@@ -237,6 +238,10 @@ private:
   bool confirm(const std::wstring& title, const std::wstring& text, const std::wstring& button);
   void endSelected(bool tree);
   void runTask();
+  bool canExportTable() const;
+  std::string tableCsv() const;
+  void exportTable();
+  static void writeExportFile(const std::wstring& path, std::string_view contents);
   HWND appWindow(const Process& process) const;
   // diagnostics
 #ifdef TASKMGR_DIAGNOSTICS
@@ -245,6 +250,7 @@ private:
   bool verifyTrayLifecycle();
   bool verifyViewportRefresh();
   bool verifySearch();
+  bool verifyTableExport();
   bool verifySorting();
   bool verifyActionSnapshots();
   bool verifyHeadingNavigation();
