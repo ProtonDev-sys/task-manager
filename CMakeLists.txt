@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(TaskManagerNative VERSION 1.2.1 LANGUAGES CXX RC)
+project(TaskManagerNative VERSION 1.3.0 LANGUAGES CXX RC)
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Task Manager requires Windows x64")
 endif()

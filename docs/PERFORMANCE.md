@@ -1,5 +1,7 @@
 # Performance investigation
 
+For the current optimization and feature round, see [the October 2026 study](PERFORMANCE-ROUND3.md): exact before/after sources, retained raw reports, functional and visual review, passing responsiveness budgets, and the observed memory and executable-size tradeoffs. The historical measurements and failures below remain unchanged because they describe a different machine and source revision.
+
 ## Scope and language
 
 The application is already C++20, using native Windows controls, GDI/GDI+, native process inventories, PDH and Windows networking APIs. Release builds already use whole-program optimization, intrinsic expansion, function/data elimination and identical-code folding, with speed-biased compilation for table and graph code. Rewriting it in another language is not an established optimization.
