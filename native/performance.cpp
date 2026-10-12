@@ -121,7 +121,7 @@ bool Application::verifyGraphPanels() {
   static const wchar_t* const suffixes[] = {L"-gpu-unavailable-light", L"-gpu-unavailable-dark", L"-gpu-unavailable-high-contrast"};
   // Exercise the application's High Contrast colors without changing desktop settings.
   for (int appearance = 0; appearance < 3; ++appearance) {
-    dark = appearance == 1; highContrast = appearance == 2; std::vector<COLORREF> idleUtilization;
+    dark = appearance == 1; highContrast = appearance == 2; std::vector<COLORREF> idleUtilization; std::array<std::vector<COLORREF>, 2> idleMemory;
     for (const bool available : {true, false}) {
       fixtureGpu.engines.clear(); if (available) fixtureGpu.engines.emplace_back(L"3D", 0);
       performanceItemsDirty = true; const auto& item = perfItems().back(); const std::wstring expected = available ? L"0%" : L"N/A";
@@ -141,7 +141,19 @@ bool Application::verifyGraphPanels() {
         bool message = false;
         for (int y = 196; !message && y < 228; ++y) for (int x = 452; x < 772; ++x) if (GetPixel(memory, x, y) == themeColor(LabelColor)) { message = true; break; }
         check(message == !available, "gpu-unavailable-message-is-visible-and-themed");
-        for (const int y : {359, 430}) check(GetPixel(memory, detail.left, y) == themeColor(GpuColor), "gpu-memory-graphs-survive-unavailable-engines");
+        // GDI+ can blend corner pixels. Verify the complete plots remain painted
+        // and unchanged when only engine-counter availability changes.
+        const std::array<RECT, 2> memoryPlots{{{250, 359, 974, 403}, {250, 430, 974, 474}}};
+        for (size_t index = 0; index < memoryPlots.size(); ++index) {
+          const auto& plot = memoryPlots[index]; std::vector<COLORREF> pixels; pixels.reserve(size_t((plot.right - plot.left) * (plot.bottom - plot.top)));
+          bool painted = false, readable = true; const COLORREF background = themeColor(RGB(255, 255, 255));
+          for (int y = plot.top; y < plot.bottom; ++y) for (int x = plot.left; x < plot.right; ++x) {
+            const auto pixel = GetPixel(memory, x, y); pixels.push_back(pixel); readable = readable && pixel != CLR_INVALID; painted = painted || (pixel != CLR_INVALID && pixel != background);
+          }
+          check(readable && painted, "gpu-memory-graphs-survive-unavailable-engines");
+          if (available) idleMemory[index] = std::move(pixels);
+          else check(pixels == idleMemory[index], "gpu-memory-graphs-remain-identical-without-engine-data");
+        }
         std::vector<COLORREF> utilization;
         for (int y = 525; y < 559; ++y) for (int x = 250; x < 390; ++x) utilization.push_back(GetPixel(memory, x, y));
         if (available) idleUtilization = std::move(utilization);
