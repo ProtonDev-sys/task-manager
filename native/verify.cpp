@@ -555,6 +555,7 @@ bool Application::verifySorting() {
   check(verifyPerformanceHover(), "performance-hover");
   check(verifyGraphPanels(), "performance-graph-panels");
   check(verifyTabSwitching(), "tab-switching");
+  check(verifyModernShell(), "modern-shell");
   check(verifyHighContrast(), "high-contrast");
   check(verifyHeadingNavigation(), "heading-navigation");
   for (const auto& process : current->processes) { const auto found = activity.find({process.id, process.created}); check(found != activity.end() && found->second.ticks == process.cpuTicks && found->second.seen == activityGeneration && std::isfinite(found->second.trend), "activity-live-identity"); }
@@ -1023,7 +1024,7 @@ bool Application::verifyHeadingNavigation() {
         check(pixels() != hiddenFocus, "keyboard-focus-visible-in-light-dark-and-high-contrast");
         SendMessageW(list, WM_UPDATEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0); drawRow(memory, 2, area);
         check(pixels() == hiddenFocus, "keyboard-focus-respects-hidden-focus-cues");
-        SendMessageW(list, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0); SetFocus(tabs); drawRow(memory, 2, area);
+        SendMessageW(list, WM_UPDATEUISTATE, MAKEWPARAM(UIS_CLEAR, UISF_HIDEFOCUS), 0); SetFocus(navigation[size_t(selectedTab)]); drawRow(memory, 2, area);
         check(pixels() == hiddenFocus, "keyboard-focus-hidden-when-list-loses-thread-focus"); SetFocus(list);
       }
       SelectObject(memory, previous); DeleteObject(bitmap);
@@ -1035,6 +1036,158 @@ bool Application::verifyHeadingNavigation() {
   populate(7, true); for (auto& row : rows) row.kind = RowKind::Heading;
   ListView_SetItemState(list, 3, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); skipHeading(1);
   check(selectedIndex() == -1 && ListView_GetNextItem(list, -1, LVNI_FOCUSED) == -1, "heading-only-list-has-no-action-selection");
+  return passed;
+}
+bool Application::verifyModernShell() {
+  const int savedTab = selectedTab, savedSummary = summary;
+  const bool savedCompact = compact, savedNavigation = navigationExpanded, savedSearchVisible = searchVisible;
+  const auto savedSearch = searchText, savedSelection = rowKey(selectedIndex());
+  const int savedTop = ListView_GetTopIndex(list);
+  const RECT savedNormal = normalRect, savedCompactRect = compactRect;
+  RECT originalWindow{}; GetWindowRect(window, &originalWindow);
+  const HWND savedFocus = GetFocus(); const auto snapshot = current;
+  bool passed = true;
+  const auto check = [&](bool result, const std::string& name) { if (!result && sortingFailure.empty()) sortingFailure = name; passed = passed && result; };
+  const auto visible = [](HWND control) { return control && (GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0; };
+  const auto commitNavigation = [&] {
+    MSG message{};
+    if (PeekMessageW(&message, window, WM_APP + 12, WM_APP + 12, PM_REMOVE)) DispatchMessageW(&message);
+  };
+  const std::array<HWND, 6> fullControls{navigationToggle, runButton, exportButton, menuButton, settingsButton, searchBox};
+  const bool controlsReady = std::all_of(fullControls.begin(), fullControls.end(), [](HWND control) { return control != nullptr; }) &&
+    std::all_of(navigation.begin(), navigation.end(), [](HWND control) { return control != nullptr; });
+  check(controlsReady, "shell-native-controls-created"); if (!controlsReady) return false;
+  commitNavigation();
+  if (summary) setSummary(0); if (compact) setCompact(false);
+  SetWindowTextW(searchBox, L""); applySearch(); selectTab(ProcessesTab);
+  check(!visible(tabs) && !(GetWindowLongPtrW(tabs, GWL_STYLE) & WS_TABSTOP), "shell-logical-tabs-excluded-from-visible-navigation");
+  for (int index = 0; index < TabCount; ++index) {
+    const HWND control = navigation[size_t(index)];
+    check(visible(control) && GetWindowTextLengthW(control) > 0, "shell-navigation-retains-accessible-name");
+    check((GetWindowLongPtrW(control, GWL_STYLE) & BS_TYPEMASK) == BS_RADIOBUTTON, "shell-navigation-retains-native-radio-role");
+  }
+  const auto checkCurrentNavigation = [&](int expected) {
+    int tabStops = 0, checked = 0;
+    for (int index = 0; index < TabCount; ++index) {
+      const HWND control = navigation[size_t(index)];
+      const bool selected = SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED;
+      const bool tabStop = (GetWindowLongPtrW(control, GWL_STYLE) & WS_TABSTOP) != 0;
+      checked += selected; tabStops += tabStop;
+      check(selected == (index == expected) && tabStop == selected, "shell-native-current-view-and-tabstop-agree");
+    }
+    check(checked == 1 && tabStops == 1 && selectedTab == expected, "shell-navigation-has-one-current-view");
+  };
+  for (const int tab : {PerformanceTab, HistoryTab, StartupTab, UsersTab, DetailsTab, ServicesTab, ProcessesTab}) {
+    SendMessageW(navigation[size_t(tab)], BM_CLICK, 0, 0); commitNavigation(); checkCurrentNavigation(tab);
+  }
+  SetFocus(navigation[ProcessesTab]);
+  const auto arrow = [&](UINT key, int expected) {
+    const HWND control = GetFocus();
+    MSG message{}; message.hwnd = control; message.message = WM_KEYDOWN; message.wParam = key;
+    check((SendMessageW(control, WM_GETDLGCODE, key, LPARAM(&message)) & (DLGC_WANTARROWS | DLGC_WANTMESSAGE)) != 0, "shell-navigation-owns-arrow-keys");
+    SendMessageW(control, WM_KEYDOWN, key, 1); commitNavigation();
+    checkCurrentNavigation(expected);
+    check(GetFocus() == navigation[size_t(expected)], "shell-arrow-navigation-moves-visible-keyboard-focus");
+  };
+  arrow(VK_DOWN, PerformanceTab); arrow(VK_END, ServicesTab); arrow(VK_UP, DetailsTab); arrow(VK_HOME, ProcessesTab);
+
+  // Chrome interactions must not rebuild the process rows or consume a new
+  // sample. Pointer hover is exercised only on this thread's owned controls.
+  const unsigned beforeChrome = fullRebuilds;
+  const auto* rowStorage = rows.data();
+  for (int repeat = 0; repeat < 32; ++repeat) {
+    SendMessageW(navigationToggle, BM_CLICK, 0, 0);
+    SendMessageW(navigation[ProcessesTab], WM_MOUSEMOVE, 0, MAKELPARAM(scale(10), scale(10)));
+    SendMessageW(navigation[ProcessesTab], WM_MOUSELEAVE, 0, 0);
+  }
+  check(fullRebuilds == beforeChrome && rows.data() == rowStorage && current == snapshot, "shell-collapse-and-hover-reuse-table-and-snapshot");
+
+  // Check the minimum supported window as well as a normal wide window.
+  // Native HWND bounds catch clipped controls and collisions independently of
+  // the layout's own offsets or breakpoints.
+  MINMAXINFO limits{}; SendMessageW(window, WM_GETMINMAXINFO, 0, LPARAM(&limits));
+  const std::array<POINT, 2> sizes{limits.ptMinTrackSize, POINT{scale(1180), scale(820)}};
+  for (const auto size : sizes) {
+    SetWindowPos(window, nullptr, originalWindow.left, originalWindow.top, size.x, size.y, SWP_NOZORDER | SWP_NOACTIVATE);
+    for (int tab = 0; tab < TabCount; ++tab) {
+      selectTab(tab);
+      for (const bool expandedNavigation : {false, true}) {
+        navigationExpanded = expandedNavigation; layout();
+        RECT client{}; GetClientRect(window, &client);
+        std::vector<HWND> controls{navigationToggle, runButton, exportButton, menuButton, settingsButton, searchBox,
+          list, performance, end, fewer, link, historyLink, serviceStatus};
+        controls.insert(controls.end(), navigation.begin(), navigation.end());
+        std::vector<std::pair<HWND, RECT>> bounds;
+        const auto context = std::to_string(size.x) + "x" + std::to_string(size.y) + "-tab-" + std::to_string(tab);
+        for (const HWND control : controls) if (visible(control)) {
+          RECT area{}; GetWindowRect(control, &area); MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&area), 2);
+          check(area.left >= 0 && area.top >= 0 && area.right <= client.right && area.bottom <= client.bottom &&
+            area.right > area.left && area.bottom > area.top, "shell-visible-control-fits-client-" + context + "-id-" + std::to_string(GetDlgCtrlID(control)));
+          for (const auto& previous : bounds) {
+            RECT overlap{};
+            check(!IntersectRect(&overlap, &area, &previous.second), "shell-visible-controls-do-not-overlap-" + context + "-ids-" +
+              std::to_string(GetDlgCtrlID(previous.first)) + "-" + std::to_string(GetDlgCtrlID(control)));
+          }
+          bounds.emplace_back(control, area);
+        }
+        check(visible(menuButton) && visible(navigationToggle), "shell-overflow-and-collapse-remain-reachable");
+        check(visible(searchBox) == (tab != PerformanceTab), "shell-search-remains-visible-on-each-table-view");
+      }
+    }
+  }
+
+  // Closing search clears the filter and returns focus to results, while the
+  // entry field remains available. Ctrl+F must remain idempotent.
+  selectTab(DetailsTab); SetWindowTextW(searchBox, L""); applySearch();
+  const auto unfiltered = rows.size(); const auto beforeSearch = fullRebuilds;
+  SetWindowTextW(searchBox, L"no-such-process-7d62a97e"); applySearch();
+  command(SearchId); command(SearchId);
+  check(GetFocus() == searchBox && searchText == L"no-such-process-7d62a97e" && rows.empty(), "shell-search-command-focuses-without-clearing");
+  MSG escape{}; escape.hwnd = searchBox; escape.message = WM_KEYDOWN; escape.wParam = VK_ESCAPE;
+  check((SendMessageW(searchBox, WM_GETDLGCODE, VK_ESCAPE, LPARAM(&escape)) & DLGC_WANTMESSAGE) != 0, "shell-search-escape-is-not-a-dialog-cancel");
+  SendMessageW(searchBox, WM_KEYDOWN, VK_ESCAPE, 1);
+  check(searchVisible && visible(searchBox) && searchText.empty() && rows.size() == unfiltered && GetFocus() == list,
+    "shell-search-escape-clears-and-focuses-results");
+  check(fullRebuilds == beforeSearch && current == snapshot, "shell-search-reuses-existing-table-snapshot");
+  SetFocus(searchBox); selectTab(PerformanceTab);
+  check(!visible(searchBox) && GetFocus() != searchBox && GetFocus() && IsWindowVisible(GetFocus()), "shell-hidden-search-releases-keyboard-focus");
+
+  selectTab(ProcessesTab); SetFocus(navigation[ProcessesTab]); setCompact(true);
+  for (const HWND control : fullControls) check(!visible(control), "shell-full-controls-hidden-in-compact-mode");
+  for (const HWND control : navigation) check(!visible(control), "shell-navigation-hidden-in-compact-mode");
+  check(visible(list) && visible(fewer) && (GetFocus() == list || GetFocus() == fewer || GetFocus() == end), "shell-compact-keeps-visible-content-and-focus");
+  setCompact(false); selectTab(PerformanceTab); SetFocus(navigation[PerformanceTab]); setSummary(1);
+  for (const HWND control : fullControls) check(!visible(control), "shell-full-controls-hidden-in-summary-mode");
+  for (const HWND control : navigation) check(!visible(control), "shell-navigation-hidden-in-summary-mode");
+  check(visible(performance) && GetFocus() == performance, "shell-summary-keeps-performance-focus");
+  setSummary(0);
+  check(visible(navigation[PerformanceTab]) && visible(menuButton) && visible(runButton), "shell-full-navigation-restored-after-summary");
+
+  // The overflow keeps every existing top-level command family. Inspect the
+  // menu tree without opening popups or invoking process/system actions.
+  std::vector<HMENU> menus{menuBar}; std::set<UINT> commands;
+  for (size_t index = 0; index < menus.size(); ++index) for (int position = 0; position < GetMenuItemCount(menus[index]); ++position) {
+    if (const HMENU child = GetSubMenu(menus[index], position)) menus.push_back(child);
+    else commands.insert(GetMenuItemID(menus[index], position));
+  }
+  for (const UINT id : {RunId, ExportId, ExitId, TopmostId, ReplaceDefaultId, ThemeLightId, ThemeDarkId, ThemeSystemId, RefreshId, SearchId, GroupId}) {
+    check(commands.contains(id), "shell-overflow-preserves-existing-command-" + std::to_string(id));
+  }
+  check(current == snapshot, "shell-interactions-preserve-complete-snapshot");
+
+  commitNavigation(); setSummary(0); if (compact) setCompact(false);
+  navigationExpanded = savedNavigation; selectTab(savedTab);
+  SetWindowTextW(searchBox, savedSearch.c_str()); applySearch(); searchVisible = savedSearchVisible;
+  if (savedCompact) setCompact(true); if (savedSummary) setSummary(savedSummary);
+  SetWindowPos(window, nullptr, originalWindow.left, originalWindow.top, originalWindow.right - originalWindow.left,
+    originalWindow.bottom - originalWindow.top, SWP_NOZORDER | SWP_NOACTIVATE);
+  normalRect = savedNormal; compactRect = savedCompactRect; layout();
+  if (!savedSelection.empty()) {
+    const auto found = std::find_if(rows.begin(), rows.end(), [&](const Row& row) { return row.key == savedSelection; });
+    if (found != rows.end()) select(int(found - rows.begin()));
+  }
+  ListView_Scroll(list, 0, (savedTop - ListView_GetTopIndex(list)) * rowHeight());
+  SetFocus(savedFocus);
   return passed;
 }
 bool Application::verifyTabSwitching() {
@@ -1060,18 +1213,26 @@ bool Application::verifyTabSwitching() {
     for (int round = 0; round < 64; ++round) {
       const unsigned before = fullRebuilds;
       for (int click = 0; click < 129; ++click) {
-        TabCtrl_SetCurSel(tabs, (round + click) % TabCount);
-        NMHDR notice{tabs, TabsId, TCN_SELCHANGE};
-        SendMessageW(window, WM_NOTIFY, TabsId, LPARAM(&notice));
+        const int requested = (round + click) % TabCount;
+        if (round % 2) SendMessageW(navigation[size_t(requested)], BM_CLICK, 0, 0);
+        else {
+          TabCtrl_SetCurSel(tabs, requested);
+          NMHDR notice{tabs, TabsId, TCN_SELCHANGE};
+          SendMessageW(window, WM_NOTIFY, TabsId, LPARAM(&notice));
+        }
       }
       check(fullRebuilds == before, "tab-burst-no-synchronous-rebuild");
       const int expected = (round + 128) % TabCount;
       MSG pendingMessage{};
       const auto begin = Clock::now();
       if (PeekMessageW(&pendingMessage, window, WM_APP + 12, WM_APP + 12, PM_REMOVE)) DispatchMessageW(&pendingMessage);
-      UpdateWindow(tabs); UpdateWindow(expected == PerformanceTab ? performance : list);
+      UpdateWindow(navigation[size_t(expected)]); UpdateWindow(expected == PerformanceTab ? performance : list);
       tabTimes.push_back(milliseconds(begin));
       check(selectedTab == expected && TabCtrl_GetCurSel(tabs) == expected && !tabQueued && pendingTab == -1, "tab-burst-last-request-wins");
+      check((GetWindowLongPtrW(tabs, GWL_STYLE) & (WS_VISIBLE | WS_TABSTOP)) == 0, "logical-tabs-stay-hidden-after-coalesced-navigation");
+      for (int index = 0; index < TabCount; ++index) {
+        check((SendMessageW(navigation[size_t(index)], BM_GETCHECK, 0, 0) == BST_CHECKED) == (index == expected), "navigation-radio-state-follows-committed-view");
+      }
       check(fullRebuilds <= before + 1, "tab-burst-single-rebuild");
       check(current == sample, "tab-switch-no-resampling");
       const unsigned unchanged = fullRebuilds;
@@ -1106,13 +1267,18 @@ bool Application::verifyTabSwitching() {
       if (info.rgstate[0] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN)) continue;
       const int pixelX = info.rcScrollBar.left - bounds.left + 1, pixelY = info.rcScrollBar.top - bounds.top + 1;
       const auto color = GetPixel(memory, pixelX, pixelY);
-      if (dark) check(color == RGB(32, 32, 32), "scrollbar-dark-track-pixels");
-      else check(color != RGB(32, 32, 32), "scrollbar-light-restored");
+      if (dark) check(color == uiColor(UiColor::Surface), "scrollbar-dark-track-pixels");
+      else {
+        // A light native scrollbar may use a system colour rather than our
+        // content surface, but must not retain the dark custom track.
+        dark = true; const auto darkTrack = uiColor(UiColor::Surface); dark = false;
+        check(color != darkTrack, "scrollbar-light-restored");
+      }
       if (dark) for (int repeat = 0; repeat < 64; ++repeat) {
         SendMessageW(list, WM_NCPAINT, 1, 0);
         SendMessageW(list, WM_NCACTIVATE, repeat % 2, 0);
         HDC live = GetWindowDC(list);
-        check(live && GetPixel(live, pixelX, pixelY) == RGB(32, 32, 32), "scrollbar-no-light-nonclient-frame");
+        check(live && GetPixel(live, pixelX, pixelY) == uiColor(UiColor::Surface), "scrollbar-no-light-nonclient-frame");
         if (live) ReleaseDC(list, live);
       }
     }
@@ -1140,8 +1306,8 @@ bool Application::verifyTabSwitching() {
   check(GetFocus() == performance, "tab-focus-fixture-owned-performance-child");
   selectTab(DetailsTab);
   check(GetFocus() == list, "tab-leaving-performance-focuses-visible-table");
-  SetFocus(tabs); selectTab(ProcessesTab);
-  check(GetFocus() == tabs, "tab-navigation-keeps-tab-strip-focus");
+  SetFocus(navigation[DetailsTab]); selectTab(ProcessesTab);
+  check(GetFocus() == navigation[ProcessesTab], "tab-navigation-focus-follows-selected-view");
   theme = savedTheme; applyTheme(); selectTab(savedTab); SetFocus(savedFocus);
   return passed;
 }
@@ -1155,9 +1321,9 @@ bool Application::verifyHighContrast() {
   selectTab(ProcessesTab);
   // Exercise High Contrast without changing the desktop's accessibility settings.
   highContrast = true; dark = false; backgroundBrush = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
-  RECT headerBounds{}, tabBounds{}; GetClientRect(header, &headerBounds); GetClientRect(tabs, &tabBounds);
-  const int width = std::max({int(headerBounds.right), int(tabBounds.right), scale(222)});
-  const int height = std::max({int(headerBounds.bottom), int(tabBounds.bottom), scale(210)});
+  RECT headerBounds{}, navigationBounds{}; GetClientRect(header, &headerBounds); GetClientRect(navigation[ProcessesTab], &navigationBounds);
+  const int width = std::max({int(headerBounds.right), int(navigationBounds.right), scale(222)});
+  const int height = std::max({int(headerBounds.bottom), int(navigationBounds.bottom), scale(210)});
   HDC screen = GetDC(window), memory = CreateCompatibleDC(screen);
   HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
   check(screen && memory && bitmap && backgroundBrush, "high-contrast-render-buffer");
@@ -1178,6 +1344,10 @@ bool Application::verifyHighContrast() {
       }
       SelectObject(memory, bitmap);
     };
+    const auto containsColor = [&](RECT bounds, COLORREF color) {
+      for (LONG y = bounds.top; y < bounds.bottom; ++y) for (LONG x = bounds.left; x < bounds.right; ++x) if (GetPixel(memory, x, y) == color) return true;
+      return false;
+    };
     current = std::make_shared<Sample>(); current->cpu = 95;
     const auto cpu = std::find(shown[ProcessesTab].begin(), shown[ProcessesTab].end(), 7);
     check(cpu != shown[ProcessesTab].end(), "high-contrast-cpu-column");
@@ -1193,28 +1363,32 @@ bool Application::verifyHighContrast() {
       }
     }
     current = snapshot;
-    // Native selection can move before a coalesced tab switch is committed.
-    for (const int selection : {ProcessesTab, ServicesTab}) {
-      TabCtrl_SetCurSel(tabs, selection); SendMessageW(tabs, WM_PRINTCLIENT, WPARAM(memory), PRF_CLIENT);
-      for (int index = 0; index < TabCount; ++index) {
-        RECT box{}; TabCtrl_GetItemRect(tabs, index, &box);
-        check(GetPixel(memory, box.left + 1, box.top + 1) == GetSysColor(index == selection ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-tab-background");
-      }
-      check(GetTextColor(memory) == GetSysColor(selection == ServicesTab ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), "high-contrast-tab-text-pair");
-      RECT last{}; TabCtrl_GetItemRect(tabs, TabCount - 1, &last);
-      capture({0, 0, std::min(tabBounds.right, last.right + scale(2)), tabBounds.bottom}, selection == ServicesTab ? L"tabs-services" : L"tabs-processes");
+    // The visible navigation keeps its native radio state; its renderer must
+    // pair system foreground/background colours for both selection and hover.
+    const HWND control = navigation[ProcessesTab];
+    const auto savedChecked = SendMessageW(control, BM_GETCHECK, 0, 0);
+    const HANDLE savedHot = GetPropW(control, L"hot");
+    const auto savedFont = font; font = HFONT(GetStockObject(SYSTEM_FIXED_FONT));
+    for (const int state : {0, 1, 2}) {
+      SendMessageW(control, BM_SETCHECK, state == 1 ? BST_CHECKED : BST_UNCHECKED, 0);
+      if (state == 2) SetPropW(control, L"hot", HANDLE(1)); else RemovePropW(control, L"hot");
+      paintShellButton(control, memory, navigationBounds, ODS_NOFOCUSRECT);
+      const bool highlighted = state != 0;
+      const auto foreground = GetSysColor(highlighted ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT);
+      check(GetPixel(memory, navigationBounds.right - scale(8), navigationBounds.bottom / 2) ==
+        GetSysColor(highlighted ? COLOR_HIGHLIGHT : COLOR_WINDOW), "high-contrast-navigation-background");
+      RECT content = navigationBounds; InflateRect(&content, -scale(8), -scale(6));
+      check(containsColor(content, foreground), "high-contrast-navigation-text-and-icon-pair");
+      capture(navigationBounds, state == 1 ? L"navigation-selected" : state == 2 ? L"navigation-hover" : L"navigation-normal");
     }
-    TabCtrl_SetCurSel(tabs, selectedTab);
+    font = savedFont; SendMessageW(control, BM_SETCHECK, savedChecked, 0);
+    if (savedHot) SetPropW(control, L"hot", savedHot); else RemovePropW(control, L"hot");
     const auto savedSidebarFont = sidebarFont, savedLabelFont = labelFont;
     // A stock bitmap font makes these bounded text-pixel checks independent of ClearType.
     sidebarFont = labelFont = HFONT(GetStockObject(SYSTEM_FIXED_FONT));
     hideGraphs = true; sidebarScroll = 0; selectedResource = L"cpu"; hotResource = 1;
     const std::vector<PerfItem> fixtures{{L"cpu", L"CPU", L"", L"95%", L"", CpuColor}, {L"memory", L"Memory", L"Usage", L"30%", L"", MemoryColor}, {L"gpu", L"GPU", L"", L"10%", L"", GpuColor}};
     const RECT sidebar{0, 0, scale(222), scale(210)}; FillRect(memory, &sidebar, backgroundBrush); paintSidebar(memory, sidebar, fixtures);
-    auto containsColor = [&](RECT bounds, COLORREF color) {
-      for (LONG y = bounds.top; y < bounds.bottom; ++y) for (LONG x = bounds.left; x < bounds.right; ++x) if (GetPixel(memory, x, y) == color) return true;
-      return false;
-    };
     for (int index = 0; index < int(fixtures.size()); ++index) {
       const int top = scale(12) + index * scale(60); const bool highlighted = index < 2;
       const COLORREF foreground = GetSysColor(highlighted ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT);

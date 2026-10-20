@@ -159,6 +159,7 @@ class ToolingTests(unittest.TestCase):
         def capture(command, **options):
             directory = Path(command[2])
             self.assertEqual(directory.name == "dark", "--dark" in command)
+            self.assertEqual(arguments.demo_data, "--demo-data" in command)
             for name in names:
                 self.assertFalse((directory / name).exists())
                 (directory / name).write_bytes(png)
@@ -169,8 +170,15 @@ class ToolingTests(unittest.TestCase):
             taskmgr.screenshots(arguments)
         report = json.loads((self.directory / "screenshots.json").read_text(encoding="utf-8"))
         self.assertEqual(len(report["images"]), 38)
+        self.assertEqual(report["dataSource"], "live")
         self.assertEqual({item["theme"] for item in report["images"]}, {"light", "dark"})
         self.assertTrue(all(item["width"] == 800 and item["height"] == 600 for item in report["images"]))
+        arguments.demo_data = True
+        with patch.object(taskmgr.subprocess, "run", side_effect=capture):
+            taskmgr.screenshots(arguments)
+        report = json.loads((self.directory / "screenshots.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["dataSource"], "synthetic")
+        self.assertEqual(len(report["images"]), 38)
         with patch.object(taskmgr.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
             with self.assertRaises(OSError):
                 taskmgr.screenshots(arguments)

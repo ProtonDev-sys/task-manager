@@ -3,6 +3,7 @@
 
 namespace taskmgr {
 enum Tab { ProcessesTab, PerformanceTab, HistoryTab, StartupTab, UsersTab, DetailsTab, ServicesTab, TabCount };
+enum class UiColor { Window, Surface, SurfaceAlt, Border, Text, MutedText, Accent, Hover, Selection, SelectionText };
 enum class RowKind { Heading, Process, Group, Service, Entry, User, Interrupts, Window };
 struct Cell { std::wstring text; double value = 0; int heat = -1; };
 struct Row {
@@ -32,6 +33,7 @@ constexpr int ReplaceDefaultId = 132;
 constexpr int ThemeLightId = 133, ThemeDarkId = 134, ThemeSystemId = 135, SearchId = 136;
 constexpr int EfficiencyId = 137;
 constexpr int ExportId = 138;
+constexpr int NavigationId = 600, NavigationToggleId = 610, MenuId = 611, SettingsId = 612;
 enum Command { EndTask = 200, EndTree, RestartExplorer, SwitchTo, BringToFront, MinimizeWindow, MaximizeWindow, Toggle, GoToDetails, GoToServices, OpenLocation, SearchOnline, Properties, CreateDump, WaitChainId, AffinityId, CopyId,
   PriorityRealtime = 220, PriorityHigh, PriorityAbove, PriorityNormal, PriorityBelow, PriorityLow, ServiceStart = 230, ServiceStop, ServiceRestart, OpenServices, StartupToggle = 240, Disconnect = 250, SignOff, ManageAccounts,
   MemoryValues = 260, MemoryPercents, NetworkValues, NetworkPercents, DeleteHistory, SummaryView = 400, OverallView, LogicalView, CopyPerformance, HideGraphs, SidebarSummary, ViewResource = 410, TrayRestore = 500 };
@@ -51,6 +53,12 @@ private:
 #endif
   HWND window = nullptr, tabs = nullptr, list = nullptr, header = nullptr, performance = nullptr, end = nullptr, fewer = nullptr, link = nullptr, historyLink = nullptr, serviceStatus = nullptr;
   HMENU menuBar = nullptr;
+  std::array<HWND, TabCount> navigation{};
+  HWND navigationToggle = nullptr, runButton = nullptr, exportButton = nullptr, menuButton = nullptr, settingsButton = nullptr, shellTooltip = nullptr;
+  HFONT shellHeadingFont = nullptr;
+  bool navigationExpanded = true, navigationLabels = false;
+  int navigationWidth = 0;
+  RECT contentBounds{}, searchBounds{};
   HFONT font = nullptr, percentFont = nullptr, headingFont = nullptr, titleFont = nullptr, subtitleFont = nullptr, labelFont = nullptr, valueFont = nullptr, sidebarFont = nullptr, linkFont = nullptr;
   HIMAGELIST rowSpacer = nullptr;
   HICON windowIcon = nullptr, smallIcon = nullptr, trayIcon = nullptr;
@@ -67,7 +75,7 @@ private:
   std::vector<Row> searchRows;
   HWND searchBox = nullptr;
   std::wstring searchText;
-  bool searchVisible = false, searchQueued = false, dark = false, highContrast = false;
+  bool searchVisible = true, searchQueued = false, dark = false, highContrast = false;
   int theme = 0;
   HBRUSH backgroundBrush = nullptr;
   std::unordered_map<std::wstring, History> histories;
@@ -148,11 +156,18 @@ private:
   static LRESULT CALLBACK headerProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
   static LRESULT CALLBACK linkProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
   static LRESULT CALLBACK tabsProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
+  static LRESULT CALLBACK shellProcedure(HWND window, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context);
+  COLORREF uiColor(UiColor role) const;
   COLORREF themeColor(COLORREF light) const;
+  void createShell();
+  void syncNavigation();
+  void paintShellButton(HWND target, HDC dc, RECT bounds, UINT state);
+  void showShellMenu(HWND anchor, int submenu = -1);
   void applyTheme();
   void paintScrollbars(HDC destination = nullptr);
   void requestTab(int tab);
   void toggleSearch();
+  void clearSearch();
   void applySearch();
   std::vector<Row> filteredRows(const std::vector<Row>& source) const;
 #ifdef TASKMGR_DIAGNOSTICS
@@ -267,11 +282,13 @@ private:
   bool verifyPerformanceHover();
   bool verifyGraphPanels();
   bool verifyTabSwitching();
+  bool verifyModernShell();
   bool verifyHighContrast();
   void writeBenchmark();
   void beginSamplingMeasurement();
   bool samplingMeasurementHealthy();
   void screenshotTick();
+  void prepareDemoScreenshots();
 #endif
 };
 }

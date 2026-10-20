@@ -2,9 +2,10 @@
 #include <windowsx.h>
 
 namespace taskmgr {
-// Windows 10 Task Manager heat map and selection colours, sampled from the stock application.
-static constexpr COLORREF Heat[] = {RGB(255, 244, 196), RGB(249, 236, 168), RGB(255, 228, 135), RGB(255, 210, 100), RGB(255, 189, 85), RGB(255, 167, 69), RGB(252, 141, 55)};
-static constexpr COLORREF Selection = RGB(205, 232, 255), Hover = RGB(229, 243, 255), HeaderText = RGB(76, 96, 122), HeadingText = RGB(31, 89, 195);
+// Separate palettes keep low activity quiet and preserve readable text at every
+// intensity. Row painting indexes these colours directly, without theme conversion.
+static constexpr COLORREF LightHeat[] = {RGB(247, 250, 253), RGB(235, 243, 251), RGB(218, 234, 249), RGB(194, 222, 246), RGB(160, 205, 239), RGB(122, 181, 223), RGB(92, 162, 214)};
+static constexpr COLORREF DarkHeat[] = {RGB(40, 44, 47), RGB(40, 51, 60), RGB(38, 62, 80), RGB(37, 77, 101), RGB(34, 92, 123), RGB(29, 108, 144), RGB(22, 117, 156)};
 static const wchar_t* PowerNames[] = {L"Very low", L"Low", L"Moderate", L"High", L"Very high"};
 static COLORREF blend(COLORREF over, COLORREF under, double amount) {
   auto mix = [&](int top, int bottom) { return int(std::lround(bottom + (top - bottom) * amount)); };
@@ -19,9 +20,9 @@ static std::wstring megabytes(double value) { return grouped(value / 1048576, 1)
 static std::wstring kilobytes(double value) { return grouped(std::floor(value / 1024), 0) + L" K"; }
 static std::wstring elapsedText(uint64_t seconds) { wchar_t text[32]{}; swprintf_s(text, L"%llu:%02llu:%02llu", seconds / 3600, seconds / 60 % 60, seconds % 60); return text; }
 std::span<const ColumnDef> Application::definitions(int tab) {
-  static const ColumnDef processes[] = {{L"Name", 357, false, true, false}, {L"Type", 130, false, false, false}, {L"Status", 120, false, true, false}, {L"Publisher", 160, false, false, false}, {L"PID", 50, true, false, false},
-    {L"Process name", 130, false, false, false}, {L"Command line", 300, false, false, false}, {L"CPU", 73, true, true, true}, {L"Memory", 132, true, true, true}, {L"Disk", 73, true, true, true}, {L"Network", 73, true, true, true},
-    {L"GPU", 73, true, true, true}, {L"GPU engine", 130, false, true, false}, {L"Power usage", 100, false, true, true}, {L"Power usage trend", 110, false, true, true}};
+  static const ColumnDef processes[] = {{L"Name", 280, false, true, false}, {L"Type", 130, false, false, false}, {L"Status", 96, false, true, false}, {L"Publisher", 160, false, false, false}, {L"PID", 64, true, false, false},
+    {L"Process name", 130, false, false, false}, {L"Command line", 300, false, false, false}, {L"CPU", 72, true, true, true}, {L"Memory", 108, true, true, true}, {L"Disk", 84, true, true, true}, {L"Network", 90, true, true, true},
+    {L"GPU", 72, true, true, true}, {L"GPU engine", 130, false, false, false}, {L"Power usage", 110, false, false, true}, {L"Power usage trend", 150, false, false, true}};
   static const ColumnDef performance[] = {{L"Name", 100, false, true, false}};
   static const ColumnDef history[] = {{L"Name", 300, false, true, false}, {L"CPU time", 110, true, true, false}};
   static const ColumnDef startup[] = {{L"Name", 250, false, true, false}, {L"Publisher", 200, false, true, false}, {L"Status", 100, false, true, false}, {L"Startup impact", 110, false, true, false}, {L"Startup type", 110, false, false, false}, {L"Command line", 300, false, false, false}, {L"User", 180, false, false, false}, {L"Source location", 350, false, false, false}};
@@ -33,13 +34,13 @@ std::span<const ColumnDef> Application::definitions(int tab) {
   static const ColumnDef services[] = {{L"Name", 200, false, true, false}, {L"PID", 60, true, true, false}, {L"Description", 300, false, true, false}, {L"Status", 80, false, true, false}, {L"Group", 200, false, true, false}};
   switch (tab) { case ProcessesTab: return processes; case HistoryTab: return history; case StartupTab: return startup; case UsersTab: return users; case DetailsTab: return details; case ServicesTab: return services; default: return performance; }
 }
-int Application::rowHeight() const { return scale(compact ? 24 : selectedTab == DetailsTab || selectedTab == ServicesTab ? 22 : 28); }
+int Application::rowHeight() const { return scale(compact || selectedTab == DetailsTab || selectedTab == ServicesTab ? 28 : 32); }
 int Application::columnAt(int index) const { const auto& ids = shown[size_t(selectedTab)]; return compact ? 0 : index >= 0 && size_t(index) < ids.size() ? ids[size_t(index)] : -1; }
 int Application::minimumColumnWidth(int tab, int column) const {
   const auto defs = definitions(tab);
-  if (column < 0 || size_t(column) >= defs.size()) return 48;
+  if (column < 0 || size_t(column) >= defs.size()) return 64;
   const auto& definition = defs[size_t(column)];
-  return column == 0 ? 120 : definition.heat ? 60 : definition.right ? 48 : std::clamp(definition.width / 2, 64, 100);
+  return column == 0 ? 160 : definition.heat ? 72 : definition.right ? 64 : std::clamp(definition.width / 2, 80, 120);
 }
 void Application::columns(bool preserveRows) {
   columnsTab = selectedTab;
@@ -480,13 +481,19 @@ static void chevron(HDC dc, float x, float y, float unit, bool open, COLORREF co
 }
 void Application::drawRow(HDC dc, int index, RECT bounds) {
   RECT client{}; GetClientRect(list, &client);
-  RECT tail{bounds.right, bounds.top, client.right, bounds.bottom}; FillRect(dc, &tail, backgroundBrush);
-  if (index < 0 || size_t(index) >= rows.size()) { FillRect(dc, &bounds, backgroundBrush); return; }
+  RECT tail{bounds.right, bounds.top, client.right, bounds.bottom};
+  if (index < 0 || size_t(index) >= rows.size()) { FillRect(dc, &bounds, backgroundBrush); FillRect(dc, &tail, backgroundBrush); return; }
   const auto& row = rows[size_t(index)]; const auto state = ListView_GetItemState(list, index, LVIS_SELECTED | LVIS_FOCUSED);
   const bool selected = (state & LVIS_SELECTED) != 0, hot = index == hotRow && row.kind != RowKind::Heading;
+  const COLORREF surface = uiColor(row.kind == RowKind::Heading ? UiColor::SurfaceAlt : UiColor::Surface);
+  const COLORREF selection = uiColor(UiColor::Selection), hover = uiColor(UiColor::Hover);
+  const COLORREF foreground = uiColor(selected || (highContrast && hot) ? UiColor::SelectionText : UiColor::Text);
+  const auto& heatColors = dark ? DarkHeat : LightHeat;
+  SetDCBrushColor(dc, selected ? selection : hot ? hover : surface); FillRect(dc, &tail, GetStockBrush(DC_BRUSH));
   updateColumnGeometry(); const auto defs = definitions(selectedTab); const int count = displayCount;
   SetBkMode(dc, TRANSPARENT); SelectObject(dc, font);
   const bool tree = (selectedTab == ProcessesTab || selectedTab == UsersTab) && !compact; const int iconSize = scale(16), indent = row.depth * scale(20);
+  const Cell empty;
   int x = bounds.left;
   for (int position = 0; position < std::max(1, count); ++position) {
     const int lvIndex = displayOrder[size_t(position)], id = columnAt(lvIndex); const int width = compact ? bounds.right - bounds.left : displayWidths[size_t(position)];
@@ -494,22 +501,20 @@ void Application::drawRow(HDC dc, int index, RECT bounds) {
     if (box.left >= client.right) break;
     if (box.right <= client.left) continue;
     if (id < 0 || size_t(id) >= defs.size()) continue;
-    const auto& definition = defs[size_t(id)]; const Cell empty; const auto& value = size_t(id) < row.cells.size() ? row.cells[size_t(id)] : empty;
-    const bool heat = definition.heat && value.heat >= 0 && !compact && !highContrast;
-    COLORREF background = heat ? themeColor(Heat[std::clamp(value.heat, 0, 6)]) : themeColor(RGB(255, 255, 255));
-    if (selected) background = heat ? blend(background, themeColor(Selection), 0.25) : themeColor(Selection); else if (hot) background = heat ? blend(background, themeColor(Hover), 0.25) : themeColor(Hover);
+    const auto& definition = defs[size_t(id)]; const auto& value = size_t(id) < row.cells.size() ? row.cells[size_t(id)] : empty;
+    const bool heat = row.kind != RowKind::Heading && definition.heat && value.heat >= 0 && !compact && !highContrast;
+    COLORREF background = heat ? heatColors[std::clamp(value.heat, 0, 6)] : surface;
+    if (selected) background = heat ? blend(background, selection, 0.25) : selection; else if (hot) background = heat ? blend(background, hover, 0.25) : hover;
     SetDCBrushColor(dc, background); FillRect(dc, &box, GetStockBrush(DC_BRUSH));
-    if (heat) { SetDCBrushColor(dc, blend(themeColor(RGB(190, 140, 130)), background, 0.25)); RECT edge{box.right - 1, box.top, box.right, box.bottom}; FillRect(dc, &edge, GetStockBrush(DC_BRUSH)); edge = {box.left - 1, box.top, box.left, box.bottom}; FillRect(dc, &edge, GetStockBrush(DC_BRUSH)); }
-    const COLORREF foreground = highContrast && (selected || hot) ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0));
     if (row.kind == RowKind::Heading) {
-      if (id == 0) { RECT text{box.left + scale(10), box.top + scale(4), client.right, box.bottom}; SelectObject(dc, headingFont); SetTextColor(dc, highContrast ? foreground : themeColor(HeadingText)); DrawTextW(dc, value.text.c_str(), -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX); SelectObject(dc, font); }
+      if (id == 0) { RECT text{box.left + scale(12), box.top, client.right, box.bottom}; SelectObject(dc, headingFont); SetTextColor(dc, foreground); DrawTextW(dc, value.text.c_str(), -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX); SelectObject(dc, font); }
       continue;
     }
     RECT text{box.left + scale(6), box.top, box.right - scale(6), box.bottom};
     if (id == 0) {
       int iconLeft = box.left + scale(6);
       if (tree) {
-        if (row.expandable) chevron(dc, float(box.left + scale(11) + indent), float(box.top + (box.bottom - box.top) / 2), float(scale(100)) / 100, row.expanded, highContrast ? foreground : RGB(128, 128, 128));
+        if (row.expandable) chevron(dc, float(box.left + scale(11) + indent), float(box.top + (box.bottom - box.top) / 2), float(scale(100)) / 100, row.expanded, highContrast ? foreground : uiColor(UiColor::MutedText));
         iconLeft = box.left + scale(28) + indent;
       } else if (compact) iconLeft = box.left + scale(8);
       icons->draw(dc, row.icon, iconLeft, box.top + (box.bottom - box.top - iconSize) / 2, iconSize);
@@ -538,7 +543,10 @@ std::wstring Application::headerValue(int column) const {
   return number(std::min(100.0, value), 0) + L"%";
 }
 void Application::paintHeader(HDC dc, RECT client) {
-  FillRect(dc, &client, backgroundBrush); SetBkMode(dc, TRANSPARENT);
+  const COLORREF surface = uiColor(UiColor::SurfaceAlt), hover = uiColor(UiColor::Hover), border = uiColor(UiColor::Border);
+  const COLORREF text = uiColor(UiColor::Text), mutedText = uiColor(UiColor::MutedText);
+  const auto& heatColors = dark ? DarkHeat : LightHeat;
+  SetDCBrushColor(dc, surface); FillRect(dc, &client, GetStockBrush(DC_BRUSH)); SetBkMode(dc, TRANSPARENT);
   updateColumnGeometry(); const auto defs = definitions(selectedTab); const bool twoLine = twoLineHeader();
   RECT clip{}; GetClipBox(dc, &clip);
   for (int position = 0; position < displayCount; ++position) {
@@ -548,24 +556,24 @@ void Application::paintHeader(HDC dc, RECT client) {
     if (id < 0 || size_t(id) >= defs.size()) continue;
     const auto& definition = defs[size_t(id)]; const bool right = (definition.right || definition.heat) && id != 0 && !(definition.heat && !definition.right);
     const auto value = twoLine && definition.heat ? headerValue(id) : L"";
-    const COLORREF foreground = highContrast && index == hotHeader ? GetSysColor(COLOR_HIGHLIGHTTEXT) : themeColor(RGB(0, 0, 0));
-    COLORREF background = index == hotHeader ? themeColor(Hover) : themeColor(RGB(255, 255, 255));
-    if (!highContrast && !value.empty()) { const double amount = _wtof(value.c_str()); if (amount >= 90) background = themeColor(Heat[6]); else if (amount >= 80) background = themeColor(Heat[5]); }
+    const COLORREF foreground = highContrast && index == hotHeader ? uiColor(UiColor::SelectionText) : text;
+    COLORREF background = index == hotHeader ? hover : surface;
+    bool busy = false;
+    if (!highContrast && !value.empty()) { const double amount = _wtof(value.c_str()); if (amount >= 80) { background = heatColors[amount >= 90 ? 6 : 5]; busy = true; } }
     SetDCBrushColor(dc, background); RECT fill{box.left, box.top, box.right - 1, box.bottom - 1}; FillRect(dc, &fill, GetStockBrush(DC_BRUSH));
-    if (dark) { RECT separator{box.right - 1, box.top + 1, box.right, box.bottom - 1}; SetDCBrushColor(dc, themeColor(RGB(64, 64, 64))); FillRect(dc, &separator, GetStockBrush(DC_BRUSH)); }
-    else for (int y = box.top + 1; y < box.bottom - 1; ++y) { const double fraction = double(y - box.top) / std::max(1L, box.bottom - box.top); const int shade = int(232 - 46 * fraction); SetPixelV(dc, box.right - 1, y, themeColor(RGB(shade, shade, shade))); }
-    if (!value.empty()) { RECT top{box.left + scale(4), box.top + scale(4), box.right - scale(7), box.top + scale(25)}; SelectObject(dc, percentFont); SetTextColor(dc, foreground); DrawTextW(dc, value.c_str(), -1, &top, DT_RIGHT | DT_TOP | DT_SINGLELINE); }
-    RECT label{box.left + scale(6), twoLine ? box.bottom - scale(23) : box.top, box.right - scale(7), twoLine ? box.bottom - scale(4) : box.bottom - 1};
-    SelectObject(dc, font); SetTextColor(dc, highContrast ? foreground : themeColor(HeaderText)); DrawTextW(dc, definition.title, -1, &label, (right ? DT_RIGHT : DT_LEFT) | (twoLine ? DT_BOTTOM : DT_VCENTER) | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    RECT separator{box.right - 1, box.top + scale(8), box.right, box.bottom - scale(8)}; SetDCBrushColor(dc, border); FillRect(dc, &separator, GetStockBrush(DC_BRUSH));
+    if (!value.empty()) { RECT top{box.left + scale(8), box.top + scale(6), box.right - scale(8), box.top + scale(28)}; SelectObject(dc, percentFont); SetTextColor(dc, foreground); DrawTextW(dc, value.c_str(), -1, &top, DT_RIGHT | DT_TOP | DT_SINGLELINE); }
+    RECT label{box.left + scale(8), twoLine ? box.bottom - scale(23) : box.top, box.right - scale(8), twoLine ? box.bottom - scale(8) : box.bottom - 1};
+    SelectObject(dc, font); SetTextColor(dc, highContrast || busy ? foreground : mutedText); DrawTextW(dc, definition.title, -1, &label, (right ? DT_RIGHT : DT_LEFT) | (twoLine ? DT_BOTTOM : DT_VCENTER) | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     if (id == sortColumn[size_t(selectedTab)] && !compact) {
-      const COLORREF arrow = highContrast ? foreground : RGB(118, 118, 118);
+      const COLORREF arrow = highContrast || busy ? foreground : mutedText;
       Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias); Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(arrow), GetGValue(arrow), GetBValue(arrow)), 1.0f); const float unit = float(scale(100)) / 100;
       const float left = float(twoLine && right ? box.left + scale(9) : (box.left + box.right) / 2 - scale(4)), top = float(box.top + scale(twoLine ? 6 : 1)), width = 8 * unit, height = 4 * unit;
       const bool descending = !ascending[size_t(selectedTab)];
       const Gdiplus::PointF points[] = {{left, descending ? top : top + height}, {left + width / 2, descending ? top + height : top}, {left + width, descending ? top : top + height}}; graphics.DrawLines(&pen, points, 3);
     }
   }
-  RECT bottom{client.left, client.bottom - 1, client.right, client.bottom}; SetDCBrushColor(dc, themeColor(RGB(229, 229, 229))); FillRect(dc, &bottom, GetStockBrush(DC_BRUSH));
+  RECT bottom{client.left, client.bottom - 1, client.right, client.bottom}; SetDCBrushColor(dc, border); FillRect(dc, &bottom, GetStockBrush(DC_BRUSH));
 }
 LRESULT CALLBACK Application::headerProcedure(HWND target, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context) {
   auto app = reinterpret_cast<Application*>(context);
@@ -615,7 +623,7 @@ LRESULT CALLBACK Application::headerProcedure(HWND target, UINT message, WPARAM 
   }
   case HDM_LAYOUT: {
     const auto result = DefSubclassProc(target, message, word, data); const auto layout = reinterpret_cast<HDLAYOUT*>(data);
-    if (layout && layout->prc && layout->pwpos && !app->compact) { const int height = app->twoLineHeader() ? app->scale(44) : app->scale(25); layout->pwpos->cy = height; layout->prc->top = layout->pwpos->y + height; }
+    if (layout && layout->prc && layout->pwpos && !app->compact) { const int height = app->twoLineHeader() ? app->scale(52) : app->scale(34); layout->pwpos->cy = height; layout->prc->top = layout->pwpos->y + height; }
     return result;
   }
   case WM_MOUSEMOVE: { HDHITTESTINFO hit{}; hit.pt = {GET_X_LPARAM(data), GET_Y_LPARAM(data)}; const int item = int(SendMessageW(target, HDM_HITTEST, 0, LPARAM(&hit))); if (item != app->hotHeader) { app->hotHeader = item; InvalidateRect(target, nullptr, FALSE); TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, target, 0}; TrackMouseEvent(&track); } break; }

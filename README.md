@@ -1,6 +1,6 @@
 # Task Manager
 
-A native Windows task manager with the classic Windows 10 layout, live hardware graphs, process controls, search, and light and dark themes. Written in C++20. Runs as a single executable without .NET or additional runtime downloads.
+A native Windows task manager with Windows 11-inspired navigation, live hardware graphs, process controls, search, and light and dark themes. Written in C++20. Runs as a single executable without .NET, a browser engine or additional runtime downloads.
 
 See the [v1.3.0 release notes](docs/releases/v1.3.0.md) for scoped search, CSV export, sampling recovery, reliability fixes and the Python development tools.
 
@@ -40,11 +40,13 @@ If you need to restore Windows Task Manager outside the UI, run this from an adm
 - **App history:** locally recorded CPU time, with a reset option.
 - **Startup:** Run entries, startup folders, boot/logon scheduled tasks, automatic services and drivers, and packaged startup declarations. Supported Run and folder entries can be enabled or disabled; other sources link to Windows management tools.
 - **Users, Details and Services:** session activity, process metadata and controls, service status and start/stop/restart actions. Failed service refreshes retain the last known rows and show an unavailable or outdated status with the Windows error code; F5 retries immediately. Windows protection and permissions still apply.
-- **Appearance:** Light, Dark and Use Windows setting; High Contrast follows system colours. Columns and sorting are saved separately for each tab.
+- **Appearance:** a collapsible sidebar, a page command bar, clearer table spacing, and Light, Dark and Use Windows setting themes. High Contrast follows system colours. Navigation preference, columns and sorting are saved; narrow windows collapse the sidebar automatically.
 - **Search:** filter table rows by text or combine exact PID, name, publisher, command line, path, account and status fields. Quoted values and field exclusions are supported. Matching groups retain their context. Search does not request a fresh system sample.
-- **Export:** save the currently filtered and sorted table to a UTF-8 CSV file with **File > Export current table** or **Ctrl+Shift+S**. The export includes the displayed columns in their current order, with complete cell text.
+- **Export:** save the currently filtered and sorted table to a UTF-8 CSV file with the **Export** command, **More actions > File > Export current table**, or **Ctrl+Shift+S**. The export includes the displayed columns in their current order, with complete cell text.
 
-Right-click a column heading to choose visible columns. **Ctrl+F** opens search; **Enter** applies it immediately and focuses the results; **Esc** clears it. **F5** refreshes. **Ctrl+Tab** cycles tabs, and **Alt+1** through **Alt+7** selects one directly. Double-click a Performance graph or its sidebar to enter a summary view.
+Search stays visible on table pages. **Ctrl+F** focuses it; **Enter** applies it immediately and focuses the results; **Esc** clears it and returns to the results. **F5** refreshes. **Ctrl+Tab** cycles pages, and **Alt+1** through **Alt+7** selects one directly. The navigation group also supports arrow keys and Home/End. **F10** opens More actions; **Alt+F**, **Alt+O** and **Alt+V** open the File, Options and View menus. Settings opens Options directly. Less common commands remain in More actions when the window is narrow.
+
+Right-click a column heading to choose visible columns. Fresh settings show Name, Status, CPU, Memory, Disk, Network and GPU on Processes; GPU engine and power estimates remain available in the column menu. Existing saved columns are preserved. Double-click a Performance graph or its sidebar to enter a summary view, or use **Fewer details** on Processes for the compact task list.
 
 **View → Update speed → Adaptive (low overhead)** targets process updates between 250 ms and 4 seconds, backing off when measured sampling and table-update work becomes expensive. It aims for roughly 2% sampling/display wall-time duty, not a guaranteed CPU cap; asynchronous metadata, painting and tracing also use resources. Adaptive uses a 1-second target on other full-size tabs. It is the default for new settings; existing saved update speeds are preserved. Fixed High targets 500 ms, Normal 1 second, and Low 4 seconds.
 
@@ -90,7 +92,7 @@ This is an independent implementation, not a complete copy of Microsoft's Task M
 | Packaged apps | Grouped by package family, but classified as apps only when the group has a visible app window. Names and icons use available executable metadata, with a generic icon fallback rather than resolved manifest display names and logos. |
 | Process controls | No UAC virtualization toggle or kernel dumps. Affinity covers one processor group, up to 64 logical processors. Protected processes may refuse actions even with elevation. |
 | Efficiency mode | Available only when Windows supports querying the process's policy. Requests EcoQoS and lowers priority; it is not a CPU cap. Disabled on the tested Windows 10 build 19045. Live Windows 11 verification is still outstanding. |
-| Search and themes | Added to the classic tab layout. Search supports plain substrings and scoped AND/exclusion queries, without OR, regular expressions or Performance-resource filtering. Popup menus and system dialogs remain OS-dependent. |
+| Search and themes | The navigation and command bar use native Windows controls with custom GDI/GDI+ painting. Search supports plain substrings and scoped AND/exclusion queries, without OR, regular expressions or Performance-resource filtering. Popup menus and system dialogs remain OS-dependent. |
 
 See [feature differences](docs/PARITY.md) and [startup coverage](docs/STARTUP.md) for details.
 

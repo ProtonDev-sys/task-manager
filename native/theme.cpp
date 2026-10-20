@@ -4,19 +4,44 @@
 #include <windowsx.h>
 
 namespace taskmgr {
+COLORREF Application::uiColor(UiColor role) const {
+  if (highContrast) {
+    switch (role) {
+    case UiColor::Window: case UiColor::Surface: case UiColor::SurfaceAlt: return GetSysColor(COLOR_WINDOW);
+    case UiColor::Accent: case UiColor::Hover: case UiColor::Selection: return GetSysColor(COLOR_HIGHLIGHT);
+    case UiColor::SelectionText: return GetSysColor(COLOR_HIGHLIGHTTEXT);
+    default: return GetSysColor(COLOR_WINDOWTEXT);
+    }
+  }
+  switch (role) {
+  case UiColor::Window: return dark ? RGB(32, 32, 32) : RGB(243, 243, 243);
+  case UiColor::Surface: return dark ? RGB(39, 39, 39) : RGB(255, 255, 255);
+  case UiColor::SurfaceAlt: return dark ? RGB(44, 44, 44) : RGB(249, 249, 249);
+  case UiColor::Border: return dark ? RGB(61, 61, 61) : RGB(229, 229, 229);
+  case UiColor::MutedText: return dark ? RGB(192, 192, 192) : RGB(96, 96, 96);
+  case UiColor::Accent: return dark ? RGB(96, 205, 255) : RGB(0, 103, 192);
+  case UiColor::Hover: return dark ? RGB(51, 51, 51) : RGB(234, 234, 234);
+  case UiColor::Selection: return dark ? RGB(37, 60, 74) : RGB(227, 239, 249);
+  case UiColor::Text: case UiColor::SelectionText: return dark ? RGB(243, 243, 243) : RGB(27, 27, 27);
+  }
+  return dark ? RGB(243, 243, 243) : RGB(27, 27, 27);
+}
 COLORREF Application::themeColor(COLORREF light) const {
   if (highContrast) {
     if (light == RGB(255, 255, 255)) return GetSysColor(COLOR_WINDOW);
     if (light == RGB(205, 232, 255) || light == RGB(229, 243, 255)) return GetSysColor(COLOR_HIGHLIGHT);
     return GetSysColor(COLOR_WINDOWTEXT);
   }
+  // Existing graph and performance drawing uses these semantic colour aliases.
+  // Keep it on the same palette as the shell without rebuilding any view models.
+  if (light == RGB(255, 255, 255)) return uiColor(UiColor::Surface);
+  if (light == RGB(0, 0, 0)) return uiColor(UiColor::Text);
+  if (light == RGB(205, 232, 255)) return uiColor(UiColor::Selection);
+  if (light == RGB(229, 243, 255)) return uiColor(UiColor::Hover);
+  if (light == RGB(76, 96, 122)) return uiColor(UiColor::MutedText);
+  if (light == RGB(31, 89, 195) || light == RGB(0, 102, 204)) return uiColor(UiColor::Accent);
+  if (light == RGB(229, 229, 229)) return uiColor(UiColor::Border);
   if (!dark) return light;
-  if (light == RGB(255, 255, 255)) return RGB(32, 32, 32);
-  if (light == RGB(0, 0, 0)) return RGB(240, 240, 240);
-  if (light == RGB(205, 232, 255)) return RGB(40, 74, 103);
-  if (light == RGB(229, 243, 255)) return RGB(48, 55, 63);
-  if (light == RGB(76, 96, 122)) return RGB(197, 211, 227);
-  if (light == RGB(31, 89, 195) || light == RGB(0, 102, 204)) return RGB(112, 183, 255);
   if (light == RGB(230, 212, 239)) return RGB(88, 53, 104);
   if (light == RGB(244, 236, 248)) return RGB(56, 43, 64);
   const int red = GetRValue(light), green = GetGValue(light), blue = GetBValue(light);
@@ -50,8 +75,8 @@ void Application::applyTheme() {
   }
   DefWindowProcW(window, WM_THEMECHANGED, 0, 0);
   if (FAILED(DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled)))) DwmSetWindowAttribute(window, 19, &enabled, sizeof(enabled));
-  const COLORREF caption = dark ? RGB(32, 32, 32) : DWMWA_COLOR_DEFAULT;
-  const COLORREF captionText = dark ? RGB(240, 240, 240) : DWMWA_COLOR_DEFAULT;
+  const COLORREF caption = highContrast ? DWMWA_COLOR_DEFAULT : uiColor(UiColor::Window);
+  const COLORREF captionText = highContrast ? DWMWA_COLOR_DEFAULT : uiColor(UiColor::Text);
   DwmSetWindowAttribute(window, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
   DwmSetWindowAttribute(window, DWMWA_TEXT_COLOR, &captionText, sizeof(captionText));
   ListView_SetBkColor(list, themeColor(RGB(255, 255, 255)));
@@ -59,7 +84,7 @@ void Application::applyTheme() {
   ListView_SetTextColor(list, themeColor(RGB(0, 0, 0)));
   SetWindowTheme(list, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
   SetWindowTheme(searchBox, dark ? L"" : nullptr, dark ? L"" : nullptr);
-  SendMessageW(end, BM_SETSTYLE, dark ? BS_OWNERDRAW : BS_PUSHBUTTON, TRUE);
+  SendMessageW(end, BM_SETSTYLE, BS_OWNERDRAW, TRUE);
   MENUINFO menu{sizeof(menu)}; menu.fMask = MIM_BACKGROUND; menu.hbrBack = backgroundBrush; SetMenuInfo(menuBar, &menu);
   for (UINT index = 0; index < 3; ++index) {
     MENUITEMINFOW item{sizeof(item)}; item.fMask = MIIM_FTYPE | MIIM_DATA; item.fType = dark || highContrast ? MFT_OWNERDRAW : MFT_STRING; item.dwItemData = index + 1;
@@ -90,7 +115,7 @@ void Application::paintScrollbars(HDC destination) {
     if (!GetScrollBarInfo(list, object, &info) || (info.rgstate[0] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN))) continue;
     RECT bounds = info.rcScrollBar; OffsetRect(&bounds, -windowBounds.left, -windowBounds.top);
     const bool vertical = object == OBJID_VSCROLL;
-    fill(bounds, RGB(32, 32, 32));
+    fill(bounds, uiColor(UiColor::Surface));
     RECT thumb = bounds;
     if (vertical) { thumb.top = bounds.top + info.xyThumbTop; thumb.bottom = bounds.top + info.xyThumbBottom; thumb.left += 2; thumb.right -= 2; }
     else { thumb.left = bounds.left + info.xyThumbTop; thumb.right = bounds.left + info.xyThumbBottom; thumb.top += 2; thumb.bottom -= 2; }
@@ -107,7 +132,7 @@ void Application::paintScrollbars(HDC destination) {
     if (vertical) { corner.left = bounds.left; corner.right = bounds.right; }
     else { corner.top = bounds.top; corner.bottom = bounds.bottom; }
   }
-  if (corner.right > corner.left && corner.bottom > corner.top) fill(corner, RGB(32, 32, 32));
+  if (corner.right > corner.left && corner.bottom > corner.top) fill(corner, uiColor(UiColor::Surface));
   RestoreDC(dc, saved);
   if (!destination) ReleaseDC(list, dc);
 }

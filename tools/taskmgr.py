@@ -241,6 +241,8 @@ def screenshots(arguments):
     for theme in ("light", "dark"):
         target = directory / theme
         flags = ["--dark"] if theme == "dark" else []
+        if arguments.demo_data:
+            flags.append("--demo-data")
         result = subprocess.run([executable, "--screenshots", str(target), *flags],
                                 timeout=120, check=False, **production.process_options())
         if result.returncode:
@@ -248,7 +250,8 @@ def screenshots(arguments):
         for name in names:
             captures.append({"theme": theme, "view": Path(name).stem, **png_identity(target / name)})
         print(f"Captured {len(names)} {theme} screenshots; visual review is still required.", flush=True)
-    write_json(directory / "screenshots.json", {"executable": identity(executable), "images": captures})
+    write_json(directory / "screenshots.json", {"executable": identity(executable),
+               "dataSource": "synthetic" if arguments.demo_data else "live", "images": captures})
 
 
 def validate_network_smoke(report, returncode):
@@ -555,6 +558,8 @@ def parser():
     screenshot_parser = sub.add_parser("screenshots", help="capture all native views in light and dark themes for visual review")
     screenshot_parser.add_argument("--executable", type=Path, default=DEVELOPER)
     screenshot_parser.add_argument("--output-dir", type=Path, default=ARTIFACTS / "screenshots")
+    screenshot_parser.add_argument("--demo-data", action="store_true",
+                                   help="render synthetic process and hardware data for shareable screenshots")
     screenshot_parser.set_defaults(function=screenshots)
     network_parser = sub.add_parser("network-smoke", help="verify owned UDP traffic or report a recognized trace limitation")
     network_parser.add_argument("--executable", type=Path, default=DEVELOPER)

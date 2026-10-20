@@ -23,9 +23,10 @@ Application::~Application() {
 #endif
   if (actionWorker.joinable()) actionWorker.join();
   icons.reset();
-  for (auto object : {font, percentFont, headingFont, titleFont, subtitleFont, labelFont, valueFont, sidebarFont, linkFont}) if (object) DeleteObject(object);
+  for (auto object : {font, percentFont, headingFont, titleFont, subtitleFont, labelFont, valueFont, sidebarFont, linkFont, shellHeadingFont}) if (object) DeleteObject(object);
   if (rowSpacer) ImageList_Destroy(rowSpacer);
   if (backgroundBrush) DeleteObject(backgroundBrush);
+  if (menuBar) DestroyMenu(menuBar);
   for (auto icon : {windowIcon, smallIcon, trayIcon}) if (icon) DestroyIcon(icon);
 }
 int Application::run() {
@@ -60,7 +61,7 @@ int Application::run() {
 #endif
   const bool renderOffscreen = screenshots || hidden();
   int width = normalRect.right - normalRect.left, height = normalRect.bottom - normalRect.top, x = normalRect.left, y = normalRect.top;
-  if (width <= 0 || height <= 0 || !persistent()) { width = 1010; height = 875; x = y = CW_USEDEFAULT; }
+  if (width <= 0 || height <= 0 || !persistent()) { width = hidden() ? 1010 : 1180; height = hidden() ? 875 : 780; x = y = CW_USEDEFAULT; }
   // Diagnostic runs use a fully transparent, click-through, non-activating window owned by a hidden window (so no taskbar button):
   // Windows still paints and composes it, but nothing appears on the desktop.
   HWND owner = nullptr;
@@ -77,6 +78,9 @@ int Application::run() {
   FILETIME created{}, exited{}; GetProcessTimes(GetCurrentProcess(), &created, &exited, &cpuStartKernel, &cpuStartUser);
 #endif
   fastVisible = compact || selectedTab == ProcessesTab || selectedTab == DetailsTab || selectedTab == UsersTab;
+#ifdef TASKMGR_DIAGNOSTICS
+  if (options.demoData) prepareDemoScreenshots();
+#endif
   sampler = std::thread([this] { worker(); }); SetTimer(window, 1, hidden() ? 100 : screenshots ? 250 : 1000, nullptr);
   if (persistent()) PostMessageW(window, WM_APP + 11, 0, 0);
 #ifdef TASKMGR_DIAGNOSTICS
@@ -88,7 +92,8 @@ int Application::run() {
     const bool control = GetKeyState(VK_CONTROL) & 0x8000, shift = GetKeyState(VK_SHIFT) & 0x8000, alt = GetKeyState(VK_MENU) & 0x8000;
     if (message.message == WM_KEYDOWN && message.wParam == VK_F5) { refresh(); continue; }
     if (message.message == WM_KEYDOWN && control && message.wParam == 'F') { command(SearchId); continue; }
-    if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE && searchVisible && !compact && !summary && selectedTab != PerformanceTab) { SetFocus(searchBox); toggleSearch(); continue; }
+    if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE && searchVisible && !compact && !summary && selectedTab != PerformanceTab) { clearSearch(); continue; }
+    if (!compact && !summary && ((message.message == WM_KEYDOWN && message.wParam == VK_F10 && !shift) || (message.message == WM_SYSKEYDOWN && alt && (message.wParam == 'F' || message.wParam == 'O' || message.wParam == 'V')))) { showShellMenu(menuButton, message.wParam == 'F' ? 0 : message.wParam == 'O' ? 1 : message.wParam == 'V' ? 2 : -1); continue; }
     if (message.message == WM_KEYDOWN && control && message.wParam == VK_TAB && !compact && !summary) { requestTab(((pendingTab >= 0 ? pendingTab : TabCtrl_GetCurSel(tabs)) + (shift ? TabCount - 1 : 1)) % TabCount); continue; }
     if (message.message == WM_SYSKEYDOWN && alt && message.wParam >= '1' && message.wParam <= '7' && !compact && !summary) { requestTab(int(message.wParam - '1')); continue; }
     if (message.message == WM_KEYDOWN && control && shift && message.wParam == 'N') { command(RunId); continue; }
@@ -100,16 +105,19 @@ int Application::run() {
   return exitCode ? exitCode : int(message.wParam);
 }
 void Application::createFonts() {
-  for (auto object : {font, percentFont, headingFont, titleFont, subtitleFont, labelFont, valueFont, sidebarFont, linkFont}) if (object) DeleteObject(object);
-  auto make = [&](int size, bool underline = false) { return CreateFontW(-scale(size), 0, 0, 0, FW_NORMAL, FALSE, underline, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI"); };
-  font = make(12); percentFont = make(16); headingFont = make(16); titleFont = make(28); subtitleFont = make(15); labelFont = make(12); valueFont = make(24); sidebarFont = make(16); linkFont = make(12, true);
-  for (const auto control : {tabs, list, end, fewer, link, historyLink, serviceStatus, searchBox}) if (control) SendMessageW(control, WM_SETFONT, WPARAM(font), TRUE);
+  for (auto object : {font, percentFont, headingFont, titleFont, subtitleFont, labelFont, valueFont, sidebarFont, linkFont, shellHeadingFont}) if (object) DeleteObject(object);
+  auto make = [&](int size, bool underline = false, int weight = FW_NORMAL) { return CreateFontW(-scale(size), 0, 0, 0, weight, FALSE, underline, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI"); };
+  font = make(14); percentFont = make(18); headingFont = make(16); titleFont = make(28); subtitleFont = make(15); labelFont = make(12); valueFont = make(24); sidebarFont = make(16); linkFont = make(14, true); shellHeadingFont = make(20, false, FW_SEMIBOLD);
+  for (const auto control : {tabs, list, end, fewer, link, historyLink, serviceStatus, searchBox, navigationToggle, runButton, exportButton, menuButton, settingsButton}) if (control) SendMessageW(control, WM_SETFONT, WPARAM(font), TRUE);
+  for (const auto control : navigation) if (control) SendMessageW(control, WM_SETFONT, WPARAM(font), TRUE);
 }
 void Application::create() {
   createFonts();
   const auto instance = GetModuleHandleW(nullptr);
   auto control = [&](const wchar_t* klass, const wchar_t* title, DWORD style, int id, DWORD extra = 0) { auto created = CreateWindowExW(extra, klass, title, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(INT_PTR(id)), instance, nullptr); SendMessageW(created, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE); return created; };
-  tabs = control(WC_TABCONTROLW, L"", WS_TABSTOP | TCS_FOCUSNEVER, TabsId);
+  // Retain the tab control only as a logical selection backend for existing commands and diagnostics.
+  tabs = control(WC_TABCONTROLW, L"", TCS_FOCUSNEVER, TabsId);
+  ShowWindow(tabs, SW_HIDE);
   SetWindowSubclass(tabs, tabsProcedure, 4, reinterpret_cast<DWORD_PTR>(this));
   for (int index = 0; index < TabCount; ++index) { TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(tabNames[index]); TabCtrl_InsertItem(tabs, index, &item); }
   TabCtrl_SetCurSel(tabs, selectedTab);
@@ -124,18 +132,18 @@ void Application::create() {
   historyLink = control(L"BUTTON", L"Delete usage history", BS_OWNERDRAW | WS_TABSTOP, HistoryLinkId);
   serviceStatus = control(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, ServiceStatusId);
   for (const auto button : {fewer, link, historyLink}) SetWindowSubclass(button, linkProcedure, 3, reinterpret_cast<DWORD_PTR>(this));
-  end = control(L"BUTTON", L"End task", BS_PUSHBUTTON | WS_TABSTOP, EndId);
+  end = control(L"BUTTON", L"End task", BS_OWNERDRAW | WS_TABSTOP, EndId);
   SetWindowSubclass(end, linkProcedure, 3, reinterpret_cast<DWORD_PTR>(this));
-  searchBox = control(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, SearchId, WS_EX_CLIENTEDGE);
+  searchBox = control(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, SearchId);
   SetWindowSubclass(searchBox, searchProcedure, 4, reinterpret_cast<DWORD_PTR>(this));
   SendMessageW(searchBox, EM_SETLIMITTEXT, 256, 0);
-  SendMessageW(searchBox, EM_SETCUEBANNER, TRUE, LPARAM(L"Search text or fields: name:browser pid:1234 -status:suspended"));
+  SendMessageW(searchBox, EM_SETCUEBANNER, TRUE, LPARAM(L"Search by name, publisher or PID"));
 #ifdef TASKMGR_DIAGNOSTICS
-  icons = std::make_unique<Icons>(window, scale(16), hidden());
+  icons = std::make_unique<Icons>(window, scale(16), hidden(), !options.demoData);
 #else
   icons = std::make_unique<Icons>(window, scale(16));
 #endif
-  menuBar = CreateMenu(); const auto file = CreatePopupMenu(), options_ = CreatePopupMenu(), view = CreatePopupMenu(), speed = CreatePopupMenu(), defaults = CreatePopupMenu();
+  menuBar = CreatePopupMenu(); const auto file = CreatePopupMenu(), options_ = CreatePopupMenu(), view = CreatePopupMenu(), speed = CreatePopupMenu(), defaults = CreatePopupMenu();
   AppendMenuW(file, MF_STRING, RunId, L"&Run new task"); AppendMenuW(file, MF_STRING, ExportId, L"&Export current table...\tCtrl+Shift+S"); AppendMenuW(file, MF_SEPARATOR, 0, nullptr); AppendMenuW(file, MF_STRING, ExitId, L"E&xit");
   AppendMenuW(options_, MF_STRING, TopmostId, L"&Always on top"); AppendMenuW(options_, MF_STRING, MinimizeOnUseId, L"&Minimize on use"); AppendMenuW(options_, MF_STRING, HideId, L"&Hide when minimized");
   AppendMenuW(options_, MF_STRING, ReplaceDefaultId, L"&Replace default Task Manager");
@@ -149,66 +157,17 @@ void Application::create() {
   AppendMenuW(view, MF_STRING, SearchId, L"&Search\tCtrl+F");
   AppendMenuW(view, MF_STRING, GroupId, L"&Group by type"); AppendMenuW(view, MF_STRING, ExpandAllId, L"&Expand all"); AppendMenuW(view, MF_STRING, CollapseAllId, L"&Collapse all");
   AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File"); AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(options_), L"&Options"); AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&View");
-  SetMenu(window, menuBar);
+  createShell();
   tray.hWnd = window; tray.uID = 1; tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; tray.uCallbackMessage = TrayMessage; tray.hIcon = smallIcon; wcscpy_s(tray.szTip, L"Task Manager");
   taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
   if (taskbarCreatedMessage) ChangeWindowMessageFilterEx(window, taskbarCreatedMessage, MSGFLT_ALLOW, nullptr);
   publishTray();
   applyTheme(); columns(); layout(); updateFooter();
 }
-void Application::layout() {
-  auto show = [](HWND control, bool visible) { if (((GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0) != visible) ShowWindow(control, visible ? SW_SHOWNA : SW_HIDE); };
-  auto place = [&](HWND control, int left, int top, int width, int height) {
-    RECT bounds{}; GetWindowRect(control, &bounds); MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&bounds), 2);
-    if (bounds.left != left || bounds.top != top || bounds.right - bounds.left != width || bounds.bottom - bounds.top != height) {
-      MoveWindow(control, left, top, width, height, FALSE); InvalidateRect(control, nullptr, FALSE);
-    }
-  };
-  RECT area{}; GetClientRect(window, &area); const int width = area.right, height = area.bottom;
-  const int footer = scale(50);
-  if (summary) {
-    for (const auto control : {tabs, list, end, fewer, link, historyLink, serviceStatus, searchBox}) show(control, false);
-    show(performance, true); place(performance, 0, 0, width, height); InvalidateRect(performance, nullptr, FALSE); return;
-  }
-  updateFooter();
-  const bool perf = selectedTab == PerformanceTab && !compact;
-  RECT item{}; TabCtrl_GetItemRect(tabs, 0, &item); const int tabBottom = scale(3) + item.bottom + scale(2);
-  show(tabs, !compact); place(tabs, scale(2), scale(3), std::max(1, width - scale(4)), item.bottom + scale(2));
-  const int gap = compact ? 0 : selectedTab == StartupTab || selectedTab == HistoryTab ? scale(34) : scale(14);
-  const bool showSearch = searchVisible && !compact && !perf;
-  show(searchBox, showSearch);
-  if (showSearch) place(searchBox, scale(10), tabBottom + gap, std::max(scale(100), width - scale(20)), scale(26));
-  const int top = compact ? 0 : perf ? tabBottom : tabBottom + gap + (showSearch ? scale(34) : 0), bottom = std::max(top + 1, height - footer);
-  show(list, !perf); show(performance, perf);
-  place(perf ? performance : list, 0, top, width, bottom - top);
-  if (compact) ListView_SetColumnWidth(list, 0, std::max(scale(100), width - GetSystemMetrics(SM_CXVSCROLL) - scale(4)));
-  HDC dc = GetDC(window); SelectObject(dc, font); SIZE text{}; auto measure = [&](HWND control) { wchar_t value[128]{}; GetWindowTextW(control, value, 128); GetTextExtentPoint32W(dc, value, int(wcslen(value)), &text); return int(text.cx); };
-  const int fewerWidth = measure(fewer) + scale(34), linkWidth = measure(link) + scale(8);
-  const bool showHistory = selectedTab == HistoryTab && !compact;
-  int historyWidth = 0, sinceWidth = 0;
-  if (showHistory) {
-    historyWidth = measure(historyLink) + scale(4);
-    const std::wstring since = L"Resource usage since " + [&] { SYSTEMTIME now{}; GetLocalTime(&now); FILETIME file{}; SystemTimeToFileTime(&now, &file); ULARGE_INTEGER value{file.dwLowDateTime, file.dwHighDateTime}; value.QuadPart -= ULONGLONG(std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - historySince).count()) * 10000000ULL; file = {value.LowPart, value.HighPart}; SYSTEMTIME local{}; FileTimeToSystemTime(&file, &local); wchar_t date[64]{}; GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &local, nullptr, date, 64, nullptr); return std::wstring(date); }() + L" for current user account.";
-    GetTextExtentPoint32W(dc, since.c_str(), int(since.size()), &text); sinceWidth = text.cx;
-  }
-  ReleaseDC(window, dc);
-  const int middle = height - footer / 2;
-  place(fewer, scale(8), middle - scale(12), fewerWidth, scale(24));
-  const bool showFewer = compact || selectedTab == ProcessesTab;
-  place(link, showFewer ? scale(8) + fewerWidth + scale(12) : scale(10), middle - scale(12), linkWidth, scale(24));
-  if (selectedTab == ServicesTab && !compact) {
-    const int left = scale(10) + linkWidth + scale(16);
-    place(serviceStatus, left, middle - scale(16), std::max(1, width - left - scale(10)), scale(34));
-  }
-  place(end, width - scale(10) - scale(82), middle - scale(12), scale(82), scale(23));
-  if (showHistory) place(historyLink, scale(9) + sinceWidth + scale(8), tabBottom + scale(8), historyWidth, scale(20));
-  show(historyLink, showHistory);
-  show(fewer, showFewer);
-  InvalidateRect(window, nullptr, TRUE);
-  if (perf) InvalidateRect(performance, nullptr, FALSE);
-}
 void Application::updateFooter() {
   if (!end) return;
+  auto show = [](HWND control, bool visible) { if (control && (((GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0) != visible)) ShowWindow(control, visible ? SW_SHOWNA : SW_HIDE); };
+  auto enable = [](HWND control, bool enabled) { if (control && (IsWindowEnabled(control) != FALSE) != enabled) EnableWindow(control, enabled); };
   const auto row = selectedRow(); std::wstring text = L"End task"; bool visible = true, enabled = row != nullptr;
   switch (compact ? ProcessesTab : selectedTab) {
   case ProcessesTab: enabled = row && (row->kind == RowKind::Process || row->kind == RowKind::Group || row->kind == RowKind::Window); if (row && row->process >= 0 && current && lower(current->processes[size_t(row->process)].name) == L"explorer.exe" && row->kind == RowKind::Process) text = L"Restart"; break;
@@ -218,9 +177,11 @@ void Application::updateFooter() {
   default: break;
   }
   wchar_t existing[64]{}; GetWindowTextW(end, existing, 64); if (text != existing) SetWindowTextW(end, text.c_str());
-  ShowWindow(end, visible ? SW_SHOW : SW_HIDE); EnableWindow(end, enabled);
+  show(end, visible && !summary); enable(end, enabled && !actionBusy);
+  enable(exportButton, canExportTable() && !actionBusy);
+  enable(runButton, !actionBusy);
   const wchar_t* linkText = selectedTab == PerformanceTab ? L"Open Resource Monitor" : selectedTab == ServicesTab ? L"Open Services" : selectedTab == StartupTab ? L"Open Startup settings" : nullptr;
-  if (linkText && !compact) { wchar_t current_[64]{}; GetWindowTextW(link, current_, 64); if (wcscmp(current_, linkText)) SetWindowTextW(link, linkText); ShowWindow(link, SW_SHOWNA); } else ShowWindow(link, SW_HIDE);
+  if (linkText && !compact && !summary) { wchar_t current_[64]{}; GetWindowTextW(link, current_, 64); if (wcscmp(current_, linkText)) SetWindowTextW(link, linkText); show(link, true); } else show(link, false);
   const auto fewerText = compact ? L"More details" : L"Fewer details";
   GetWindowTextW(fewer, existing, 64); if (wcscmp(existing, fewerText)) SetWindowTextW(fewer, fewerText);
   if (serviceStatus) {
@@ -235,47 +196,20 @@ void Application::updateFooter() {
     if (((GetWindowLongPtrW(serviceStatus, GWL_STYLE) & WS_VISIBLE) != 0) != statusVisible) ShowWindow(serviceStatus, statusVisible ? SW_SHOWNA : SW_HIDE);
   }
 }
-void Application::paintWindow(HDC dc) {
-  RECT area{}; GetClientRect(window, &area);
-  if (summary) return;
-  const int footerTop = area.bottom - scale(50);
-  RECT line{0, footerTop, area.right, footerTop + 1}; HBRUSH brush = CreateSolidBrush(themeColor(RGB(240, 240, 240))); FillRect(dc, &line, brush); DeleteObject(brush);
-  line.top += 1; line.bottom += 1; brush = CreateSolidBrush(themeColor(RGB(160, 160, 160))); FillRect(dc, &line, brush); DeleteObject(brush);
-  SetBkMode(dc, TRANSPARENT); SelectObject(dc, font);
-  if (IsWindowVisible(link) && IsWindowVisible(fewer)) { RECT bounds{}; GetWindowRect(fewer, &bounds); MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&bounds), 2); RECT bar{bounds.right + scale(2), bounds.top, bounds.right + scale(10), bounds.bottom}; SetTextColor(dc, themeColor(RGB(160, 160, 160))); DrawTextW(dc, L"|", 1, &bar, DT_CENTER | DT_VCENTER | DT_SINGLELINE); }
-  if (compact) return;
-  RECT item{}; TabCtrl_GetItemRect(tabs, 0, &item); const int tabBottom = scale(3) + item.bottom + scale(2);
-  if (selectedTab == StartupTab) {
-    RECT statusBand{0, tabBottom + scale(2), area.right, tabBottom + scale(34)};
-    FillRect(dc, &statusBand, backgroundBrush);
-    RECT coverage{scale(12), tabBottom + scale(8), std::max<LONG>(scale(12), area.right - scale(245)), tabBottom + scale(28)};
-    const auto message = !current || !current->startup->complete || (current->startup->entries.empty() && current->startup->warnings.empty()) ? L"Scanning startup sources..." : current->startup->warnings.empty() ? L"Extended startup inventory" : L"Partial coverage - see coverage rows";
-    SetTextColor(dc, themeColor(RGB(109, 109, 109))); DrawTextW(dc, message, -1, &coverage, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    const double bios = lastBiosSeconds();
-    if (bios > 0) {
-      const auto value = number(bios, 1) + L" seconds"; RECT bounds{0, tabBottom + scale(8), area.right - scale(12), tabBottom + scale(28)};
-      SetTextColor(dc, themeColor(RGB(0, 0, 0))); DrawTextW(dc, value.c_str(), -1, &bounds, DT_RIGHT | DT_SINGLELINE); SIZE size{}; GetTextExtentPoint32W(dc, value.c_str(), int(value.size()), &size);
-      bounds.right -= size.cx + scale(6); SetTextColor(dc, themeColor(RGB(109, 109, 109))); DrawTextW(dc, L"Last BIOS time:", -1, &bounds, DT_RIGHT | DT_SINGLELINE);
-    }
-  }
-  if (selectedTab == HistoryTab) {
-    SYSTEMTIME now{}; GetLocalTime(&now); FILETIME file{}; SystemTimeToFileTime(&now, &file); ULARGE_INTEGER value{file.dwLowDateTime, file.dwHighDateTime}; value.QuadPart -= ULONGLONG(std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - historySince).count()) * 10000000ULL; file = {value.LowPart, value.HighPart};
-    SYSTEMTIME local{}; FileTimeToSystemTime(&file, &local); wchar_t date[64]{}; GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &local, nullptr, date, 64, nullptr);
-    const auto text = L"Resource usage since " + std::wstring(date) + L" for current user account."; RECT bounds{scale(9), tabBottom + scale(10), area.right, tabBottom + scale(30)};
-    SetTextColor(dc, themeColor(RGB(0, 0, 0))); DrawTextW(dc, text.c_str(), -1, &bounds, DT_LEFT | DT_SINGLELINE);
-  }
-}
 void Application::selectTab(int tab) {
   if (tab < 0 || tab >= TabCount || tab == selectedTab) return;
-  const bool focusInPerformance = selectedTab == PerformanceTab && GetFocus() == performance;
+  const HWND focus = GetFocus();
+  const bool focusInPerformance = selectedTab == PerformanceTab && focus == performance;
+  const bool navigationFocus = std::find(navigation.begin(), navigation.end(), focus) != navigation.end();
   captureColumns();
   KillTimer(window, 3); sortQueued = false;
   selectedTab = tab; startupVisible = tab == StartupTab && !compact; if (TabCtrl_GetCurSel(tabs) != tab) TabCtrl_SetCurSel(tabs, tab); hotRow = -1;
   fastVisible = compact || tab == ProcessesTab || tab == DetailsTab || tab == UsersTab;
   if (tab != PerformanceTab) { if (columnsTab != tab) columns(); rebuild(); }
-  layout();
+  syncNavigation(); layout();
   if (tab == StartupTab && !startupRequested) { startupRequested = true; if (!current || current->startup->entries.empty()) refresh(false); }
-  if (tab == PerformanceTab && !hidden()) SetFocus(performance);
+  if (navigationFocus && !compact && !summary) SetFocus(navigation[size_t(tab)]);
+  else if (tab == PerformanceTab && !hidden()) SetFocus(performance);
   else if (focusInPerformance) SetFocus(list);
 }
 void Application::requestTab(int tab) {
@@ -283,33 +217,32 @@ void Application::requestTab(int tab) {
 #ifdef TASKMGR_DIAGNOSTICS
   if (hidden() && measured) ++tabRequests;
 #endif
-  if (!tabQueued && tab == selectedTab) return;
+  if (!tabQueued && tab == selectedTab) { if (TabCtrl_GetCurSel(tabs) != tab) TabCtrl_SetCurSel(tabs, tab); return; }
   pendingTab = tab;
   if (!tabQueued) {
-    SendMessageW(tabs, WM_SETREDRAW, FALSE, 0);
     tabQueued = PostMessageW(window, WM_APP + 12, 0, 0) != 0;
-    if (!tabQueued) { SendMessageW(tabs, WM_SETREDRAW, TRUE, 0); pendingTab = -1; selectTab(tab); InvalidateRect(tabs, nullptr, FALSE); }
+    if (!tabQueued) { pendingTab = -1; selectTab(tab); }
   }
 }
 void Application::setCompact(bool value) {
-  pendingTab = -1;
-  if (tabQueued) SendMessageW(tabs, WM_SETREDRAW, TRUE, 0);
+  pendingTab = -1; tabQueued = false;
+  if (tabs && TabCtrl_GetCurSel(tabs) != selectedTab) TabCtrl_SetCurSel(tabs, selectedTab);
   if (compact == value && hidden()) return;
   captureColumns(); compact = value; startupVisible = selectedTab == StartupTab && !compact;
   fastVisible = compact || selectedTab == ProcessesTab || selectedTab == DetailsTab || selectedTab == UsersTab;
   RECT rect{}; GetWindowRect(window, &rect);
-  if (compact) { normalRect = rect; SetMenu(window, nullptr); } else { compactRect = rect; SetMenu(window, menuBar); }
+  if (compact) normalRect = rect; else compactRect = rect;
   const RECT target = compact ? compactRect : normalRect;
   if (!IsZoomed(window)) {
     int width = target.right - target.left, height = target.bottom - target.top;
-    if (width <= 0 || height <= 0) { width = scale(compact ? 330 : 1010); height = scale(compact ? 360 : 875); }
+    if (width <= 0 || height <= 0) { width = scale(compact ? 330 : 1180); height = scale(compact ? 360 : 780); }
     SetWindowPos(window, nullptr, rect.left, rect.top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
   }
   columns(); rebuild(); layout();
 }
 void Application::setSummary(int value) {
   hotResource = -1;
-  summary = value; SetMenu(window, summary || compact ? nullptr : menuBar);
+  summary = value;
   LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
   if (summary) style &= ~LONG_PTR(WS_CAPTION); else style |= WS_CAPTION;
   SetWindowLongPtrW(window, GWL_STYLE, style); SetWindowPos(window, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
@@ -320,7 +253,7 @@ void Application::updateMenu(HMENU popup) {
   check(TopmostId, topmost); check(MinimizeOnUseId, minimizeOnUse); check(HideId, hideMinimized); check(GroupId, groupByType); check(FullNameId, fullName); check(AllHistoryId, allHistory);
   check(ReplaceDefaultId, replacementEnabled());
   CheckMenuRadioItem(popup, ThemeLightId, ThemeSystemId, UINT(ThemeLightId + theme), MF_BYCOMMAND);
-  check(SearchId, searchVisible); EnableMenuItem(popup, SearchId, MF_BYCOMMAND | ((compact || summary || selectedTab == PerformanceTab) ? MF_GRAYED : MF_ENABLED));
+  EnableMenuItem(popup, SearchId, MF_BYCOMMAND | ((compact || summary || selectedTab == PerformanceTab) ? MF_GRAYED : MF_ENABLED));
   EnableMenuItem(popup, ReplaceDefaultId, MF_BYCOMMAND | (actionBusy ? MF_GRAYED : MF_ENABLED));
   EnableMenuItem(popup, ExportId, MF_BYCOMMAND | (canExportTable() && !actionBusy ? MF_ENABLED : MF_GRAYED));
   const int speed = interval == 250 ? SpeedAdaptive : interval == 500 ? SpeedHigh : interval == 4000 ? SpeedLow : interval == 0 ? SpeedPause : SpeedNormal;
@@ -375,6 +308,7 @@ void Application::loadSettings() {
   auto read = [&](const wchar_t* section, const wchar_t* key, int fallback) { return persistent() ? int(GetPrivateProfileIntW(section, key, fallback, preferences.c_str())) : fallback; };
   defaultTab = std::clamp(read(L"Window", L"DefaultTab", 0), 0, TabCount - 1);
   theme = std::clamp(read(L"Window", L"Theme", 0), 0, 2);
+  navigationExpanded = read(L"Window", L"NavigationExpanded", 1) != 0;
   interval = read(L"Window", L"Interval", 250); if (interval != 0 && interval != 250 && interval != 500 && interval != 1000 && interval != 4000) interval = 250;
   topmost = read(L"Window", L"Topmost", 0); minimizeOnUse = read(L"Window", L"MinimizeOnUse", 1); hideMinimized = read(L"Window", L"Hide", 0); groupByType = read(L"Window", L"GroupByType", 1); compact = read(L"Window", L"Compact", 0);
   memoryPercent = read(L"Window", L"MemoryPercent", 0); networkPercent = read(L"Window", L"NetworkPercent", 0); logical = read(L"Window", L"Logical", 0); hideGraphs = read(L"Window", L"HideGraphs", 0); fullName = read(L"Window", L"FullName", 0); allHistory = read(L"Window", L"AllHistory", 1);
@@ -409,6 +343,7 @@ void Application::writeSettings() {
   if (!persistent()) return;
   auto write = [&](const std::wstring& section, const std::wstring& key, int value) { WritePrivateProfileStringW(section.c_str(), key.c_str(), std::to_wstring(value).c_str(), preferences.c_str()); };
   write(L"Window", L"Theme", theme);
+  write(L"Window", L"NavigationExpanded", navigationExpanded);
   write(L"Window", L"DefaultTab", defaultTab); write(L"Window", L"Interval", interval); write(L"Window", L"Topmost", topmost); write(L"Window", L"MinimizeOnUse", minimizeOnUse); write(L"Window", L"Hide", hideMinimized); write(L"Window", L"GroupByType", groupByType); write(L"Window", L"Compact", compact);
   write(L"Window", L"MemoryPercent", memoryPercent); write(L"Window", L"NetworkPercent", networkPercent); write(L"Window", L"Logical", logical); write(L"Window", L"HideGraphs", hideGraphs); write(L"Window", L"FullName", fullName); write(L"Window", L"AllHistory", allHistory);
   WINDOWPLACEMENT placement{sizeof(placement)};
@@ -768,8 +703,8 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
   switch (message) {
   case WM_CREATE: app->create(); return 0;
   case WM_SETTINGCHANGE: case WM_THEMECHANGED: app->indexedServices.clear(); app->indexedInventory.reset(); app->applyTheme(); return 0;
-  case WM_ERASEBKGND: { RECT bounds{}; GetClientRect(target, &bounds); FillRect(HDC(word), &bounds, app->backgroundBrush ? app->backgroundBrush : GetStockBrush(WHITE_BRUSH)); return 1; }
-  case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: { const HDC dc = HDC(word); SetTextColor(dc, app->themeColor(RGB(0, 0, 0))); SetBkColor(dc, app->themeColor(RGB(255, 255, 255))); return LRESULT(app->backgroundBrush); }
+  case WM_ERASEBKGND: return 1; // paintWindow fills the exposed shell; child windows own their backgrounds.
+  case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: { const HDC dc = HDC(word); const auto background = app->uiColor(message == WM_CTLCOLOREDIT ? UiColor::Surface : UiColor::Window); SetTextColor(dc, app->uiColor(UiColor::Text)); SetBkColor(dc, background); SetDCBrushColor(dc, background); return LRESULT(GetStockBrush(DC_BRUSH)); }
   case WM_APP + 11:
     if (app->persistent() && !GetPrivateProfileIntW(L"Window", L"ReplacementPrompted", 0, app->preferences.c_str())) {
       const bool enabled = replacementEnabled();
@@ -817,7 +752,10 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
       if (HIWORD(word) == EN_CHANGE && !app->searchQueued) { app->searchQueued = SetTimer(target, 5, 100, nullptr) != 0; if (!app->searchQueued) app->applySearch(); }
       return 0;
     }
-    app->command(LOWORD(word)); return 0;
+    if (LOWORD(word) >= NavigationId && LOWORD(word) < NavigationId + TabCount) { app->requestTab(LOWORD(word) - NavigationId); return 0; }
+    if (LOWORD(word) == NavigationToggleId) { app->navigationExpanded = !app->navigationExpanded; app->layout(); app->saveSettings(); return 0; }
+    if (LOWORD(word) == MenuId || LOWORD(word) == SettingsId) { app->showShellMenu(LOWORD(word) == MenuId ? app->menuButton : app->settingsButton, LOWORD(word) == SettingsId ? 1 : -1); return 0; }
+    app->command(LOWORD(word)); app->updateFooter(); return 0;
   case WM_INITMENUPOPUP: app->updateMenu(reinterpret_cast<HMENU>(word)); return 0;
   case WM_NOTIFY: {
     const auto notice = reinterpret_cast<NMHDR*>(data);
@@ -858,14 +796,13 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     return 0;
   case WM_APP + 12: {
     const int tab = app->pendingTab; app->pendingTab = -1; app->tabQueued = false;
-    SendMessageW(app->tabs, WM_SETREDRAW, TRUE, 0);
+    if (tab < 0 || tab >= TabCount) return 0;
 #ifdef TASKMGR_DIAGNOSTICS
     const auto begin = Clock::now();
 #endif
     if (!app->closing) app->selectTab(tab);
-    InvalidateRect(app->tabs, nullptr, FALSE);
 #ifdef TASKMGR_DIAGNOSTICS
-    if (app->hidden() && app->measured && !app->verifyingSorting) { UpdateWindow(app->tabs); UpdateWindow(app->selectedTab == PerformanceTab ? app->performance : app->list); app->tabTimes.push_back(milliseconds(begin)); ++app->tabCommits; }
+    if (app->hidden() && app->measured && !app->verifyingSorting) { UpdateWindow(target); UpdateWindow(app->navigation[size_t(app->selectedTab)]); UpdateWindow(app->selectedTab == PerformanceTab ? app->performance : app->list); app->tabTimes.push_back(milliseconds(begin)); ++app->tabCommits; }
 #endif
     return 0;
   }
@@ -874,7 +811,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     if (item->CtlType != ODT_MENU || item->itemData < 1 || item->itemData > 3) break;
     const wchar_t* labels[] = {L"File", L"Options", L"View"}; HDC dc = GetDC(target); auto previous = SelectObject(dc, app->font); SIZE size{};
     GetTextExtentPoint32W(dc, labels[item->itemData - 1], int(wcslen(labels[item->itemData - 1])), &size); SelectObject(dc, previous); ReleaseDC(target, dc);
-    item->itemWidth = UINT(size.cx + app->scale(12)); item->itemHeight = UINT(GetSystemMetricsForDpi(SM_CYMENU, app->dpi)); return TRUE;
+    item->itemWidth = UINT(std::max<LONG>(size.cx + app->scale(40), app->scale(160))); item->itemHeight = UINT(std::max(GetSystemMetricsForDpi(SM_CYMENU, app->dpi), app->scale(32))); return TRUE;
   }
   case WM_DRAWITEM: {
     const auto item = reinterpret_cast<DRAWITEMSTRUCT*>(data);
@@ -883,19 +820,12 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
       SetDCBrushColor(item->hDC, app->themeColor(selected ? RGB(205, 232, 255) : RGB(255, 255, 255))); FillRect(item->hDC, &item->rcItem, GetStockBrush(DC_BRUSH));
       SetBkMode(item->hDC, TRANSPARENT); SelectObject(item->hDC, app->font);
       SetTextColor(item->hDC, app->highContrast && selected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : app->themeColor(RGB(0, 0, 0)));
-      RECT text = item->rcItem; DrawTextW(item->hDC, labels[item->itemData - 1], -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE | ((item->itemState & ODS_NOACCEL) ? DT_HIDEPREFIX : 0)); return TRUE;
+      RECT text = item->rcItem; text.left += app->scale(12); text.right -= app->scale(24); DrawTextW(item->hDC, labels[item->itemData - 1], -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | ((item->itemState & ODS_NOACCEL) ? DT_HIDEPREFIX : 0)); return TRUE;
     }
     if (item->CtlType != ODT_BUTTON) break;
-    HDC dc = item->hDC; RECT bounds = item->rcItem; FillRect(dc, &bounds, app->backgroundBrush); SetBkMode(dc, TRANSPARENT);
+    if (item->CtlID == EndId || item->CtlID == RunId || item->CtlID == ExportId || item->CtlID == NavigationToggleId || item->CtlID == MenuId || item->CtlID == SettingsId) { app->paintShellButton(item->hwndItem, item->hDC, item->rcItem, item->itemState); return TRUE; }
+    HDC dc = item->hDC; RECT bounds = item->rcItem; SetDCBrushColor(dc, app->uiColor(item->CtlID == HistoryLinkId ? UiColor::Surface : UiColor::Window)); FillRect(dc, &bounds, GetStockBrush(DC_BRUSH)); SetBkMode(dc, TRANSPARENT);
     wchar_t text[128]{}; GetWindowTextW(item->hwndItem, text, 128); const bool hot = GetPropW(item->hwndItem, L"hot") != nullptr;
-    if (item->CtlID == EndId) {
-      SetDCBrushColor(dc, app->themeColor(hot ? RGB(205, 232, 255) : RGB(229, 243, 255))); FillRect(dc, &bounds, GetStockBrush(DC_BRUSH));
-      SetDCBrushColor(dc, app->themeColor(RGB(160, 160, 160))); FrameRect(dc, &bounds, GetStockBrush(DC_BRUSH));
-      SelectObject(dc, app->font); SetTextColor(dc, app->themeColor((item->itemState & ODS_DISABLED) ? RGB(109, 109, 109) : RGB(0, 0, 0)));
-      DrawTextW(dc, text, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-      if ((item->itemState & ODS_FOCUS) && !(item->itemState & ODS_NOFOCUSRECT)) { InflateRect(&bounds, -3, -3); DrawFocusRect(dc, &bounds); }
-      return TRUE;
-    }
     if (item->CtlID == FewerId) {
       const int size = app->scale(18), top = bounds.top + (bounds.bottom - bounds.top - size) / 2;
       {
@@ -910,6 +840,7 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     if ((item->itemState & ODS_FOCUS) && !(item->itemState & ODS_NOFOCUSRECT)) { RECT focus = item->rcItem; InflateRect(&focus, -1, -1); DrawFocusRect(dc, &focus); }
     return TRUE;
   }
+  case WM_SYSCOMMAND: if ((word & 0xfff0) == SC_KEYMENU && data != VK_SPACE && !app->compact && !app->summary) { app->showShellMenu(app->menuButton); return 0; } break;
   case WM_CONTEXTMENU: {
     POINT point{GET_X_LPARAM(data), GET_Y_LPARAM(data)};
     if (reinterpret_cast<HWND>(word) == app->header) { if (point.x == -1) GetCursorPos(&point); app->headerMenu(point); return 0; }

@@ -178,7 +178,7 @@ void Application::endSelected(bool tree) {
   asynchronous([targets] { std::wstring failures; for (const auto& process : targets) { try { processAction(process, Action::End); } catch (const std::exception& error) { if (failures.empty() || targets.size() == 1) failures = fromUtf8(error.what()); } } if (!failures.empty()) throw std::runtime_error(utf8(L"Unable to terminate process.\n\n" + failures)); return std::wstring{}; });
 }
 void Application::command(int id) {
-  if (tabQueued && pendingTab >= 0) { const int tab = pendingTab; pendingTab = -1; SendMessageW(tabs, WM_SETREDRAW, TRUE, 0); selectTab(tab); InvalidateRect(tabs, nullptr, FALSE); }
+  if (tabQueued && pendingTab >= 0) { const int tab = pendingTab; pendingTab = -1; selectTab(tab); }
   const auto row = selectedRow(); const auto process = selectedProcess();
   const auto entry = selectedEntry();
   if (id >= ColumnId && id < ColumnId + 64) {

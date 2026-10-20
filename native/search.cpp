@@ -6,10 +6,13 @@ static bool searchContains(const wchar_t* text, const SearchTerm& term) { return
 static bool searchContains(const std::wstring& text, const SearchTerm& term) { return searchContains(text.c_str(), term); }
 void Application::toggleSearch() {
   if (compact || summary || selectedTab == PerformanceTab) return;
-  if (searchVisible && GetFocus() == searchBox) {
-    SetWindowTextW(searchBox, L""); applySearch(); searchVisible = false; SetFocus(list);
-  } else { searchVisible = true; layout(); SetFocus(searchBox); SendMessageW(searchBox, EM_SETSEL, 0, -1); return; }
-  layout();
+  // Search remains part of every table page; Ctrl+F only moves focus.
+  if (!searchVisible) { searchVisible = true; layout(); }
+  SetFocus(searchBox); SendMessageW(searchBox, EM_SETSEL, 0, -1);
+}
+void Application::clearSearch() {
+  if (compact || summary || selectedTab == PerformanceTab) return;
+  SetWindowTextW(searchBox, L""); applySearch(); searchVisible = true; SetFocus(list);
 }
 void Application::applySearch() {
   KillTimer(window, 5);
@@ -113,9 +116,11 @@ LRESULT CALLBACK Application::searchProcedure(HWND target, UINT message, WPARAM 
   switch (message) {
   case WM_GETDLGCODE: {
     const auto input = reinterpret_cast<const MSG*>(data);
-    return DefSubclassProc(target, message, word, data) | (input && input->message == WM_KEYDOWN && input->wParam == VK_RETURN ? DLGC_WANTMESSAGE : 0);
+    return DefSubclassProc(target, message, word, data) | (input && input->message == WM_KEYDOWN && (input->wParam == VK_RETURN || input->wParam == VK_ESCAPE) ? DLGC_WANTMESSAGE : 0);
   }
+  case WM_SETFOCUS: case WM_KILLFOCUS: InvalidateRect(app->window, &app->searchBounds, FALSE); break;
   case WM_KEYDOWN:
+    if (word == VK_ESCAPE) { app->clearSearch(); return 0; }
     if (word == VK_RETURN) {
       if (!app->searchVisible || app->compact || app->summary || app->selectedTab == PerformanceTab) return 0;
       app->applySearch(); SetFocus(app->list);
@@ -125,7 +130,7 @@ LRESULT CALLBACK Application::searchProcedure(HWND target, UINT message, WPARAM 
       return 0;
     }
     break;
-  case WM_CHAR: if (word == VK_RETURN) return 0; break;
+  case WM_CHAR: if (word == VK_RETURN || word == VK_ESCAPE) return 0; break;
   case WM_NCDESTROY: RemoveWindowSubclass(target, searchProcedure, id); break;
   }
   return DefSubclassProc(target, message, word, data);
