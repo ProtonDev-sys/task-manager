@@ -126,7 +126,7 @@ void Application::layout() {
   if (summary) {
     for (const auto control : {list, end, fewer, link, historyLink, serviceStatus, searchBox, runButton, exportButton}) show(control, false);
     show(performance, true); place(performance, 0, 0, width, height);
-    if (previousFocus && IsChild(window, previousFocus) && !IsWindowVisible(previousFocus)) SetFocus(performance);
+    if (previousFocus && IsChild(window, previousFocus) && (!IsWindowVisible(previousFocus) || !IsWindowEnabled(previousFocus))) SetFocus(performance);
     InvalidateRect(performance, nullptr, FALSE); return;
   }
   updateFooter();
@@ -178,7 +178,7 @@ void Application::layout() {
     place(link, contentBounds.left + scale(8), footerY, scale(200), scale(28));
     if (selectedTab == ServicesTab) place(serviceStatus, contentBounds.left + scale(214), footerY, contentWidth - scale(222), scale(30));
   }
-  if (previousFocus && IsChild(window, previousFocus) && !IsWindowVisible(previousFocus)) SetFocus(perf ? performance : list);
+  if (previousFocus && IsChild(window, previousFocus) && (!IsWindowVisible(previousFocus) || !IsWindowEnabled(previousFocus))) SetFocus(perf ? performance : list);
   InvalidateRect(window, nullptr, FALSE);
   // Layout changes already invalidate moved child windows; live sampling does not enter this path.
 }

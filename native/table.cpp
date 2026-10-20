@@ -20,7 +20,7 @@ static std::wstring megabytes(double value) { return grouped(value / 1048576, 1)
 static std::wstring kilobytes(double value) { return grouped(std::floor(value / 1024), 0) + L" K"; }
 static std::wstring elapsedText(uint64_t seconds) { wchar_t text[32]{}; swprintf_s(text, L"%llu:%02llu:%02llu", seconds / 3600, seconds / 60 % 60, seconds % 60); return text; }
 std::span<const ColumnDef> Application::definitions(int tab) {
-  static const ColumnDef processes[] = {{L"Name", 280, false, true, false}, {L"Type", 130, false, false, false}, {L"Status", 96, false, true, false}, {L"Publisher", 160, false, false, false}, {L"PID", 64, true, false, false},
+  static const ColumnDef processes[] = {{L"Name", 380, false, true, false}, {L"Type", 130, false, false, false}, {L"Status", 96, false, true, false}, {L"Publisher", 160, false, false, false}, {L"PID", 64, true, false, false},
     {L"Process name", 130, false, false, false}, {L"Command line", 300, false, false, false}, {L"CPU", 72, true, true, true}, {L"Memory", 108, true, true, true}, {L"Disk", 84, true, true, true}, {L"Network", 90, true, true, true},
     {L"GPU", 72, true, true, true}, {L"GPU engine", 130, false, false, false}, {L"Power usage", 110, false, false, true}, {L"Power usage trend", 150, false, false, true}};
   static const ColumnDef performance[] = {{L"Name", 100, false, true, false}};

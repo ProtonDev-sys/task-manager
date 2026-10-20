@@ -70,7 +70,24 @@ int Application::run() {
   if (renderOffscreen) SetLayeredWindowAttributes(window, 0, 0, LWA_ALPHA);
   if (!window) return 1;
   if (renderOffscreen) { SetWindowPos(window, nullptr, x, y, MulDiv(width, int(GetDpiForWindow(window)), 96), MulDiv(height, int(GetDpiForWindow(window)), 96), SWP_NOZORDER | SWP_NOACTIVATE); ShowWindow(window, SW_SHOWNOACTIVATE); }
-  else if (!hidden()) { if (persistent() && x != CW_USEDEFAULT) { WINDOWPLACEMENT placement{sizeof(placement)}; placement.rcNormalPosition = normalRect; placement.showCmd = GetPrivateProfileIntW(L"Window", L"Maximized", 0, preferences.c_str()) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL; SetWindowPlacement(window, &placement); } else ShowWindow(window, SW_SHOW); }
+  else if (!hidden()) {
+    if (persistent() && x != CW_USEDEFAULT) { WINDOWPLACEMENT placement{sizeof(placement)}; placement.rcNormalPosition = normalRect; placement.showCmd = GetPrivateProfileIntW(L"Window", L"Maximized", 0, preferences.c_str()) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL; SetWindowPlacement(window, &placement); }
+    else {
+      // The fresh default is in DIPs; saved placements above are already physical pixels.
+      const int windowDpi = int(GetDpiForWindow(window));
+      width = MulDiv(width, windowDpi, 96); height = MulDiv(height, windowDpi, 96);
+      RECT bounds{}; GetWindowRect(window, &bounds); x = bounds.left; y = bounds.top;
+      MONITORINFO monitor{sizeof(monitor)};
+      if (GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        width = std::min(width, int(monitor.rcWork.right - monitor.rcWork.left));
+        height = std::min(height, int(monitor.rcWork.bottom - monitor.rcWork.top));
+        x = std::clamp(x, int(monitor.rcWork.left), int(monitor.rcWork.right) - width);
+        y = std::clamp(y, int(monitor.rcWork.top), int(monitor.rcWork.bottom) - height);
+      }
+      SetWindowPos(window, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+      ShowWindow(window, SW_SHOW);
+    }
+  }
   applyTheme();
   if (compact && !hidden()) setCompact(true);
 #ifdef TASKMGR_DIAGNOSTICS
@@ -137,7 +154,7 @@ void Application::create() {
   searchBox = control(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, SearchId);
   SetWindowSubclass(searchBox, searchProcedure, 4, reinterpret_cast<DWORD_PTR>(this));
   SendMessageW(searchBox, EM_SETLIMITTEXT, 256, 0);
-  SendMessageW(searchBox, EM_SETCUEBANNER, TRUE, LPARAM(L"Search by name, publisher or PID"));
+  SendMessageW(searchBox, EM_SETCUEBANNER, FALSE, LPARAM(L"")); // The subclass paints a theme-aware empty cue.
 #ifdef TASKMGR_DIAGNOSTICS
   icons = std::make_unique<Icons>(window, scale(16), hidden(), !options.demoData);
 #else

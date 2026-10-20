@@ -1,5 +1,4 @@
 #include "app.hpp"
-#include "report.hpp"
 
 namespace taskmgr {
 namespace {
@@ -100,22 +99,6 @@ Sample previewSample(unsigned frame) {
 }
 }
 void Application::prepareDemoScreenshots() {
-  // Record requested and mapped faces alongside synthetic captures so Windows
-  // font substitution can be checked without relying only on screenshot pixels.
-  if (const HDC dc = GetDC(window)) {
-    Report report{(std::filesystem::path(options.screenshots) / L"font-mapping.json").wstring()};
-    report << "{\"fonts\":["; bool separator = false;
-    for (const auto& [label, handle] : {std::pair{L"Body", font}, std::pair{L"Page heading", shellHeadingFont}}) {
-      LOGFONTW requested{}; GetObjectW(handle, int(sizeof(requested)), &requested);
-      const auto previous = SelectObject(dc, handle); wchar_t mapped[LF_FACESIZE]{}; GetTextFaceW(dc, int(std::size(mapped)), mapped);
-      if (separator) report << ','; separator = true;
-      report << "{\"label\":"; report.jsonString(utf8(label)) << ",\"requested\":"; report.jsonString(utf8(requested.lfFaceName));
-      report << ",\"mapped\":"; report.jsonString(utf8(mapped)) << ",\"weight\":" << requested.lfWeight << ",\"height\":" << requested.lfHeight;
-      report << ",\"validSelection\":" << (previous && previous != HGDI_ERROR ? "true" : "false") << '}';
-      if (previous && previous != HGDI_ERROR) SelectObject(dc, previous);
-    }
-    report << "]}"; ReleaseDC(window, dc);
-  }
   for (int second = -60; second <= 0; ++second) {
     current = std::make_shared<Sample>(previewSample(unsigned(second + 60)));
     recordHistories(double(second));

@@ -1107,6 +1107,12 @@ bool Application::verifyModernShell() {
   // the layout's own offsets or breakpoints.
   MINMAXINFO limits{}; SendMessageW(window, WM_GETMINMAXINFO, 0, LPARAM(&limits));
   const std::array<POINT, 2> sizes{limits.ptMinTrackSize, POINT{scale(1180), scale(820)}};
+  SetWindowPos(window, nullptr, originalWindow.left, originalWindow.top, sizes.back().x, sizes.back().y, SWP_NOZORDER | SWP_NOACTIVATE);
+  SetFocus(navigationToggle);
+  check(GetFocus() == navigationToggle && IsWindowEnabled(navigationToggle), "shell-wide-toggle-accepts-keyboard-focus");
+  SetWindowPos(window, nullptr, originalWindow.left, originalWindow.top, sizes.front().x, sizes.front().y, SWP_NOZORDER | SWP_NOACTIVATE);
+  check(!IsWindowEnabled(navigationToggle) && GetFocus() == list && IsWindowVisible(list) && IsWindowEnabled(list),
+    "shell-auto-collapse-moves-focus-from-disabled-toggle-to-content");
   for (const auto size : sizes) {
     SetWindowPos(window, nullptr, originalWindow.left, originalWindow.top, size.x, size.y, SWP_NOZORDER | SWP_NOACTIVATE);
     for (int tab = 0; tab < TabCount; ++tab) {
