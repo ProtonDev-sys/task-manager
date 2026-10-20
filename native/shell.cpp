@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include <initguid.h>
 #include <oleacc.h>
 #include <windowsx.h>
 
