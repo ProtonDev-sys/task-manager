@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "search_query.hpp"
+#include <windowsx.h>
 
 namespace taskmgr {
 static bool searchContains(const wchar_t* text, const SearchTerm& term) { return text && *text && !term.text.empty() && StrStrIW(text, term.text.c_str()) != nullptr; }
