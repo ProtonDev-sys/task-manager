@@ -85,7 +85,7 @@ void Application::createShell() {
   }
   IAccPropServices* properties = nullptr;
   if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&properties)))) {
-    properties->SetHwndPropStr(searchBox, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Search tasks by name, publisher or PID");
+    properties->SetHwndPropStr(searchBox, DWORD(OBJID_CLIENT), CHILDID_SELF, PROPID_ACC_NAME, L"Search tasks by name, publisher or PID");
     properties->Release();
   }
   syncNavigation();
@@ -261,7 +261,7 @@ void Application::paintShellButton(HWND target, HDC dc, RECT bounds, UINT state)
     rounded(dc, marker, uiColor(UiColor::Accent), uiColor(UiColor::Accent), scale(3));
   }
   const bool label = nav || id == SettingsId ? navigationLabels : id != MenuId && id != NavigationToggleId;
-  const int iconSize = std::clamp(face.bottom - face.top - scale(4), scale(12), scale(20));
+  const int iconSize = std::clamp(int(face.bottom - face.top) - scale(4), scale(12), scale(20));
   const int iconLeft = label ? face.left + scale(12) : (face.left + face.right - iconSize) / 2;
   const int iconTop = (face.top + face.bottom - iconSize) / 2;
   const bool textOnly = compact && id == EndId;

@@ -91,7 +91,7 @@ Sample previewSample(unsigned frame) {
   auto startup = std::make_shared<StartupInventory>();
   for (const auto* name : {L"Cloud Drive", L"Music", L"Example updater"}) {
     Entry entry; entry.key = name; entry.enabled = entry.startupEditable = true;
-    entry.cells = {name, L"Example Software", L"Enabled", L"Not measured", L"Registry", L"", L"Demo user", L"Demo startup entry"};
+    entry.cells = {name, L"Example Software", L"Enabled", L"Not measured", L"Registry", L"", L"", L"Demo user", L"Demo startup entry"};
     startup->entries.push_back(std::move(entry));
   }
   sample.startup = startup;
