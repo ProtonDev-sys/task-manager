@@ -1179,6 +1179,22 @@ bool Application::verifyModernShell() {
   for (const UINT id : {RunId, ExportId, ExitId, TopmostId, ReplaceDefaultId, ThemeLightId, ThemeDarkId, ThemeSystemId, RefreshId, SearchId, GroupId}) {
     check(commands.contains(id), "shell-overflow-preserves-existing-command-" + std::to_string(id));
   }
+  // Owner-drawn root items need explicit mnemonics. Send the notification
+  // directly so these checks do not open menus or execute their commands.
+  const wchar_t* mnemonics[] = {L"fF", L"oO", L"vV"};
+  for (int index = 0; index < 3; ++index) for (const wchar_t key : std::wstring_view(mnemonics[index])) {
+    const auto result = SendMessageW(window, WM_MENUCHAR, MAKEWPARAM(key, MF_POPUP), LPARAM(menuBar));
+    check(LOWORD(result) == index && HIWORD(result) == MNC_EXECUTE,
+      "shell-overflow-mnemonic-" + std::to_string(unsigned(key)));
+  }
+  const WPARAM unmatched = MAKEWPARAM(L'?', MF_POPUP);
+  check(SendMessageW(window, WM_MENUCHAR, unmatched, LPARAM(menuBar)) == DefWindowProcW(window, WM_MENUCHAR, unmatched, LPARAM(menuBar)),
+    "shell-overflow-unmatched-mnemonic-keeps-native-fallback");
+  for (const HMENU child : {GetSubMenu(menuBar, 0), GetSubMenu(menuBar, 1), GetSubMenu(menuBar, 2)}) {
+    const WPARAM mnemonic = MAKEWPARAM(L'F', MF_POPUP);
+    check(SendMessageW(window, WM_MENUCHAR, mnemonic, LPARAM(child)) == DefWindowProcW(window, WM_MENUCHAR, mnemonic, LPARAM(child)),
+      "shell-overflow-mnemonics-do-not-intercept-other-menus");
+  }
   check(current == snapshot, "shell-interactions-preserve-complete-snapshot");
 
   commitNavigation(); setSummary(0); if (compact) setCompact(false);

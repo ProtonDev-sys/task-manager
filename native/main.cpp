@@ -773,6 +773,13 @@ LRESULT CALLBACK Application::procedure(HWND target, UINT message, WPARAM word, 
     if (LOWORD(word) == NavigationToggleId) { app->navigationExpanded = !app->navigationExpanded; app->layout(); app->saveSettings(); return 0; }
     if (LOWORD(word) == MenuId || LOWORD(word) == SettingsId) { app->showShellMenu(LOWORD(word) == MenuId ? app->menuButton : app->settingsButton, LOWORD(word) == SettingsId ? 1 : -1); return 0; }
     app->command(LOWORD(word)); app->updateFooter(); return 0;
+  case WM_MENUCHAR:
+    if (app->menuBar && reinterpret_cast<HMENU>(data) == app->menuBar) {
+      const auto mnemonic = towlower(wchar_t(LOWORD(word)));
+      const int index = mnemonic == L'f' ? 0 : mnemonic == L'o' ? 1 : mnemonic == L'v' ? 2 : -1;
+      if (index >= 0) return MAKELRESULT(index, MNC_EXECUTE);
+    }
+    break;
   case WM_INITMENUPOPUP: app->updateMenu(reinterpret_cast<HMENU>(word)); return 0;
   case WM_NOTIFY: {
     const auto notice = reinterpret_cast<NMHDR*>(data);
