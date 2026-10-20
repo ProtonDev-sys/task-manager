@@ -4,6 +4,8 @@ A native Windows task manager with Windows 11-inspired navigation, live hardware
 
 See the [v1.3.0 release notes](docs/releases/v1.3.0.md) for scoped search, CSV export, sampling recovery, reliability fixes and the Python development tools.
 
+See the [native interface redesign](docs/NATIVE-REDESIGN.md) for the new layout, implementation decisions, synthetic previews and performance methodology.
+
 ## Install
 
 Requires **64-bit Windows 10 or Windows 11** and administrator approval. ARM64 and 32-bit builds are not provided. Windows 11-specific features have not all been verified on Windows 11.
