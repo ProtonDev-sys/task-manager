@@ -12,14 +12,14 @@ import xml.etree.ElementTree as ET
 
 DIAGNOSTIC_COMMANDS = (
     "--self-test", "--test-child", "--component-benchmark", "--benchmark",
-    "--ui-benchmark", "--startup-inventory", "--screenshots", "--network-smoke",
+    "--ui-benchmark", "--startup-inventory", "--screenshots", "--demo-data", "--network-smoke",
 )
 DIAGNOSTIC_MARKERS = (
     "startup_fixture_created", "cachedSort", "keyboardPassed", "tabSpamPassed",
     "columnResize", "scrollbar-rebuild-no-intermediate-paints",
     "scrollbar-rebuild-explicit-capture", "caption-immediate-theme-pixels",
     "--tab-spam", "--self-test", "--component-benchmark", "--ui-benchmark",
-    "--screenshots", "--network-smoke", "TaskManagerNativeTests",
+    "--screenshots", "--demo-data", "--network-smoke", "TaskManagerNativeTests",
 )
 
 

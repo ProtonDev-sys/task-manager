@@ -1,15 +1,19 @@
 #include "app.hpp"
 #include "search_query.hpp"
+#include <windowsx.h>
 
 namespace taskmgr {
 static bool searchContains(const wchar_t* text, const SearchTerm& term) { return text && *text && !term.text.empty() && StrStrIW(text, term.text.c_str()) != nullptr; }
 static bool searchContains(const std::wstring& text, const SearchTerm& term) { return searchContains(text.c_str(), term); }
 void Application::toggleSearch() {
   if (compact || summary || selectedTab == PerformanceTab) return;
-  if (searchVisible && GetFocus() == searchBox) {
-    SetWindowTextW(searchBox, L""); applySearch(); searchVisible = false; SetFocus(list);
-  } else { searchVisible = true; layout(); SetFocus(searchBox); SendMessageW(searchBox, EM_SETSEL, 0, -1); return; }
-  layout();
+  // Search remains part of every table page; Ctrl+F only moves focus.
+  if (!searchVisible) { searchVisible = true; layout(); }
+  SetFocus(searchBox); SendMessageW(searchBox, EM_SETSEL, 0, -1);
+}
+void Application::clearSearch() {
+  if (compact || summary || selectedTab == PerformanceTab) return;
+  SetWindowTextW(searchBox, L""); applySearch(); searchVisible = true; SetFocus(list);
 }
 void Application::applySearch() {
   KillTimer(window, 5);
@@ -111,11 +115,41 @@ std::vector<Row> Application::filteredRows(const std::vector<Row>& source) const
 LRESULT CALLBACK Application::searchProcedure(HWND target, UINT message, WPARAM word, LPARAM data, UINT_PTR id, DWORD_PTR context) {
   auto app = reinterpret_cast<Application*>(context);
   switch (message) {
+  case WM_PRINT:
+    if (!(data & PRF_CLIENT)) break;
+    [[fallthrough]];
+  case WM_PAINT: case WM_PRINTCLIENT: {
+    const auto result = DefSubclassProc(target, message, word, data);
+    if (GetWindowTextLengthW(target)) return result;
+    // Keep the native editor and caret, but give its empty cue the same
+    // readable theme color in normal painting and offscreen captures.
+    const bool ownDC = message == WM_PAINT && !word;
+    const HDC dc = ownDC ? GetDC(target) : HDC(word);
+    if (!dc) return result;
+    const bool caretHidden = ownDC && GetFocus() == target && HideCaret(target);
+    const int saved = SaveDC(dc);
+    if (saved) {
+      RECT bounds{}; SendMessageW(target, EM_GETRECT, 0, LPARAM(&bounds));
+      SetDCBrushColor(dc, app->uiColor(UiColor::Surface)); FillRect(dc, &bounds, GetStockBrush(DC_BRUSH));
+      SelectObject(dc, app->font); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, app->uiColor(UiColor::MutedText));
+      DrawTextW(dc, L"Search by name, publisher or PID", -1, &bounds, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+      RestoreDC(dc, saved);
+    }
+    if (caretHidden) ShowCaret(target);
+    if (ownDC) ReleaseDC(target, dc);
+    return result;
+  }
   case WM_GETDLGCODE: {
     const auto input = reinterpret_cast<const MSG*>(data);
-    return DefSubclassProc(target, message, word, data) | (input && input->message == WM_KEYDOWN && input->wParam == VK_RETURN ? DLGC_WANTMESSAGE : 0);
+    return DefSubclassProc(target, message, word, data) | (input && input->message == WM_KEYDOWN && (input->wParam == VK_RETURN || input->wParam == VK_ESCAPE) ? DLGC_WANTMESSAGE : 0);
+  }
+  case WM_SETFOCUS: case WM_KILLFOCUS: {
+    const auto result = DefSubclassProc(target, message, word, data);
+    InvalidateRect(app->window, &app->searchBounds, FALSE); InvalidateRect(target, nullptr, FALSE);
+    return result;
   }
   case WM_KEYDOWN:
+    if (word == VK_ESCAPE) { app->clearSearch(); return 0; }
     if (word == VK_RETURN) {
       if (!app->searchVisible || app->compact || app->summary || app->selectedTab == PerformanceTab) return 0;
       app->applySearch(); SetFocus(app->list);
@@ -125,8 +159,18 @@ LRESULT CALLBACK Application::searchProcedure(HWND target, UINT message, WPARAM 
       return 0;
     }
     break;
-  case WM_CHAR: if (word == VK_RETURN) return 0; break;
+  case WM_CHAR: if (word == VK_RETURN || word == VK_ESCAPE) return 0; break;
   case WM_NCDESTROY: RemoveWindowSubclass(target, searchProcedure, id); break;
+  }
+  const bool editsText = message == WM_SETTEXT || message == WM_CHAR || message == WM_KEYDOWN || message == WM_CUT ||
+    message == WM_CLEAR || message == WM_PASTE || message == WM_UNDO || message == EM_UNDO || message == EM_REPLACESEL || message == WM_IME_COMPOSITION;
+  if (editsText) {
+    const bool wasEmpty = GetWindowTextLengthW(target) == 0;
+    const auto result = DefSubclassProc(target, message, word, data);
+    // Native edits may paint synchronously. Refresh the entire small field
+    // when a cue appears or disappears so no placeholder fragments remain.
+    if (wasEmpty || !GetWindowTextLengthW(target)) InvalidateRect(target, nullptr, FALSE);
+    return result;
   }
   return DefSubclassProc(target, message, word, data);
 }

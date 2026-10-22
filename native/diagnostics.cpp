@@ -465,7 +465,7 @@ int diagnostics(const std::vector<std::wstring>& arguments) {
   if (flag(arguments, L"--startup-inventory")) return startupReport(output);
   if (flag(arguments, L"--component-benchmark")) return components(output);
   if (flag(arguments, L"--ui-benchmark")) { RunOptions options; options.hidden = true; options.theme = flag(arguments, L"--dark") ? 1 : 0; options.benchmarkSeconds = std::clamp(std::stoi(option(arguments, L"--seconds", L"15")), 5, 600); options.output = output; options.interval = std::clamp(std::stoi(option(arguments, L"--interval", L"1000")), 0, 4000); options.tab = std::clamp(std::stoi(option(arguments, L"--tab", L"-1")), -1, 6); options.minimized = flag(arguments, L"--minimized"); options.idle = flag(arguments, L"--idle"); options.sortSpam = flag(arguments, L"--sort-spam"); options.tabSpam = flag(arguments, L"--tab-spam"); options.warmup = std::clamp(std::stoi(option(arguments, L"--warmup", L"2")), 0, 60); return runApplication(options); }
-  if (flag(arguments, L"--screenshots")) { RunOptions options; options.theme = flag(arguments, L"--dark") ? 1 : 0; options.screenshots = option(arguments, L"--screenshots", L"screenshots"); std::error_code error; std::filesystem::create_directories(options.screenshots, error); return runApplication(options); }
+  if (flag(arguments, L"--screenshots")) { RunOptions options; options.theme = flag(arguments, L"--dark") ? 1 : 0; options.screenshots = option(arguments, L"--screenshots", L"screenshots"); options.demoData = flag(arguments, L"--demo-data"); std::error_code error; std::filesystem::create_directories(options.screenshots, error); return runApplication(options); }
   if (flag(arguments, L"--benchmark")) return samplerBenchmark(arguments, output);
   return 2;
 }

@@ -344,7 +344,7 @@ int configureReplacement(bool enabled);
 #ifdef TASKMGR_DIAGNOSTICS
 constexpr UINT ProbeMessage = WM_APP + 5;
 int diagnostics(const std::vector<std::wstring>& arguments);
-struct RunOptions { bool hidden = false; int benchmarkSeconds = 0; std::wstring output; int interval = -1, tab = -1, theme = -1; bool minimized = false, idle = false, sortSpam = false, tabSpam = false; int warmup = 0; std::wstring screenshots; };
+struct RunOptions { bool hidden = false; int benchmarkSeconds = 0; std::wstring output; int interval = -1, tab = -1, theme = -1; bool minimized = false, idle = false, sortSpam = false, tabSpam = false; int warmup = 0; std::wstring screenshots; bool demoData = false; };
 int runApplication(const RunOptions& options = {});
 #else
 int runApplication();
