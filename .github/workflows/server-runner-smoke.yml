@@ -12,7 +12,10 @@ permissions:
 jobs:
   windows:
     name: Windows compiler and runtime validation
-    runs-on: [self-hosted, Windows, X64, desktop-3flaofg]
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && (vars.CI_SERVER_LINUX == 'true' && !contains(matrix.os, 'arm') && startsWith(matrix.os, 'ubuntu-26.') && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-26.04"]') || vars.CI_SERVER_LINUX == 'true' && !contains(matrix.os, 'arm') && (startsWith(matrix.os, 'ubuntu-') || contains(matrix.os, 'ubuntu-')) && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-24.04"]') || vars.CI_SERVER_WINDOWS == 'true' && contains(matrix.os, 'windows-') && !contains(matrix.os, 'arm') && !contains(matrix.os, 'vs2026') && fromJSON('["self-hosted","Windows","X64","desktop-3flaofg"]')) || matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest]
     timeout-minutes: 15
     defaults:
       run:
@@ -80,8 +83,11 @@ jobs:
 
   linux:
     name: Linux container and compiler validation
-    if: github.repository == 'ProtonDev-sys/t3code-private'
-    runs-on: [self-hosted, Linux, X64, ubuntu-24.04, desktop-3flaofg]
+    if: github.repository == 'ProtonDev-sys/task-manager'
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && (vars.CI_SERVER_LINUX == 'true' && !contains(matrix.os, 'arm') && startsWith(matrix.os, 'ubuntu-26.') && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-26.04"]') || vars.CI_SERVER_LINUX == 'true' && !contains(matrix.os, 'arm') && (startsWith(matrix.os, 'ubuntu-') || contains(matrix.os, 'ubuntu-')) && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-24.04"]') || vars.CI_SERVER_WINDOWS == 'true' && contains(matrix.os, 'windows-') && !contains(matrix.os, 'arm') && !contains(matrix.os, 'vs2026') && fromJSON('["self-hosted","Windows","X64","desktop-3flaofg"]')) || matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
     timeout-minutes: 15
     services:
       redis:
