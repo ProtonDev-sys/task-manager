@@ -1,0 +1,136 @@
+name: Server Runner Validation
+
+on:
+  push:
+    branches: [ci/server-runner-setup-20261022]
+    paths: [.github/workflows/server-runner-smoke.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows compiler and runtime validation
+    runs-on: [self-hosted, Windows, X64, desktop-3flaofg]
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Verify server and non-administrator account
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          if ($env:COMPUTERNAME -ne 'DESKTOP-3FLAOFG') { throw 'Unexpected server' }
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Runner must not be an administrator' }
+          Write-Output "Account: $($identity.Name)"
+          Write-Output "Profile: $env:USERPROFILE"
+          Write-Output "Workspace: $env:GITHUB_WORKSPACE"
+          if (-not $env:GITHUB_WORKSPACE.StartsWith('E:\GitHubActions\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Workspace must use E:' }
+          if ('${{ github.repository }}' -eq 'ProtonDev-sys/task-manager' -and -not $identity.User.Value.StartsWith('S-1-5-80-')) { throw 'Public runner must use its dedicated service identity' }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+
+      - name: Compile and execute a native Windows program
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:RUNNER_TEMP 'native-smoke-source'
+          $build = Join-Path $env:RUNNER_TEMP 'native-smoke-build'
+          New-Item -ItemType Directory -Path $source -Force | Out-Null
+          @'
+          cmake_minimum_required(VERSION 3.20)
+          project(ci_smoke LANGUAGES CXX)
+          add_executable(ci_smoke main.cpp)
+          '@ | Set-Content (Join-Path $source 'CMakeLists.txt')
+          @'
+          #include <windows.h>
+          int main() { return GetCurrentProcessId() == 0; }
+          '@ | Set-Content (Join-Path $source 'main.cpp')
+          cmake -S $source -B $build -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC configuration failed' }
+          cmake --build $build --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC build failed' }
+          & (Join-Path $build 'Release\ci_smoke.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'Native program failed' }
+          clang-cl --version
+          python --version
+          node --version
+
+      - name: Verify Rust compiler and linker
+        if: github.repository == 'ProtonDev-sys/t3code-private'
+        run: |
+          $file = Join-Path $env:RUNNER_TEMP 'rust-smoke.rs'
+          $binary = Join-Path $env:RUNNER_TEMP 'rust-smoke.exe'
+          'fn main() { println!("Rust runner ready"); }' | Set-Content $file
+          rustc $file -o $binary
+          if ($LASTEXITCODE -ne 0) { throw 'Rust compilation failed' }
+          & $binary
+          if ($LASTEXITCODE -ne 0) { throw 'Rust program failed' }
+
+  linux:
+    name: Linux container and compiler validation
+    if: github.repository == 'ProtonDev-sys/t3code-private'
+    runs-on: [self-hosted, Linux, X64, ubuntu-24.04, desktop-3flaofg]
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: [6379/tcp]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: |
+            /package.json
+            /.github/
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+
+      - name: Verify isolated Linux environment and toolchain
+        run: |
+          set -euo pipefail
+          test "$(id -un)" = runner
+          test ! -e /mnt/c/Users
+          uname -a
+          node --version
+          python3 --version
+          cargo --version
+          cmake --version
+          java --version
+          docker version
+          printf 'int main(){return 0;}\n' > "$RUNNER_TEMP/native-smoke.c"
+          cc "$RUNNER_TEMP/native-smoke.c" -o "$RUNNER_TEMP/native-smoke"
+          "$RUNNER_TEMP/native-smoke"
+          printf 'fn main(){println!("Linux Rust runner ready");}\n' > "$RUNNER_TEMP/rust-smoke.rs"
+          rustc "$RUNNER_TEMP/rust-smoke.rs" -o "$RUNNER_TEMP/rust-smoke"
+          "$RUNNER_TEMP/rust-smoke"
+
+      - name: Verify workflow service-container networking
+        env:
+          REDIS_PORT: ${{ job.services.redis.ports['6379'] }}
+        run: |
+          python3 - <<'PY'
+          import os, socket
+          with socket.create_connection(('127.0.0.1', int(os.environ['REDIS_PORT'])), timeout=15) as connection:
+              connection.sendall(b'*1\r\n$4\r\nPING\r\n')
+              assert connection.recv(128).startswith(b'+PONG')
+          print('Redis service-container networking works')
+          PY
