@@ -20,7 +20,7 @@ concurrency:
 jobs:
   study:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'performance-study')
-    runs-on: windows-latest
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && vars.CI_SERVER_WINDOWS == 'true' && fromJSON('["self-hosted","Windows","X64","desktop-3flaofg"]') || 'windows-latest' }}
     timeout-minutes: 30
     env:
       TASKMGR_BASELINE_SHA: ${{ inputs.baseline_sha || '062797ecd367c638b56d25ca061d287a3d8d5354' }}

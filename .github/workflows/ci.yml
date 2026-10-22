@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && (vars.CI_SERVER_LINUX == 'true' && !contains(matrix.os, 'arm') && startsWith(matrix.os, 'ubuntu-26.') && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-26.04"]') || vars.CI_SERVER_LINUX == 'true' && !contains(matrix.os, 'arm') && (startsWith(matrix.os, 'ubuntu-') || contains(matrix.os, 'ubuntu-')) && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-24.04"]') || vars.CI_SERVER_WINDOWS == 'true' && contains(matrix.os, 'windows-') && !contains(matrix.os, 'arm') && !contains(matrix.os, 'vs2026') && fromJSON('["self-hosted","Windows","X64","desktop-3flaofg"]')) || matrix.os }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -33,7 +33,7 @@ jobs:
         run: python -m unittest discover -s .github/scripts -p 'test_*.py' -v
   verify:
     needs: tooling
-    runs-on: windows-latest
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && vars.CI_SERVER_WINDOWS == 'true' && fromJSON('["self-hosted","Windows","X64","desktop-3flaofg"]') || 'windows-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -62,7 +62,7 @@ jobs:
   release:
     needs: verify
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && vars.CI_SERVER_LINUX == 'true' && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-24.04"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     concurrency:
       group: task-manager-release
