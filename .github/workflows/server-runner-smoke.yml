@@ -45,6 +45,17 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Verify preinstalled MSVC Spectre libraries
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -products * -latest -requires Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre -property installationPath
+          if (-not $installation) { throw 'Preinstalled Spectre component is missing' }
+          $libraries = @(Get-Item "$installation\VC\Tools\MSVC\*\lib\spectre\x64\libcmt.lib")
+          if ($libraries.Count -eq 0) { throw 'Spectre x64 libraries are missing' }
+          $stream = [IO.File]::OpenRead($libraries[0].FullName)
+          $stream.Dispose()
+          Write-Output 'Spectre libraries are readable by the runner service account'
+
       - name: Compile and execute a native Windows program
         run: |
           $ErrorActionPreference = 'Stop'
